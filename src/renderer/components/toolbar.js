@@ -1,0 +1,118 @@
+// Top toolbar: navigation, address bar, mode toggles, recording, replay,
+// screenshot, AI, settings. It renders once and exposes an update() to reflect
+// state (active mode, recording, nav availability). All actions are delegated
+// back to the controller via the `actions` callback bag.
+import { h, icon, clear } from '../lib/dom.js';
+
+export function createToolbar(actions) {
+  const suggestions = h('datalist', { id: 'caos-address-suggestions' });
+  const addressInput = h('input', {
+    type: 'text',
+    spellcheck: 'false',
+    list: 'caos-address-suggestions',
+    placeholder: 'Search or enter address — URL, domain, /abs/path, or text',
+    on: {
+      keydown: (e) => {
+        if (e.key === 'Enter') actions.navigate(addressInput.value.trim());
+      },
+      focus: () => addressInput.select(),
+    },
+  });
+
+  const lock = h('span', { class: 'lock', html: icon('file', 14) });
+  const bookmarkBtn = h('button', { class: 'star-btn', title: 'Bookmark this page', text: '☆', on: { click: actions.toggleBookmark } });
+
+  const btn = (cfg) =>
+    h('button', {
+      class: `icon-btn ${cfg.class || ''} ${cfg.label ? 'has-label' : ''}`.trim(),
+      title: cfg.title || cfg.label || '',
+      html: cfg.icon ? icon(cfg.icon, cfg.size || 16) + (cfg.label ? `<span>${cfg.label}</span>` : '') : `<span>${cfg.label}</span>`,
+      on: { click: cfg.onClick },
+    });
+
+  const backBtn = btn({ icon: 'back', title: 'Back', onClick: actions.back });
+  const fwdBtn = btn({ icon: 'forward', title: 'Forward', onClick: actions.forward });
+  const reloadBtn = btn({ icon: 'reload', title: 'Reload', onClick: actions.reload });
+
+  const inspectBtn = btn({ icon: 'inspect', label: 'Inspect', title: 'Inspect element (capture by clicking)', onClick: () => actions.toggleMode('inspect') });
+  const drawBtn = btn({ icon: 'draw', label: 'Draw', title: 'Draw a region to annotate', onClick: () => actions.toggleMode('draw') });
+  const assertBtn = btn({ icon: 'check', label: 'Assert', title: 'Add an assertion to the recording (click an element)', onClick: () => actions.toggleMode('assert') });
+
+  const recBtn = btn({ icon: 'record', class: 'rec', label: 'Record', title: 'Record a user journey', onClick: actions.toggleRecord });
+  const replayBtn = btn({ icon: 'replay', label: 'Replay', title: 'Replay the selected recording', onClick: actions.replay });
+
+  const shotBtn = btn({ icon: 'camera', title: 'Capture screenshot', onClick: actions.screenshot });
+  const aiBtn = btn({ icon: 'ai', label: 'AI', title: 'Open the AI tab', onClick: actions.openAi });
+  const settingsBtn = btn({ icon: 'settings', title: 'Settings', onClick: actions.openSettings });
+
+  const openFileBtn = btn({ icon: 'file', label: 'File', title: 'Open a local file', onClick: actions.openFile });
+  const openFolderBtn = btn({ icon: 'folder', label: 'Folder', title: 'Open a local folder', onClick: actions.openFolder });
+
+  const root = h('header', { class: 'toolbar' }, [
+    h('div', { class: 'tb-group' }, [backBtn, fwdBtn, reloadBtn]),
+    h('div', { class: 'address' }, [lock, addressInput, bookmarkBtn, suggestions]),
+    h('div', { class: 'tb-group' }, [openFileBtn, openFolderBtn]),
+    h('div', { class: 'tb-sep' }),
+    h('div', { class: 'tb-group' }, [inspectBtn, drawBtn]),
+    h('div', { class: 'tb-sep' }),
+    h('div', { class: 'tb-group' }, [recBtn, replayBtn, assertBtn]),
+    h('div', { class: 'tb-sep' }),
+    h('div', { class: 'tb-group' }, [shotBtn, aiBtn, settingsBtn]),
+  ]);
+
+  function update(state) {
+    const { mode, recording, currentUrl, canGoBack, canGoForward, hasRecording, replaying, bookmarked } = state;
+    bookmarkBtn.textContent = bookmarked ? '★' : '☆';
+    bookmarkBtn.classList.toggle('on', !!bookmarked);
+    inspectBtn.classList.toggle('active', mode === 'inspect');
+    drawBtn.classList.toggle('active', mode === 'draw');
+    assertBtn.classList.toggle('active', mode === 'assert');
+    assertBtn.classList.toggle('hot', mode === 'assert' && !!recording);
+    recBtn.classList.toggle('active', !!recording);
+    recBtn.querySelector('span').textContent = recording ? 'Stop' : 'Record';
+    recBtn.querySelector('svg').outerHTML = icon(recording ? 'stop' : 'record', 16);
+    backBtn.disabled = !canGoBack;
+    fwdBtn.disabled = !canGoForward;
+    replayBtn.disabled = !hasRecording || replaying || !!recording;
+    recBtn.disabled = replaying;
+    if (document.activeElement !== addressInput && currentUrl != null) {
+      addressInput.value = prettyUrl(currentUrl);
+    }
+  }
+
+  function setAddress(url) {
+    if (document.activeElement !== addressInput) addressInput.value = prettyUrl(url || '');
+  }
+
+  // Populate the address-bar autocomplete from history + bookmarks.
+  function setSuggestions(items) {
+    clear(suggestions);
+    const seen = new Set();
+    for (const it of items || []) {
+      if (!it || !it.url || seen.has(it.url)) continue;
+      seen.add(it.url);
+      const opt = document.createElement('option');
+      opt.value = it.url;
+      if (it.title) opt.label = it.title;
+      suggestions.appendChild(opt);
+      if (seen.size >= 40) break;
+    }
+  }
+
+  return { root, update, setAddress, setSuggestions };
+}
+
+// Show file:// paths and welcome page more cleanly in the address bar.
+function prettyUrl(url) {
+  if (!url) return '';
+  if (url.startsWith('file://')) {
+    try {
+      const p = decodeURIComponent(new URL(url).pathname);
+      if (/welcome\.html$/.test(p)) return '';
+      return p;
+    } catch (_e) {
+      return url;
+    }
+  }
+  return url;
+}

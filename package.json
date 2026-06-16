@@ -1,0 +1,29 @@
+{
+  "name": "chrome-ai-os",
+  "version": "0.2.0",
+  "private": true,
+  "description": "An annotation-first inspector browser for agentic UI testing — open any web project, click any element, leave notes, record journeys, and export to Markdown / AI prompts.",
+  "main": "src/main/main.js",
+  "author": "Chrome AI OS",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "e2e": "CAOS_E2E=1 electron .",
+    "dist": "electron-builder",
+    "dist:dir": "electron-builder --dir"
+  },
+  "build": {
+    "appId": "com.chromeaios.app",
+    "productName": "Chrome AI OS",
+    "files": ["src/**/*", "package.json"],
+    "directories": { "output": "dist" },
+    "mac": { "category": "public.app-category.developer-tools", "target": ["dmg", "zip"] },
+    "win": { "target": ["nsis"] },
+    "linux": { "target": ["AppImage"] }
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  }
+}

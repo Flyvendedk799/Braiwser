@@ -1,0 +1,274 @@
+// End-to-end self-test harness. Loaded only when CAOS_E2E=1.
+// Drives the REAL app: navigates the webview to a fixture, exercises inspect /
+// annotate / persist / restore / record / replay / dom-tree / export / AI, and
+// reports pass/fail per check. Run with: CAOS_E2E=1 npx electron .
+// Results print as a single `CAOS_E2E_REPORT {json}` line from the main process.
+
+import { compositeAnnotations } from './screenshots.js';
+
+const checks = [];
+function check(name, pass, detail) {
+  checks.push({ name, pass: !!pass, detail: detail || '' });
+  // eslint-disable-next-line no-console
+  console.log(`[e2e] ${pass ? 'PASS' : 'FAIL'} — ${name}${detail ? ' :: ' + detail : ''}`);
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+export async function run(I) {
+  const { caos } = I;
+  const wv = I.getWv();
+  try {
+    const fixtureUrl = I.state.config.welcomeUrl.replace('welcome.html', '__e2e/fixture.html');
+
+    // Helper: wait for the webview's next dom-ready.
+    const waitDomReady = () => new Promise((res) => {
+      const h = () => { wv.removeEventListener('dom-ready', h); res(); };
+      wv.addEventListener('dom-ready', h);
+    });
+    // Helper: run JS in the guest main world.
+    const guest = (code) => wv.executeJavaScript(code, true);
+    // Helpers: TRUSTED input (real mouse/keys) so isolated-world listeners fire
+    // and values update natively — faithful to a real user.
+    const clickAt = async (x, y) => {
+      wv.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
+      wv.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
+      await sleep(50);
+    };
+    const clickSel = async (sel, nth = 0) => {
+      const rect = await guest(`(() => { const els = document.querySelectorAll(${JSON.stringify(sel)}); const el = els[${nth}]; if (!el) return null; const r = el.getBoundingClientRect(); return { x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) }; })()`);
+      if (!rect) return false;
+      await clickAt(rect.x, rect.y);
+      return true;
+    };
+    const typeText = async (str) => {
+      for (const ch of str) wv.sendInputEvent({ type: 'char', keyCode: ch });
+      await sleep(80);
+    };
+    // Helper: capture the next ipc-message on a given channel.
+    const onceChannel = (channel, timeout = 4000) => new Promise((res) => {
+      const h = (e) => { if (e.channel === channel) { wv.removeEventListener('ipc-message', h); res(e.args[0]); } };
+      wv.addEventListener('ipc-message', h);
+      setTimeout(() => { wv.removeEventListener('ipc-message', h); res(null); }, timeout);
+    });
+
+    // --- 0. Load the fixture ---
+    const ready = waitDomReady();
+    I.navigateTo(fixtureUrl);
+    await ready;
+    await sleep(300);
+    const hasHero = await guest("!!document.getElementById('hero')");
+    check('fixture loaded', hasHero);
+
+    // --- 1. Project + session lifecycle ---
+    const project = await caos.projects.create({ name: 'E2E Project', path: '/e2e', kind: 'local' });
+    check('project created', project && project.id);
+    const session = await caos.sessions.create({ projectId: project.id, name: 'E2E Session', url: fixtureUrl, title: 'E2E' });
+    I.state.currentProject = project;
+    await I.openSession(session);
+    check('session active', I.state.currentSession && I.state.currentSession.id === session.id);
+
+    // --- 2. Inspect → click element → fill popup → save → persist ---
+    // Driven entirely with TRUSTED input (real mouse + keystrokes).
+    I.setMode('inspect');
+    check('inspect mode on', I.state.mode === 'inspect');
+    const ctaRect = await guest(`(() => { const r = document.getElementById('cta').getBoundingClientRect(); return { x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) }; })()`);
+    await clickAt(ctaRect.x, ctaRect.y);
+    await sleep(250);
+    const popupShown = await guest("!!document.querySelector('[data-caos] textarea')");
+    check('note popup opened on click', popupShown);
+
+    const annMsg = onceChannel('caos:annotation', 3000);
+    // Focus the textarea with a real click, then type the note.
+    await clickSel('[data-caos] textarea');
+    await typeText('Remove this CTA button');
+    const typed = await guest("(document.querySelector('[data-caos] textarea')||{}).value || ''");
+    check('note typed into popup', typed === 'Remove this CTA button', typed);
+    // Pick the "Remove" action chip, then click Save — all trusted clicks.
+    const chipIdx = await guest("Array.from(document.querySelectorAll('[data-chips] button')).findIndex(b => b.textContent.trim() === 'Remove')");
+    if (chipIdx >= 0) await clickSel('[data-chips] button', chipIdx);
+    await clickSel('[data-caos] [data-save]');
+    const sentAnn = await annMsg;
+    check('guest sent annotation', !!sentAnn, sentAnn ? `${sentAnn.action}` : 'no caos:annotation message');
+    const popupClosed = await guest("!document.querySelector('[data-caos] textarea')");
+    check('popup closed after save', popupClosed);
+    await sleep(400);
+    const persisted = await caos.annotations.bySession(session.id);
+    const elNote = persisted.find((a) => a.kind === 'element');
+    check('element annotation persisted', !!elNote, elNote ? `${elNote.action}: ${elNote.note}` : 'none found');
+    check('annotation captured selector', elNote && elNote.target && /cta/.test(elNote.target.selector || ''), elNote && elNote.target && elNote.target.selector);
+    check('annotation action = remove', elNote && elNote.action === 'remove', elNote && elNote.action);
+    check('host state synced', I.state.annotations.some((a) => a.id === (elNote && elNote.id)));
+
+    // --- 3. Restore pins ---
+    I.refreshPins();
+    await sleep(250);
+    // Badges are the circular (border-radius:50%) data-caos divs.
+    const pinCount = await guest("Array.from(document.querySelectorAll('div[data-caos]')).filter(d => d.style.borderRadius === '50%').length");
+    check('annotation pin rendered (exactly 1, no dupes)', pinCount === 1, 'pins=' + pinCount);
+
+    // --- 4. DOM tree serializer ---
+    const treeP = onceChannel('caos:dom-tree');
+    wv.send('caos:request-dom-tree');
+    const tree = await treeP;
+    check('dom-tree returned', tree && tree.tag, tree && tree.tag);
+    const flat = JSON.stringify(tree || {});
+    check('dom-tree contains #cta', /"cta"/.test(flat));
+
+    // --- 5. Recording capture (real rec-step pipeline) ---
+    I.setMode('off');
+    I.startRecording();
+    await sleep(150);
+    // Two real interactions in the guest:
+    await guest(`document.getElementById('cta').click()`);
+    await guest(`(() => { const i = document.getElementById('email'); i.focus(); i.value='hi@test.com'; i.dispatchEvent(new Event('input',{bubbles:true})); })()`);
+    await sleep(400);
+    const buf = I.state.recordingBuffer;
+    const clickSteps = buf ? buf.steps.filter((s) => s.type === 'click').length : 0;
+    const inputSteps = buf ? buf.steps.filter((s) => s.type === 'input').length : 0;
+    check('recorder captured click', clickSteps >= 1, 'clicks=' + clickSteps);
+    check('recorder captured input', inputSteps >= 1, 'inputs=' + inputSteps);
+    // Save the recording directly (the interactive name prompt is bypassed in e2e).
+    const recSteps = buf ? buf.steps.slice() : [];
+    I.state.recordingBuffer = null;
+    wv.send('caos:stop-recording');
+    const recording = await caos.recordings.create({ projectId: project.id, name: 'E2E Journey', startUrl: fixtureUrl, steps: recSteps });
+    check('recording saved', recording && recording.steps.length >= 2, 'steps=' + (recording && recording.steps.length));
+
+    // --- 6. Replay executes against the live page ---
+    await guest('window.__count_before = Number(document.getElementById("count").textContent)');
+    await I.refreshRecordings();
+    I.selectRecording(recording);
+    I.state.settings.replayDelayMs = 60;
+    await I.replaySelected();
+    await sleep(300);
+    // Replay's first step re-navigates (fresh page, count=0), then clicks → count=1.
+    const after = await guest('Number(document.getElementById("count").textContent)');
+    check('replay clicked the button', after >= 1, `count after replay = ${after}`);
+    const lastInput = await guest('window.__lastInput || ""');
+    check('replay set the input', lastInput === 'hi@test.com', lastInput);
+
+    // --- 7. Exports ---
+    for (const fmt of ['markdown', 'prompt', 'json']) {
+      const out = await caos.export.build(fmt, session.id);
+      check(`export ${fmt}`, out && out.content && out.content.length > 20, out && out.defaultName);
+    }
+
+    // --- 8. AI local fallback (no key → useful local synthesis) ---
+    const ai = await caos.ai.run({ task: 'summary', sessionId: session.id });
+    check('ai local fallback returns text', ai && ai.ok === true && ai.local === true && ai.text.length > 20, ai && (ai.ok ? `local=${ai.local}` : ai.error));
+    const aiPrompt = await caos.ai.run({ task: 'prompt', sessionId: session.id });
+    check('ai local prompt mentions a target', aiPrompt && aiPrompt.ok && /cta|remove/i.test(aiPrompt.text), 'local prompt');
+
+    // --- 9. Replay report persisted (journeys-as-tests) ---
+    const updated = await caos.recordings.get(recording.id);
+    check('replay report persisted', updated && updated.lastRun && updated.lastRun.total >= 1, updated && updated.lastRun ? `${updated.lastRun.passed}/${updated.lastRun.total}` : 'no lastRun');
+
+    // --- 9b. Assertions in recordings (journeys-as-tests) ---
+    const assertSteps = [
+      { type: 'navigate', url: fixtureUrl, ts: 1 },
+      { type: 'assert', kind: 'exists', selector: '#cta', ts: 2 },
+      { type: 'assert', kind: 'text', selector: '#hero', op: 'contains', expected: 'Promo', ts: 3 },
+      { type: 'assert', kind: 'count', selector: 'button', op: 'equals', expected: 1, ts: 4 },
+      { type: 'assert', kind: 'url', op: 'contains', expected: 'fixture.html', ts: 5 },
+      { type: 'assert', kind: 'exists', selector: '#nonexistent', ts: 6 },
+      { type: 'assert', kind: 'text', selector: '#hero', op: 'equals', expected: 'Nope', ts: 7 },
+    ];
+    const aRec = await caos.recordings.create({ projectId: project.id, name: 'E2E Asserts', startUrl: fixtureUrl, steps: assertSteps });
+    await I.refreshRecordings();
+    I.selectRecording(aRec);
+    I.state.settings.replayDelayMs = 30;
+    const aReport = await I.replaySelected();
+    await sleep(150);
+    const find = (pred) => (aReport ? aReport.steps.find(pred) : null);
+    check('assert exists passes', !!find((s) => /exists/.test(s.type) && /#cta/.test(s.selector) && s.ok));
+    check('assert text contains passes', !!find((s) => /assert:text/.test(s.type) && s.selector === '#hero' && s.ok));
+    check('assert count passes', !!find((s) => /assert:count/.test(s.type) && s.ok));
+    check('assert url passes (host-side)', !!find((s) => /assert:url/.test(s.type) && s.ok), find((s) => /assert:url/.test(s.type)) && find((s) => /assert:url/.test(s.type)).actual);
+    check('assert missing element fails', !!find((s) => /#nonexistent/.test(s.selector) && !s.ok));
+    check('assert wrong text fails', !!find((s) => /assert:text/.test(s.type) && /Nope/.test(s.error)) || (aReport && aReport.failed >= 2));
+    // navigate + 4 passing asserts = 5 pass; 2 failing asserts.
+    check('report counts mixed pass/fail', aReport && aReport.passed === 5 && aReport.failed === 2, aReport && `${aReport.passed}p/${aReport.failed}f of ${aReport.total}`);
+    await caos.recordings.remove(aRec.id);
+
+    // --- 10. Agent hand-off (write request file + run a command on it) ---
+    // Use a non-local project so the request falls back to the writable app dir.
+    const hProject = await caos.projects.create({ name: 'E2E Handoff', path: '', kind: 'url' });
+    const hSession = await caos.sessions.create({ projectId: hProject.id, name: 'Handoff', url: fixtureUrl, title: 'H' });
+    await caos.annotations.create({ sessionId: hSession.id, kind: 'element', action: 'fix', note: 'Handoff probe note', url: fixtureUrl, title: 'H', target: { selector: '#cta', tag: 'button' } });
+    const written = await caos.agent.write(hSession.id);
+    check('hand-off wrote request file', written && /request-.*\.md$/.test(written.file || '') && written.length > 20, written && written.file);
+    // Configure a harmless command that reads the file back; verify it ran + read it.
+    await caos.settings.set({ agentCommand: 'cat "{promptPath}"' });
+    const ran = await caos.agent.run(hSession.id, written.file);
+    check('agent command ran & read the file', ran && ran.ok && /Handoff probe note/.test(ran.output || ''), ran && (ran.ok ? 'output ok' : ran.error));
+    const noCmd = await caos.settings.set({ agentCommand: '' });
+    check('agent command cleared', noCmd && noCmd.agentCommand === '');
+    await caos.sessions.remove(hSession.id);
+    await caos.projects.remove(hProject.id);
+
+    // --- 11. Full-page screenshot (CDP beyond-viewport) + page-box compositing ---
+    {
+      const ready11 = waitDomReady();
+      I.navigateTo(fixtureUrl);
+      await ready11;
+      await sleep(250);
+      const scrollH = await guest('document.body.scrollHeight');
+      check('fixture taller than viewport', scrollH > wv.clientHeight, `scrollH=${scrollH} vp=${wv.clientHeight}`);
+      const cap = await caos.fs.captureFullPage(wv.getWebContentsId());
+      check('full-page capture ok', cap && cap.ok && /^data:image\/png/.test(cap.dataUrl || ''), cap && (cap.ok ? `${Math.round(cap.cssWidth)}x${Math.round(cap.cssHeight)}` : cap.error));
+      check('captured beyond viewport', cap && cap.ok && cap.cssHeight > wv.clientHeight, cap && cap.ok && Math.round(cap.cssHeight));
+      const pboxes = await new Promise((res) => {
+        const handler = (e) => { if (e.channel === 'caos:page-boxes') { wv.removeEventListener('ipc-message', handler); res(e.args[0]); } };
+        wv.addEventListener('ipc-message', handler);
+        wv.send('caos:request-page-boxes', [{ target: { selector: '#cta' } }]);
+        setTimeout(() => { wv.removeEventListener('ipc-message', handler); res(null); }, 2500);
+      });
+      check('page-box resolved for element', Array.isArray(pboxes) && pboxes[0] && pboxes[0].w > 0, pboxes && JSON.stringify(pboxes[0]));
+      if (cap && cap.ok && pboxes && pboxes[0]) {
+        const composed = await compositeAnnotations(cap.dataUrl, [{ action: 'fix', note: 'probe', box: pboxes[0] }], { cssWidth: cap.cssWidth });
+        check('composite returns annotated image', typeof composed === 'string' && /^data:image\/png/.test(composed));
+      } else {
+        check('composite returns annotated image', false, 'skipped — no capture/box');
+      }
+    }
+
+    // --- 12. Multi-tab + history + bookmarks ---
+    {
+      const firstId = I.state.activeTabId;
+      const tabsBefore = I.state.tabs.length;
+      const t2 = I.createTab(fixtureUrl);
+      await sleep(700);
+      check('opened a second tab', I.state.tabs.length === tabsBefore + 1, 'tabs=' + I.state.tabs.length);
+      check('new tab is active', I.state.activeTabId === t2.id && I.getWv() === t2.wv);
+      I.setActiveTab(firstId);
+      await sleep(150);
+      check('switching tabs swaps active webview', I.state.activeTabId === firstId && I.getWv() !== t2.wv);
+      const hist = await caos.history.list(50);
+      check('history recorded navigations', Array.isArray(hist) && hist.some((e) => /fixture\.html/.test(e.url)), 'entries=' + (hist && hist.length));
+      const b1 = await caos.bookmarks.toggle({ url: fixtureUrl, title: 'Fixture' });
+      check('bookmark added', b1 && b1.bookmarked === true);
+      check('bookmark queryable', (await caos.bookmarks.isBookmarked(fixtureUrl)) === true);
+      const b2 = await caos.bookmarks.toggle({ url: fixtureUrl });
+      check('bookmark removed on re-toggle', b2 && b2.bookmarked === false);
+      I.closeTab(t2.id);
+      await sleep(100);
+      check('closed the second tab', I.state.tabs.length === tabsBefore, 'tabs=' + I.state.tabs.length);
+      // Address-bar autocomplete datalist is populated from history/bookmarks.
+      await I.refreshHistory();
+      const opts = document.querySelectorAll('#caos-address-suggestions option');
+      check('address autocomplete populated', opts.length >= 1 && Array.from(opts).some((o) => /fixture\.html/.test(o.value)), 'options=' + opts.length);
+    }
+
+    // --- cleanup ---
+    await caos.recordings.remove(recording.id);
+    await caos.sessions.remove(session.id);
+    await caos.projects.remove(project.id);
+    check('cleanup', true);
+  } catch (e) {
+    check('harness crashed', false, String((e && e.stack) || e));
+  }
+
+  const passed = checks.filter((c) => c.pass).length;
+  const report = { ok: checks.every((c) => c.pass), passed, total: checks.length, checks };
+  await caos.e2eDone(report);
+}

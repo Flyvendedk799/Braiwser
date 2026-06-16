@@ -1,0 +1,100 @@
+// Prompt exporter — turns a review session + its annotations into a ready-to-
+// paste instruction prompt for a CODING AGENT. Imperative and precise so the
+// agent can act on each item directly. Pure function, no I/O, no AI.
+
+// Imperative verb per action tag — phrasing meant for an agent to execute.
+const ACTION_VERBS = {
+  remove: 'Remove',
+  change: 'Change',
+  fix: 'Fix',
+  add: 'Add',
+  question: 'Answer / investigate',
+  comment: 'Address',
+};
+
+function truncate(str, max) {
+  const s = String(str);
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
+// A precise, single-line description of where a change applies.
+function describeTargetInline(annotation) {
+  const t = annotation.target || {};
+
+  if (annotation.kind === 'region') {
+    const box = t.box || {};
+    return `region at x=${box.x ?? '?'}, y=${box.y ?? '?'}, w=${box.w ?? '?'}, h=${box.h ?? '?'}`;
+  }
+
+  const parts = [];
+  if (t.selector) parts.push(`selector \`${t.selector}\``);
+  else if (t.id) parts.push(`element \`#${t.id}\``);
+  else if (t.tag) parts.push(`\`<${t.tag}>\``);
+
+  if (t.text) parts.push(`with text "${truncate(t.text, 120)}"`);
+
+  const attrs = t.attrs || {};
+  if (attrs.href) parts.push(`(href: ${attrs.href})`);
+  else if (attrs.src) parts.push(`(src: ${attrs.src})`);
+
+  return parts.length ? parts.join(' ') : 'the target element';
+}
+
+function toPrompt(session, annotations) {
+  const list = Array.isArray(annotations) ? annotations : [];
+  const out = [];
+
+  const pageTitle = (session && (session.title || session.name)) || 'the page';
+  const pageUrl = (session && session.url) || '(unknown URL)';
+
+  // Role / intro for the coding agent.
+  out.push(
+    'You are a senior frontend engineer. Implement the UI change requests below ' +
+      'exactly as specified. Each item names an action, a precise target ' +
+      '(CSS selector and element text, or a region box), and a note describing ' +
+      'the intent. Make the smallest, cleanest change that satisfies each ' +
+      'request, and keep existing behavior and styling intact unless told ' +
+      'otherwise.'
+  );
+  out.push('');
+  out.push(`Page: ${pageTitle}`);
+  out.push(`URL: ${pageUrl}`);
+  out.push('');
+
+  if (list.length === 0) {
+    out.push('No change requests were provided.');
+    return out.join('\n');
+  }
+
+  out.push('Change requests:');
+  out.push('');
+
+  let index = 1;
+  for (const a of list) {
+    const verb = ACTION_VERBS[a.action] || 'Address';
+    const target = describeTargetInline(a);
+    const note = (a.note || '').trim();
+
+    // One numbered, self-contained instruction per annotation.
+    let line = `${index}. ${verb}: ${target}.`;
+    if (note) line += ` ${note}`;
+
+    // Surface priority when it is above the baseline so the agent can order work.
+    if (a.priority && a.priority !== 'normal') {
+      line += ` [priority: ${a.priority}]`;
+    }
+
+    out.push(line);
+    index += 1;
+  }
+
+  out.push('');
+  out.push(
+    'When done, summarize the files you changed and any decisions you made ' +
+      'where the request was ambiguous.'
+  );
+
+  return out.join('\n');
+}
+
+module.exports = { toPrompt };

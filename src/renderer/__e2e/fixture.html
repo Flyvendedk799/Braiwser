@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>E2E Fixture</title>
+  <style>
+    body { font-family: sans-serif; margin: 0; padding: 0; }
+    #hero { height: 80px; background: #f33; color: #fff; display: flex; align-items: center; padding: 0 20px; font-size: 22px; }
+    main { padding: 24px; }
+    #cta { padding: 12px 20px; font-size: 16px; }
+    #email { padding: 8px; font-size: 14px; width: 240px; margin-top: 16px; display: block; }
+    #log { margin-top: 16px; font-family: monospace; color: #333; }
+  </style>
+</head>
+<body>
+  <header id="hero">Big Promo Banner</header>
+  <main>
+    <button id="cta">Click me</button>
+    <input id="email" placeholder="you@example.com" />
+    <p id="log">events: <span id="count">0</span></p>
+    <!-- Tall block so full-page capture must go beyond the viewport. -->
+    <div id="tall" style="height:1600px; background:linear-gradient(#fafafa,#e8e8f0);"></div>
+    <footer id="foot">bottom</footer>
+  </main>
+  <script>
+    // Record interactions so replay can be observed.
+    let n = 0;
+    const count = document.getElementById('count');
+    document.getElementById('cta').addEventListener('click', () => { n++; count.textContent = String(n); });
+    document.getElementById('email').addEventListener('input', (e) => { window.__lastInput = e.target.value; });
+  </script>
+</body>
+</html>
