@@ -108,14 +108,24 @@ export function toast(message, kind = 'info', ms = 2600) {
 // modal({ title, body:Node, actions:[{label,kind,onClick}], onClose }) -> { close }
 export function modal({ title, body, actions = [], onClose, width = 460 } = {}) {
   const backdrop = h('div', { class: 'modal-backdrop' });
+  const prevFocus = document.activeElement; // restore on close
   const close = () => {
     backdrop.classList.remove('show');
     setTimeout(() => backdrop.remove(), 200);
     if (onClose) onClose();
     document.removeEventListener('keydown', onKey);
+    try { if (prevFocus && prevFocus.focus) prevFocus.focus(); } catch (_e) { /* ignore */ }
   };
+  const focusables = () => card.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
   const onKey = (e) => {
-    if (e.key === 'Escape') close();
+    if (e.key === 'Escape') { close(); return; }
+    if (e.key === 'Tab') {
+      const f = focusables();
+      if (!f.length) return;
+      const first = f[0], last = f[f.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
   };
 
   const footer = h('div', { class: 'modal-footer' });
@@ -139,7 +149,7 @@ export function modal({ title, body, actions = [], onClose, width = 460 } = {}) 
   const card = h('div', { class: 'modal-card', style: { width: width + 'px' } }, [
     h('div', { class: 'modal-head' }, [
       h('div', { class: 'modal-title', text: title || '' }),
-      h('button', { class: 'icon-btn modal-x', html: icon('close', 16), on: { click: close } }),
+      h('button', { class: 'icon-btn modal-x', title: 'Close', 'aria-label': 'Close', html: icon('close', 16), on: { click: close } }),
     ]),
     h('div', { class: 'modal-body' }, [body]),
     actions.length ? footer : null,
@@ -151,7 +161,12 @@ export function modal({ title, body, actions = [], onClose, width = 460 } = {}) 
   });
   document.addEventListener('keydown', onKey);
   document.body.appendChild(backdrop);
-  requestAnimationFrame(() => backdrop.classList.add('show'));
+  requestAnimationFrame(() => {
+    backdrop.classList.add('show');
+    // Initial focus: a field if present, else the primary action.
+    const f = card.querySelector('input, textarea, select') || card.querySelector('.modal-footer button:last-child') || card.querySelector('button');
+    if (f) try { f.focus(); } catch (_e) { /* ignore */ }
+  });
   return { close, card };
 }
 

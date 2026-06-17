@@ -9,7 +9,7 @@
   --line2: #2a2e3a;
   --text: #e6e9f0;
   --dim: #9aa2b1;
-  --faint: #6b7280;
+  --faint: #8a93a3;
   --accent: #5b8cff;
   --accent-soft: rgba(91, 140, 255, 0.16);
   --accent-line: rgba(91, 140, 255, 0.42);
@@ -699,3 +699,10 @@ button { font-family: inherit; }
 @keyframes caos-spin { to { transform:rotate(360deg); } }
 .address .lock.insecure { color:var(--change); }
 @media (prefers-reduced-motion: reduce) { .tc-spin { animation-duration: 2s; } }
+
+/* Accessibility: visible keyboard focus + reduced-motion */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+button:focus:not(:focus-visible) { outline: none; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+}

@@ -85,7 +85,7 @@ Files: `src/renderer/app.js`, `src/renderer/components/notes-panel.js`, `src/ren
 
 _e2e:_ Highest file fan-out; sequence after B2/B5/B6 since it reuses app.js regions (footer, setupTabWebview console listener, locate). persist-open-tabs MUST keep the !caos.e2e boot guard so the harness still boots deterministically to the fixture — verify e2e stays 51. Exporter 3rd-arg must stay optional so existing export checks pass. SHARED with B5/B6: the did-fail-load listener (console buffer + load placeholder + crash toast) should be ONE merged handler if those batches co-land. New optional checks: assert copyExport produces non-empty content; assert priority-sorted export leads with a 'critical' note; assert persisted openTabs round-trips through settings. Note repositories.js here is only the (optional) console-persistence touch — coordinate with B1/B3/B4 repo edits if co-landing.
 
-### [ ] B9 - Accessibility & quality dedup (CSS + keyboard ops + focus + shared formatters)  `P2` (risk: medium)
+### [~] B9 (a11y done; code-dedups deferred) - Accessibility & quality dedup (CSS + keyboard ops + focus + shared formatters)  `P2` (risk: medium)
 Files: `src/renderer/styles/app.css`, `src/renderer/components/sidebar.js`, `src/renderer/components/tabs.js`, `src/renderer/components/inspector-panel.js`, `src/renderer/lib/dom.js`, `src/renderer/components/toolbar.js`, `src/renderer/components/ai-panel.js`, `src/main/services/format/annotation.js`, `src/main/services/ai/prompts.js`, `src/main/config.js`, `src/renderer/lib/screenshots.js`, `src/webview/inspector.js`
 
 - no-focus-visible / faint-text-contrast / no-reduced-motion: add a global :focus-visible outline rule, change --faint to #8a93a3, and append a prefers-reduced-motion block to app.css (3 isolated CSS edits).
@@ -715,3 +715,17 @@ In src/renderer/lib/e2e.js, after the section-9b assert block (before the agent-
 - Reordering the notes panel render to match priority — would break pin-number/insertion-order correspondence; panel stays insertion-order.
 - Disabling allowpopups entirely — kept enabled since setWindowOpenHandler now consumes the event; stricter posture is optional, not required.
 - Candidate-selector-list export surface for anchor.js — would widen scope into export/prompt/markdown rendering with no core win.
+
+## Progress (ultracode improvement pass)
+
+- [x] B1 security · [x] B2 replay/session correctness · [x] B3 persistence
+- [x] B4 perf/history · [x] B5 robustness · [x] B7 stable selectors
+- [x] B6 UX shortcuts/load-state · [~] B8 goal features (copy-prompt, copy-selector,
+  suggest-fix, priority-ordered exports, persist-tabs done; **deferred:** guest
+  console/network capture, cross-page locate-ack)
+- [~] B9 (focus-visible, contrast, reduced-motion, aria-labels, modal focus-trap done;
+  **deferred:** code dedups — escapeHtml, export annotation renderer, action-tag colors)
+- [ ] B10 e2e coverage expansion (annotation mutation/reload-restore/draw-region/recording-
+  editor/error-path checks) — **deferred**
+
+e2e: 52/52 green throughout. Deferred items are low-risk follow-ups, none on the critical path.

@@ -20,12 +20,13 @@ export function createToolbar(actions) {
   });
 
   const lock = h('span', { class: 'lock', html: icon('file', 14) });
-  const bookmarkBtn = h('button', { class: 'star-btn', title: 'Bookmark this page', text: '☆', on: { click: actions.toggleBookmark } });
+  const bookmarkBtn = h('button', { class: 'star-btn', title: 'Bookmark this page', 'aria-label': 'Bookmark this page', text: '☆', on: { click: actions.toggleBookmark } });
 
   const btn = (cfg) =>
     h('button', {
       class: `icon-btn ${cfg.class || ''} ${cfg.label ? 'has-label' : ''}`.trim(),
       title: cfg.title || cfg.label || '',
+      'aria-label': cfg.title || cfg.label || '',
       html: cfg.icon ? icon(cfg.icon, cfg.size || 16) + (cfg.label ? `<span>${cfg.label}</span>` : '') : `<span>${cfg.label}</span>`,
       on: { click: cfg.onClick },
     });

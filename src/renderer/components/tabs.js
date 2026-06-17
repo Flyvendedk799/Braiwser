@@ -4,7 +4,7 @@ import { h, icon, clear } from '../lib/dom.js';
 
 export function createTabStrip(actions) {
   const list = h('div', { class: 'tabstrip-list' });
-  const newBtn = h('button', { class: 'tabstrip-new', title: 'New tab', html: icon('plus', 14), on: { click: () => actions.newTab() } });
+  const newBtn = h('button', { class: 'tabstrip-new', title: 'New tab', 'aria-label': 'New tab', html: icon('plus', 14), on: { click: () => actions.newTab() } });
   const root = h('div', { class: 'tabstrip' }, [list, newBtn]);
 
   function update(tabs, activeId) {
@@ -15,7 +15,7 @@ export function createTabStrip(actions) {
         t.loading ? h('span', { class: 'tc-spin' }) : null,
         h('span', { class: 'tc-title', text: title }),
         h('button', {
-          class: 'tc-close', title: 'Close tab', text: '×',
+          class: 'tc-close', title: 'Close tab', 'aria-label': 'Close tab', text: '×',
           on: { click: (e) => { e.stopPropagation(); actions.closeTab(t.id); } },
         }),
       ]);
