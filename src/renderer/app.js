@@ -54,12 +54,20 @@ async function boot() {
   state.config = await caos.config();
   state.settings = await caos.settings.get();
   buildShell();
+  setupShortcuts();
   await refreshProjects();
   await refreshRecordings();
   await refreshHistory();
   await refreshBookmarks();
-  // Open the first tab on the welcome page.
-  createTab(state.config.welcomeUrl);
+  // Restore previously-open tabs (skipped under e2e for a deterministic boot).
+  const saved = !caos.e2e && Array.isArray(state.settings.openTabs) ? state.settings.openTabs : null;
+  if (saved && saved.length) {
+    saved.forEach((u) => createTab(u || state.config.welcomeUrl));
+    const idx = state.settings.activeTabIndex || 0;
+    if (state.tabs[idx]) setActiveTab(state.tabs[idx].id);
+  } else {
+    createTab(state.config.welcomeUrl);
+  }
 
   if (caos.e2e) {
     const internals = {
@@ -81,9 +89,9 @@ function buildShell() {
 
   toolbar = createToolbar({
     navigate: (v) => navigateTo(resolveAddress(v)),
-    back: () => wv.canGoBack() && wv.goBack(),
-    forward: () => wv.canGoForward() && wv.goForward(),
-    reload: () => wv.reload(),
+    back: () => wv && wv.canGoBack() && wv.goBack(),
+    forward: () => wv && wv.canGoForward() && wv.goForward(),
+    reload: () => { const t = activeTab(); if (!wv) return; try { if (t && t.loading) wv.stop(); else wv.reload(); } catch (_e) { /* ignore */ } },
     toggleMode: setMode,
     toggleRecord: toggleRecord,
     replay: () => replaySelected(),
@@ -120,17 +128,20 @@ function buildShell() {
     toggleStatus: (a) => updateAnnotation(a, { status: (a.status || 'open') === 'open' ? 'resolved' : 'open' }),
     setPriority: (a, priority) => updateAnnotation(a, { priority }),
     remove: removeAnnotation,
+    copySelector: (a) => copyText(a.target && a.target.selector, 'Selector copied'),
+    suggestFix: (a) => { switchTab('ai'); aiPanel.runExternal('suggest-fix', { annotations: [a], context: { annotation: a } }); },
     onCount: (total) => { if (tabButtons.notes) tabButtons.notes.querySelector('.pill').textContent = String(total); },
   });
 
   inspectorPanel = createInspectorPanel({
     requestTree: () => sendWv('caos:request-dom-tree'),
     highlight: (target) => sendWv('caos:highlight-target', target),
+    copySelector: (sel) => copyText(sel, 'Selector copied'),
   });
 
   aiPanel = createAiPanel(state.config, {
     currentSessionId: () => state.currentSession && state.currentSession.id,
-    run: (task, sessionId) => caos.ai.run({ task, sessionId, provider: state.settings.aiProvider }),
+    run: (task, sessionId, extra) => caos.ai.run({ task, sessionId, provider: state.settings.aiProvider, ...(extra || {}) }),
     save: saveAiResult,
     openSettings: openSettings,
   });
@@ -152,6 +163,7 @@ function buildShell() {
     exportBtn('Markdown', 'markdown'),
     exportBtn('Prompt', 'prompt'),
     exportBtn('JSON', 'json'),
+    h('button', { class: 'btn btn-sm', text: 'Copy prompt', title: 'Copy the agent prompt to the clipboard', on: { click: () => copyExport('prompt') } }),
     h('button', { class: 'btn btn-sm btn-primary', text: '→ Agent', title: 'Hand off this session to a coding agent', on: { click: handoffToAgent } }),
   ]);
 
@@ -185,6 +197,21 @@ function switchTab(id) {
   ({ notes: notesPanel, inspector: inspectorPanel, ai: aiPanel })[id].root.classList.add('active');
 }
 
+// ============================================================ SHORTCUTS
+function setupShortcuts() {
+  document.addEventListener('keydown', (e) => {
+    const t = e.target;
+    const editable = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+    const mod = e.metaKey || e.ctrlKey;
+    const k = (e.key || '').toLowerCase();
+    if (mod && k === 'l') { e.preventDefault(); toolbar.focusAddress(); return; }
+    if (mod && k === 't') { e.preventDefault(); createTab(state.config.welcomeUrl); return; }
+    if (mod && k === 'w') { e.preventDefault(); if (state.activeTabId) closeTab(state.activeTabId); return; }
+    if (mod && k === 'r') { e.preventDefault(); const tab = activeTab(); if (wv) { try { tab && tab.loading ? wv.stop() : wv.reload(); } catch (_e) { /* ignore */ } } return; }
+    if (!mod && k === 'escape' && !editable && state.mode !== 'off') { setMode('off'); }
+  });
+}
+
 // ============================================================ TABS + WEBVIEW WIRING
 function createTab(url) {
   const el = h('webview', { class: 'wv', allowpopups: '' });
@@ -198,6 +225,7 @@ function createTab(url) {
   setupTabWebview(tab);
   setActiveTab(tab.id);
   if (url) { el.src = url; tab.url = url; }
+  persistOpenTabs();
   return tab;
 }
 
@@ -219,6 +247,7 @@ function setActiveTab(id) {
   renderTabs();
   try { sendWv('caos:set-mode', state.mode); } catch (_e) { /* not ready */ }
   maybeRestoreAnnotations();
+  persistOpenTabs();
 }
 
 function closeTab(id) {
@@ -234,10 +263,23 @@ function closeTab(id) {
   } else {
     renderTabs();
   }
+  persistOpenTabs();
 }
 
 function renderTabs() {
   tabStrip.update(state.tabs, state.activeTabId);
+}
+
+// Persist the open tab set (debounced) so it can be restored next launch.
+let _persistTimer = null;
+function persistOpenTabs() {
+  if (caos.e2e || state.replaying) return;
+  clearTimeout(_persistTimer);
+  _persistTimer = setTimeout(() => {
+    const openTabs = state.tabs.map((t) => t.url || state.config.welcomeUrl);
+    const activeTabIndex = Math.max(0, state.tabs.findIndex((t) => t.id === state.activeTabId));
+    caos.settings.set({ openTabs, activeTabIndex });
+  }, 500);
 }
 
 function setupTabWebview(tab) {
@@ -267,6 +309,9 @@ function setupTabWebview(tab) {
     if (isActive()) toast(`Page crashed (${(e && e.reason) || 'gone'}) — reloading`, 'error', 4000);
     try { el.reload(); } catch (_err) { /* ignore */ }
   });
+
+  el.addEventListener('did-start-loading', () => { tab.loading = true; renderTabs(); if (isActive()) syncToolbar(); });
+  el.addEventListener('did-stop-loading', () => { tab.loading = false; renderTabs(); if (isActive()) syncToolbar(); });
 
   el.addEventListener('did-navigate', (e) => onNavigated(tab, e.url));
   el.addEventListener('did-navigate-in-page', (e) => onNavigated(tab, e.url));
@@ -314,6 +359,7 @@ function onNavigated(tab, url) {
     caos.history.record({ url, title: tab.title }).then(() => { if (state.activeTabId === tab.id) refreshHistory(); });
   }
   renderTabs();
+  persistOpenTabs();
   if (state.activeTabId !== tab.id) return;
 
   if (!state.replaying) {
@@ -393,6 +439,7 @@ function syncToolbar() {
     hasRecording: !!state.selectedRecording,
     replaying: state.replaying,
     bookmarked: state.bookmarked,
+    loading: !!(activeTab() && activeTab().loading),
   });
 }
 
@@ -1027,6 +1074,23 @@ async function saveAiResult(task, text) {
     if (saved) toast('Saved', 'success');
   } catch (e) {
     toast('Save failed: ' + (e && e.message ? e.message : e), 'error');
+  }
+}
+
+async function copyText(text, okMsg) {
+  if (!text) { toast('Nothing to copy', 'warn'); return; }
+  try { await navigator.clipboard.writeText(text); toast(okMsg || 'Copied', 'success'); }
+  catch (_e) { toast('Copy failed', 'error'); }
+}
+
+async function copyExport(format) {
+  if (!state.currentSession) { toast('Open or start a session first', 'warn'); return; }
+  try {
+    const result = await caos.export.build(format, state.currentSession.id);
+    if (!result || !result.content) { toast('Nothing to copy', 'warn'); return; }
+    await copyText(result.content, 'Prompt copied to clipboard');
+  } catch (e) {
+    toast('Copy failed: ' + (e && e.message ? e.message : e), 'error');
   }
 }
 

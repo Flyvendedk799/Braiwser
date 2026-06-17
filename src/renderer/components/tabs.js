@@ -12,6 +12,7 @@ export function createTabStrip(actions) {
     for (const t of tabs) {
       const title = t.title || prettyTitle(t.url) || 'New tab';
       const chip = h('div', { class: `tab-chip ${t.id === activeId ? 'active' : ''}`, title: t.url || '', on: { click: () => actions.selectTab(t.id) } }, [
+        t.loading ? h('span', { class: 'tc-spin' }) : null,
         h('span', { class: 'tc-title', text: title }),
         h('button', {
           class: 'tc-close', title: 'Close tab', text: '×',

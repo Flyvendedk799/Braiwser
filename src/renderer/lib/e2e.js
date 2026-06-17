@@ -158,6 +158,8 @@ export async function run(I) {
     check('ai local fallback returns text', ai && ai.ok === true && ai.local === true && ai.text.length > 20, ai && (ai.ok ? `local=${ai.local}` : ai.error));
     const aiPrompt = await caos.ai.run({ task: 'prompt', sessionId: session.id });
     check('ai local prompt mentions a target', aiPrompt && aiPrompt.ok && /cta|remove/i.test(aiPrompt.text), 'local prompt');
+    const aiFix = await caos.ai.run({ task: 'suggest-fix', annotations: [{ kind: 'element', action: 'fix', note: 'tighten this', target: { selector: '#cta' } }] });
+    check('ai suggest-fix returns a result', aiFix && aiFix.ok === true && (aiFix.text || '').length > 5, aiFix && (aiFix.ok ? 'ok' : aiFix.error));
 
     // --- 9. Replay report persisted (journeys-as-tests) ---
     const updated = await caos.recordings.get(recording.id);

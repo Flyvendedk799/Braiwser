@@ -72,8 +72,18 @@ function documentTitle(session) {
   return 'UI Review';
 }
 
+// Stable priority order (critical>high>normal>low) applied to a COPY so the
+// input array — which pin numbering relies on — is never mutated.
+const PRIORITY_RANK = { critical: 0, high: 1, normal: 2, low: 3 };
+function byPriority(list) {
+  return list
+    .map((a, i) => [a, i])
+    .sort((x, y) => (PRIORITY_RANK[x[0].priority] ?? 2) - (PRIORITY_RANK[y[0].priority] ?? 2) || x[1] - y[1])
+    .map((pair) => pair[0]);
+}
+
 function toMarkdown(session, annotations) {
-  const list = Array.isArray(annotations) ? annotations : [];
+  const list = byPriority(Array.isArray(annotations) ? annotations : []);
   const out = [];
 
   out.push(`# UI Review — ${documentTitle(session)}`);

@@ -61,7 +61,7 @@ export function createToolbar(actions) {
   ]);
 
   function update(state) {
-    const { mode, recording, currentUrl, canGoBack, canGoForward, hasRecording, replaying, bookmarked } = state;
+    const { mode, recording, currentUrl, canGoBack, canGoForward, hasRecording, replaying, bookmarked, loading } = state;
     bookmarkBtn.textContent = bookmarked ? '★' : '☆';
     bookmarkBtn.classList.toggle('on', !!bookmarked);
     inspectBtn.classList.toggle('active', mode === 'inspect');
@@ -71,18 +71,31 @@ export function createToolbar(actions) {
     recBtn.classList.toggle('active', !!recording);
     recBtn.querySelector('span').textContent = recording ? 'Stop' : 'Record';
     recBtn.querySelector('svg').outerHTML = icon(recording ? 'stop' : 'record', 16);
+    // Reload becomes Stop while the active tab is loading.
+    reloadBtn.querySelector('svg').outerHTML = icon(loading ? 'stop' : 'reload', 16);
+    reloadBtn.title = loading ? 'Stop' : 'Reload';
     backBtn.disabled = !canGoBack;
     fwdBtn.disabled = !canGoForward;
     replayBtn.disabled = !hasRecording || replaying || !!recording;
     recBtn.disabled = replaying;
+    if (currentUrl != null) updateLock(currentUrl);
     if (document.activeElement !== addressInput && currentUrl != null) {
       addressInput.value = prettyUrl(currentUrl);
     }
   }
 
+  function updateLock(url) {
+    lock.classList.remove('insecure');
+    if (/^https:/i.test(url)) { lock.textContent = '🔒'; lock.title = 'Secure (https)'; }
+    else if (/^http:/i.test(url)) { lock.textContent = '⚠'; lock.title = 'Not secure (http)'; lock.classList.add('insecure'); }
+    else { lock.innerHTML = icon('file', 14); lock.title = 'Local file'; }
+  }
+
   function setAddress(url) {
     if (document.activeElement !== addressInput) addressInput.value = prettyUrl(url || '');
   }
+
+  function focusAddress() { addressInput.focus(); addressInput.select(); }
 
   // Populate the address-bar autocomplete from history + bookmarks.
   function setSuggestions(items) {
@@ -99,7 +112,7 @@ export function createToolbar(actions) {
     }
   }
 
-  return { root, update, setAddress, setSuggestions };
+  return { root, update, setAddress, setSuggestions, focusAddress };
 }
 
 // Show file:// paths and welcome page more cleanly in the address bar.

@@ -693,3 +693,9 @@ button { font-family: inherit; }
 /* Address-bar bookmark star */
 .star-btn { border:0; background:transparent; color:var(--dim); cursor:pointer; font-size:16px; line-height:1; padding:0 6px; -webkit-app-region:no-drag; }
 .star-btn.on { color:var(--change); }
+
+/* Tab loading spinner + address lock */
+.tc-spin { width:11px; height:11px; border-radius:50%; border:2px solid var(--line2); border-top-color:var(--accent); animation:caos-spin .7s linear infinite; flex:0 0 auto; }
+@keyframes caos-spin { to { transform:rotate(360deg); } }
+.address .lock.insecure { color:var(--change); }
+@media (prefers-reduced-motion: reduce) { .tc-spin { animation-duration: 2s; } }

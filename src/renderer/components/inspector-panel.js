@@ -48,6 +48,10 @@ export function createInspectorPanel(actions) {
     const toggle = h('span', { class: `tree-toggle ${hasChildren ? '' : 'leaf'} ${depth < 2 ? 'open' : ''}`, html: icon('chevron', 10) });
     const self = h('div', { class: 'tree-self', html: nodeLabel(node) });
     self.insertBefore(toggle, self.firstChild);
+    if (node.selector && actions.copySelector) {
+      const copyBtn = h('button', { class: 'tree-copy', title: 'Copy selector', html: icon('copy', 12), on: { click: (e) => { e.stopPropagation(); actions.copySelector(node.selector); } } });
+      self.appendChild(copyBtn);
+    }
 
     const highlight = () => actions.highlight({ selector: node.selector });
     self.addEventListener('mouseenter', highlight);

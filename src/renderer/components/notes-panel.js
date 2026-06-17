@@ -77,8 +77,11 @@ export function createNotesPanel(config, actions) {
     const card = h('div', { class: `note ${resolved ? 'resolved' : ''}` });
     card.style.setProperty('--stripe', color);
 
+    const hasSelector = !!(a.target && a.target.selector);
     const actsRow = h('div', { class: 'note-actions' }, [
       h('button', { class: 'note-act', title: 'Locate on page', html: icon('locate', 15), on: { click: () => actions.locate(a) } }),
+      hasSelector ? h('button', { class: 'note-act', title: 'Copy selector', html: icon('copy', 15), on: { click: () => actions.copySelector(a) } }) : null,
+      actions.suggestFix ? h('button', { class: 'note-act', title: 'AI: suggest a fix', html: icon('ai', 15), on: { click: () => actions.suggestFix(a) } }) : null,
       h('button', { class: 'note-act', title: 'Edit note', html: icon('edit', 15), on: { click: () => startEdit(a) } }),
       h('button', { class: `note-act ${resolved ? 'on' : ''}`, title: resolved ? 'Reopen' : 'Mark resolved', html: icon('check', 15), on: { click: () => actions.toggleStatus(a) } }),
       h('button', { class: 'note-act danger', title: 'Delete', html: icon('trash', 15), on: { click: () => actions.remove(a) } }),

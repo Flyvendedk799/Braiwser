@@ -40,8 +40,18 @@ function describeTargetInline(annotation) {
   return parts.length ? parts.join(' ') : 'the target element';
 }
 
+// Order by priority (critical>high>normal>low) on a COPY — never mutate the
+// input array, since pin numbering relies on insertion order elsewhere.
+const PRIORITY_RANK = { critical: 0, high: 1, normal: 2, low: 3 };
+function byPriority(list) {
+  return list
+    .map((a, i) => [a, i])
+    .sort((x, y) => (PRIORITY_RANK[x[0].priority] ?? 2) - (PRIORITY_RANK[y[0].priority] ?? 2) || x[1] - y[1])
+    .map((pair) => pair[0]);
+}
+
 function toPrompt(session, annotations) {
-  const list = Array.isArray(annotations) ? annotations : [];
+  const list = byPriority(Array.isArray(annotations) ? annotations : []);
   const out = [];
 
   const pageTitle = (session && (session.title || session.name)) || 'the page';

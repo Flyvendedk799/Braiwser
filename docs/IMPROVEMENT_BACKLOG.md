@@ -56,7 +56,7 @@ Files: `src/renderer/app.js`, `src/main/services/ai/claude.js`, `src/main/servic
 
 _e2e:_ Routing wv.send through sendWv must not change behavior on the live (non-destroyed) path — re-run e2e (51) since every in-page message (annotations, replay-step, highlight) flows through it. did-fail-load/-3 handling overlaps conceptually with B6's load-state listener: if both batches land, MERGE the did-fail-load handler (one listener that both toasts and drives the load-error placeholder) to avoid two competing listeners on the same event. No new checks required; AI-timeout and crash paths aren't harness-exercised.
 
-### [ ] B6 - UX: keyboard shortcuts, load-state, address affordance  `P1` (risk: medium)
+### [x] B6 - UX: keyboard shortcuts, load-state, address affordance  `P1` (risk: medium)
 Files: `src/renderer/app.js`, `src/renderer/components/toolbar.js`
 
 - no-keyboard-shortcuts + no-address-focus-affordance: add toolbar.focusAddress() (focus+select addressInput) to the returned object; add one renderer-level keydown listener in app.js guarded against editable targets — Cmd/Ctrl+L focusAddress, Cmd/Ctrl+T new tab, Cmd/Ctrl+W close active tab, Cmd/Ctrl+R reload, Cmd+Shift+I/D toggle inspect/draw, Escape -> setMode('off'); preventDefault on matched combos.
@@ -72,7 +72,7 @@ Files: `src/webview/anchor.js`
 
 _e2e:_ Fully isolated to anchor.js (no other batch touches it). The e2e fixture has no test hooks, so the id fast-path still yields #cta/#hero and all 51 checks remain green. Optional new check: add a [data-testid] element to __e2e/fixture.html and assert cssPath returns the [data-testid=...] selector — only if you want positive coverage of the new path (this would also touch fixture.html + e2e.js, overlapping B10).
 
-### [ ] B8 - Goal: agent-handoff features (copy/persist/console/suggest-fix/locate/ordering)  `P1` (risk: medium)
+### [~] B8 (partial: console-capture + cross-page locate-ack deferred) - Goal: agent-handoff features (copy/persist/console/suggest-fix/locate/ordering)  `P1` (risk: medium)
 Files: `src/renderer/app.js`, `src/renderer/components/notes-panel.js`, `src/renderer/components/ai-panel.js`, `src/renderer/components/inspector-panel.js`, `src/webview/inspector.js`, `src/main/services/export/prompt.js`, `src/main/services/export/markdown.js`, `src/main/store/repositories.js`
 
 - copy-all-as-prompt: add a footer 'Copy prompt' button + copyExport(format) helper that copies result.content (the string) to clipboard with toasts. Renderer-only.

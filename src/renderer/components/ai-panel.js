@@ -104,8 +104,29 @@ export function createAiPanel(config, actions) {
     actions.save(select.value, lastText);
   }
 
+  // Run a specific task programmatically (e.g. per-note Suggest-fix) with an
+  // optional extra payload (annotations/context). Renders into this panel.
+  async function runExternal(taskId, extra) {
+    if (taskIds.includes(taskId)) { select.value = taskId; desc.textContent = config.aiTasks[taskId] || ''; }
+    runBtn.disabled = true;
+    loading();
+    try {
+      const res = await actions.run(taskId, actions.currentSessionId(), extra || {});
+      if (!res || res.ok === false) showError((res && res.error) || 'The AI request failed.', isKeyError(res && res.error));
+      else showResult(res.text || '');
+    } catch (e) {
+      showError(String((e && e.message) || e), false);
+    } finally {
+      runBtn.disabled = false;
+    }
+  }
+
   idle();
-  return { root, focusTask: (id) => { if (id && taskIds.includes(id)) { select.value = id; desc.textContent = config.aiTasks[id] || ''; } } };
+  return {
+    root,
+    runExternal,
+    focusTask: (id) => { if (id && taskIds.includes(id)) { select.value = id; desc.textContent = config.aiTasks[id] || ''; } },
+  };
 }
 
 function prettyTask(id) {
