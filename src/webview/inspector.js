@@ -364,7 +364,7 @@ const replay = require('./replay');
         if (target) el = anchor.resolve(target);
         const badge = document.createElement('div');
         badge.setAttribute('data-caos', '');
-        badge.textContent = String(i + 1);
+        badge.textContent = String(ann && ann.pinNum != null ? ann.pinNum : i + 1);
         badge.title = (ann && ann.action ? ann.action + ': ' : '') + (ann && ann.note ? ann.note : '');
         badge.style.cssText =
           'position:fixed;width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;' +

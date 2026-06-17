@@ -135,7 +135,14 @@ function createRepositories(userDataDir) {
       return { claude: !!s.claude, openai: !!s.openai };
     },
     getKey: (provider) => secretsD.data()[provider] || null,
-    setKey: (provider, key) => { secretsD.set(provider, key); return secrets.providers(); },
+    setKey: (provider, key) => {
+      // Whitelist providers and require a non-empty string so the renderer can't
+      // write arbitrary keys into secrets.json.
+      if (provider !== 'claude' && provider !== 'openai') return secrets.providers();
+      if (typeof key !== 'string' || !key) return secrets.providers();
+      secretsD.set(provider, key);
+      return secrets.providers();
+    },
     clearKey: (provider) => { secretsD.unset(provider); return secrets.providers(); },
   };
 

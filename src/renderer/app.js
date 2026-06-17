@@ -204,6 +204,10 @@ function createTab(url) {
 function setActiveTab(id) {
   const tab = state.tabs.find((t) => t.id === id);
   if (!tab) return;
+  if (state.replaying && tab.id !== state.activeTabId) {
+    toast('Finish or cancel replay before switching tabs', 'warn');
+    return;
+  }
   state.activeTabId = id;
   wv = tab.wv; // global alias used throughout
   state.tabs.forEach((t) => t.wv.classList.toggle('active', t.id === id));
@@ -218,6 +222,7 @@ function setActiveTab(id) {
 }
 
 function closeTab(id) {
+  if (state.replaying) { toast('Finish or cancel replay before closing tabs', 'warn'); return; }
   const idx = state.tabs.findIndex((t) => t.id === id);
   if (idx === -1) return;
   const [tab] = state.tabs.splice(idx, 1);
@@ -275,6 +280,7 @@ function setupTabWebview(tab) {
         if (isActive() && state.recordingBuffer) state.recordingBuffer.steps.push(payload);
         break;
       case 'caos:replay-ack': {
+        if (!isActive()) break; // only the tab replay runs on may answer
         const w = replayWaiters.get(payload.index);
         if (w) { replayWaiters.delete(payload.index); w.resolve(payload); }
         break;
@@ -424,32 +430,51 @@ function maybeRestoreAnnotations() {
   const url = state.currentUrl || (wv && safe(() => wv.getURL()));
   if (!url) return;
   caos.annotations.bySessionUrl(state.currentSession.id, url).then((list) => {
-    wv.send('caos:restore-annotations', Array.isArray(list) ? list : []);
+    // Number each pin by its position in the full session list so badges match
+    // the Notes panel '#'. Fall back to draw-order (null) if not yet in state.
+    const arr = (Array.isArray(list) ? list : []).map((a) => {
+      const i = state.annotations.findIndex((x) => x.id === a.id);
+      return { ...a, pinNum: i >= 0 ? i + 1 : null };
+    });
+    if (wv) wv.send('caos:restore-annotations', arr);
   });
 }
 
-// Re-send the full current set so pin numbers match the Notes list ordering.
+// Re-send the full current set so pin badge numbers match the Notes list '#'.
 function refreshPins() {
   if (!state.currentSession || !state.settings.restoreAnnotationsOnLoad) return;
   const url = state.currentUrl;
-  const list = state.annotations.filter((a) => a.url === url);
-  wv.send('caos:restore-annotations', list);
+  const list = state.annotations
+    .filter((a) => a.url === url)
+    .map((a) => ({ ...a, pinNum: state.annotations.indexOf(a) + 1 }));
+  if (wv) wv.send('caos:restore-annotations', list);
 }
 
 // ============================================================ SESSIONS
+let _sessionInFlight = null;
 async function ensureSession() {
   if (state.currentSession) return state.currentSession;
-  const session = await caos.sessions.create({
-    projectId: state.currentProject ? state.currentProject.id : null,
-    name: 'Quick notes',
-    url: state.currentUrl,
-    title: state.currentTitle,
-  });
-  state.currentSession = session;
-  state.annotations = [];
-  await refreshSessions();
-  toast('Started a “Quick notes” session');
-  return session;
+  // Concurrent annotations (e.g. rapid captures) must share ONE create, not
+  // each spawn a duplicate "Quick notes" session.
+  if (_sessionInFlight) return _sessionInFlight;
+  _sessionInFlight = (async () => {
+    const session = await caos.sessions.create({
+      projectId: state.currentProject ? state.currentProject.id : null,
+      name: 'Quick notes',
+      url: state.currentUrl,
+      title: state.currentTitle,
+    });
+    state.currentSession = session;
+    state.annotations = [];
+    await refreshSessions();
+    toast('Started a “Quick notes” session');
+    return session;
+  })();
+  try {
+    return await _sessionInFlight;
+  } finally {
+    _sessionInFlight = null;
+  }
 }
 
 function syncSessionTitle() {

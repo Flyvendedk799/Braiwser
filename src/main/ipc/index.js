@@ -155,6 +155,12 @@ function register({ repos, paths, getWindow }) {
   on('caos:capture-fullpage', async (webContentsId) => {
     const wc = webContents.fromId(webContentsId);
     if (!wc || wc.isDestroyed()) return { ok: false, error: 'guest webContents not found' };
+    // Only attach the debugger to a guest <webview> hosted by our window — never
+    // the privileged renderer or an arbitrary webContents id from the renderer.
+    const host = win() && !win().isDestroyed() ? win().webContents : null;
+    if (wc.getType() !== 'webview' || (host && wc.hostWebContents !== host)) {
+      return { ok: false, error: 'not a guest webContents' };
+    }
     const dbg = wc.debugger;
     let attached = false;
     try {

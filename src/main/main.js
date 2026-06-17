@@ -2,7 +2,7 @@
 // Boots the store, registers IPC, and creates the shell window. The guest web
 // project loads inside a <webview> in the renderer; all persistence and AI calls
 // flow through IPC to this process.
-const { app, BrowserWindow, webContents } = require('electron');
+const { app, BrowserWindow, webContents, shell } = require('electron');
 const path = require('path');
 const { createRepositories } = require('./store/repositories');
 const registerIpc = require('./ipc');
@@ -63,6 +63,17 @@ app.on('web-contents-created', (_e, contents) => {
     webPreferences.contextIsolation = true;
     webPreferences.nodeIntegration = false;
   });
+  // Guest pages must not spawn uncontrolled in-app windows. Deny all popups;
+  // open vetted http/https links in the OS browser instead.
+  if (contents.getType() === 'webview') {
+    contents.setWindowOpenHandler(({ url }) => {
+      try {
+        const u = new URL(url);
+        if (u.protocol === 'http:' || u.protocol === 'https:') shell.openExternal(url);
+      } catch (_e) { /* ignore malformed URLs */ }
+      return { action: 'deny' };
+    });
+  }
 });
 
 app.whenReady().then(() => {
