@@ -1,7 +1,7 @@
 // AI tab: pick a task from config.aiTasks, Run it over the current session via
 // caos.ai.run, show a spinner, then render the result with Copy / Save actions.
 // On error (e.g. missing key) show a message with a link to Settings.
-import { h, icon, clear, toast } from '../lib/dom.js';
+import { h, icon, clear, toast, esc } from '../lib/dom.js';
 
 export function createAiPanel(config, actions) {
   const taskIds = Object.keys(config.aiTasks || {});
@@ -136,7 +136,7 @@ function prettyTask(id) {
 // Escape, then apply a light markdown subset: headings, bold, inline code, and
 // fenced code blocks. Good enough for displaying AI output cleanly.
 function renderMarkdownish(text) {
-  let s = escapeHtml(text);
+  let s = esc(text);
   // fenced code blocks
   s = s.replace(/```(\w*)\n([\s\S]*?)```/g, (_m, _lang, code) => `<pre><code>${code.replace(/\n$/, '')}</code></pre>`);
   // headings
@@ -150,12 +150,5 @@ function renderMarkdownish(text) {
 }
 
 function renderInline(text) {
-  return escapeHtml(text).replace(/`([^`]+)`/g, '<code>$1</code>');
-}
-
-function escapeHtml(s) {
-  return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+  return esc(text).replace(/`([^`]+)`/g, '<code>$1</code>');
 }

@@ -7,7 +7,7 @@ const ACTION_COLORS = {
   add: '#3ddc97', question: '#c792ea', comment: '#9aa2b1',
 };
 
-export function compositeAnnotations(dataUrl, annotations, { cssWidth }) {
+export function compositeAnnotations(dataUrl, annotations, { cssWidth, colors } = {}) {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
@@ -26,7 +26,7 @@ export function compositeAnnotations(dataUrl, annotations, { cssWidth }) {
         // viewport box on the annotation target (viewport screenshot).
         const box = a.box || (a.target && a.target.box);
         if (!box) return;
-        const color = ACTION_COLORS[a.action] || '#9aa2b1';
+        const color = (colors && colors[a.action]) || ACTION_COLORS[a.action] || '#9aa2b1';
         const x = box.x * scale, y = box.y * scale, w = box.w * scale, h = box.h * scale;
 
         ctx.strokeStyle = color;

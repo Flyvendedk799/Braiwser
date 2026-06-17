@@ -28,6 +28,8 @@
     const count = document.getElementById('count');
     document.getElementById('cta').addEventListener('click', () => { n++; count.textContent = String(n); });
     document.getElementById('email').addEventListener('input', (e) => { window.__lastInput = e.target.value; });
+    // Emit a console error so console-capture coverage has something to find.
+    console.error('E2E fixture console error');
   </script>
 </body>
 </html>

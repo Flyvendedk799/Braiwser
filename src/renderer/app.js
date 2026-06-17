@@ -123,7 +123,7 @@ function buildShell() {
 
   // ---- Right panel ----
   notesPanel = createNotesPanel(state.config, {
-    locate: (a) => sendWv('caos:highlight-target', a.target),
+    locate: (a) => locateAnnotation(a),
     editNote: (a, note) => updateAnnotation(a, { note }),
     toggleStatus: (a) => updateAnnotation(a, { status: (a.status || 'open') === 'open' ? 'resolved' : 'open' }),
     setPriority: (a, priority) => updateAnnotation(a, { priority }),
@@ -270,6 +270,16 @@ function renderTabs() {
   tabStrip.update(state.tabs, state.activeTabId);
 }
 
+// Bounded per-tab capture of guest console + load errors, surfaced to the agent.
+function pushConsole(tab, entry) {
+  (tab.consoleLog = tab.consoleLog || []).push({ ...entry, message: String(entry.message || '').slice(0, 500) });
+  if (tab.consoleLog.length > 50) tab.consoleLog.shift();
+}
+function tabConsole() {
+  const t = activeTab();
+  return (t && t.consoleLog) || [];
+}
+
 // Persist the open tab set (debounced) so it can be restored next launch.
 let _persistTimer = null;
 function persistOpenTabs() {
@@ -295,6 +305,7 @@ function setupTabWebview(tab) {
   });
 
   el.addEventListener('console-message', (e) => {
+    if (e.level >= 1) pushConsole(tab, { level: e.level, message: e.message });
     if (e.level >= 2) console.warn(`[guest] ${e.message}`);
   });
 
@@ -303,6 +314,7 @@ function setupTabWebview(tab) {
   el.addEventListener('did-fail-load', (e) => {
     if (e.errorCode === -3 || e.isMainFrame === false) return;
     tab.errored = true;
+    pushConsole(tab, { kind: 'load-error', message: `${e.errorDescription || ''} (${e.errorCode}) ${e.validatedURL || ''}` });
     if (isActive()) toast(`Load failed: ${e.errorDescription || e.errorCode}`, 'error', 4000);
   });
   el.addEventListener('render-process-gone', (e) => {
@@ -502,6 +514,29 @@ function maybeRestoreAnnotations() {
       return { ...a, pinNum: i >= 0 ? i + 1 : null };
     });
     if (wv) sendWv('caos:restore-annotations', arr);
+  });
+}
+
+// Locate an annotation's element — navigating to its page first if the active
+// tab is showing a different URL — then highlight it and report if not found.
+async function locateAnnotation(a) {
+  if (!a || !a.target) return;
+  if (a.url && a.url !== state.currentUrl) {
+    await navigateAndWait(a.url);
+    await sleep(150);
+  }
+  const ok = await highlightAndAck(a.target);
+  if (!ok) toast('Could not locate that element on the page', 'warn');
+}
+
+function highlightAndAck(target) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; wv.removeEventListener('ipc-message', h); resolve(v); } };
+    const h = (e) => { if (e.channel === 'caos:highlight-ack') done(!!(e.args[0] && e.args[0].ok)); };
+    if (wv) wv.addEventListener('ipc-message', h);
+    sendWv('caos:highlight-target', target);
+    setTimeout(() => done(false), 1500);
   });
 }
 
@@ -1018,6 +1053,13 @@ function currentUrlAnnotations() {
   return state.annotations.filter((a) => a.url === state.currentUrl);
 }
 
+// Action→color map from the canonical config (passed to the screenshot compositor).
+function actionColors() {
+  const m = {};
+  for (const t of (state.config && state.config.actionTags) || []) m[t.id] = t.color;
+  return m;
+}
+
 // Ask the inspector for live page-coordinate boxes for the given annotations.
 function requestPageBoxes(annotations) {
   return new Promise((resolve) => {
@@ -1042,7 +1084,7 @@ async function doScreenshot(full) {
       const img = await wv.capturePage();
       let dataUrl = img.toDataURL();
       const onPage = currentUrlAnnotations().filter((a) => a.target && a.target.box);
-      if (onPage.length) dataUrl = await compositeAnnotations(dataUrl, onPage, { cssWidth: wv.clientWidth });
+      if (onPage.length) dataUrl = await compositeAnnotations(dataUrl, onPage, { cssWidth: wv.clientWidth, colors: actionColors() });
       await saveShot(dataUrl, onPage.length);
       return;
     }
@@ -1057,7 +1099,7 @@ async function doScreenshot(full) {
       const boxes = await requestPageBoxes(onPage);
       const items = onPage.map((a, i) => ({ action: a.action, note: a.note, box: boxes[i] })).filter((it) => it.box);
       count = items.length;
-      if (items.length) dataUrl = await compositeAnnotations(dataUrl, items, { cssWidth: cap.cssWidth });
+      if (items.length) dataUrl = await compositeAnnotations(dataUrl, items, { cssWidth: cap.cssWidth, colors: actionColors() });
     }
     await saveShot(dataUrl, count, 'fullpage');
   } catch (e) {
@@ -1086,7 +1128,7 @@ async function copyText(text, okMsg) {
 async function copyExport(format) {
   if (!state.currentSession) { toast('Open or start a session first', 'warn'); return; }
   try {
-    const result = await caos.export.build(format, state.currentSession.id);
+    const result = await caos.export.build(format, state.currentSession.id, { consoleLog: tabConsole() });
     if (!result || !result.content) { toast('Nothing to copy', 'warn'); return; }
     await copyText(result.content, 'Prompt copied to clipboard');
   } catch (e) {
@@ -1097,7 +1139,7 @@ async function copyExport(format) {
 async function doExport(format) {
   if (!state.currentSession) { toast('Open or start a session first', 'warn'); return; }
   try {
-    const result = await caos.export.build(format, state.currentSession.id);
+    const result = await caos.export.build(format, state.currentSession.id, { consoleLog: tabConsole() });
     if (!result) { toast('Nothing to export', 'warn'); return; }
     const saved = await caos.fs.save({ defaultName: result.defaultName, content: result.content });
     if (saved) toast(`Exported ${format}`, 'success');
@@ -1113,7 +1155,7 @@ async function handoffToAgent() {
 
   let res;
   try {
-    res = await caos.agent.write(state.currentSession.id);
+    res = await caos.agent.write(state.currentSession.id, { consoleLog: tabConsole() });
   } catch (e) {
     toast('Hand-off failed: ' + (e && e.message ? e.message : e), 'error');
     return;

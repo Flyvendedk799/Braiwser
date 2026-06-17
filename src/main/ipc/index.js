@@ -122,23 +122,23 @@ function register({ repos, paths, getWindow }) {
   });
 
   // --- export ---
-  on('caos:export.build', (format, sessionId) => {
+  on('caos:export.build', (format, sessionId, extras) => {
     const { buildExport } = require('../services/export');
     const session = repos.sessions.get(sessionId);
     const annotations = repos.annotations.bySession(sessionId);
-    return buildExport(format, { session, annotations });
+    return buildExport(format, { session, annotations, consoleLog: extras && extras.consoleLog });
   });
 
   // --- agent hand-off ---
   function resolveProject(session) {
     return session && session.projectId ? repos.projects.get(session.projectId) : null;
   }
-  on('caos:agent.write', (sessionId) => {
+  on('caos:agent.write', (sessionId, extras) => {
     const { writeRequest } = require('../services/agent/handoff');
     const session = repos.sessions.get(sessionId);
     const annotations = repos.annotations.bySession(sessionId);
     const project = resolveProject(session);
-    const { file, cwd, length } = writeRequest({ session, annotations, project, appDir: repos.dir });
+    const { file, cwd, length } = writeRequest({ session, annotations, project, appDir: repos.dir, consoleLog: extras && extras.consoleLog });
     return { file, cwd, length, command: (repos.settings.get().agentCommand || '').trim() };
   });
   on('caos:agent.run', async (sessionId, filePath) => {

@@ -22,7 +22,7 @@ contextBridge.exposeInMainWorld('caos', {
   },
 
   agent: {
-    write: (sessionId) => invoke('caos:agent.write', sessionId),
+    write: (sessionId, extras) => invoke('caos:agent.write', sessionId, extras),
     run: (sessionId, filePath) => invoke('caos:agent.run', sessionId, filePath),
     onOutput: (cb) => {
       const listener = (_e, chunk) => cb(chunk);
@@ -94,6 +94,6 @@ contextBridge.exposeInMainWorld('caos', {
   },
 
   export: {
-    build: (format, sessionId) => invoke('caos:export.build', format, sessionId),
+    build: (format, sessionId, extras) => invoke('caos:export.build', format, sessionId, extras),
   },
 });

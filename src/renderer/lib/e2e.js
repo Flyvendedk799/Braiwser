@@ -261,6 +261,67 @@ export async function run(I) {
       check('address autocomplete populated', opts.length >= 1 && Array.from(opts).some((o) => /fixture\.html/.test(o.value)), 'options=' + opts.length);
     }
 
+    // --- 13. Annotation mutation lifecycle (status/priority/note/remove) ---
+    {
+      const before = (await caos.annotations.bySession(session.id)).length;
+      const tmp = await caos.annotations.create({ sessionId: session.id, kind: 'element', action: 'comment', note: 'temp', url: fixtureUrl, title: 'E2E', target: { selector: '#email' } });
+      await caos.annotations.update(tmp.id, { status: 'resolved', priority: 'high', note: 'updated note' });
+      const fetched = (await caos.annotations.bySession(session.id)).find((a) => a.id === tmp.id);
+      check('annotation update persists', fetched && fetched.status === 'resolved' && fetched.priority === 'high' && fetched.note === 'updated note', fetched && `${fetched.status}/${fetched.priority}`);
+      await caos.annotations.remove(tmp.id);
+      const after = (await caos.annotations.bySession(session.id)).length;
+      check('annotation remove persists', after === before, `${before}->${after}`);
+    }
+
+    // --- 14. Guest console capture → surfaced in the prompt export ---
+    {
+      const tab = I.state.tabs.find((t) => t.id === I.state.activeTabId);
+      const captured = (tab && tab.consoleLog) || [];
+      check('guest console captured', captured.some((c) => /fixture console error/i.test(c.message)), 'entries=' + captured.length);
+      const withConsole = await caos.export.build('prompt', session.id, { consoleLog: [{ level: 3, message: 'BOOM_CONSOLE' }] });
+      check('console surfaced in prompt export', withConsole && /BOOM_CONSOLE/.test(withConsole.content), 'prompt+console');
+    }
+
+    // --- 15. Replay error path (unresolved selector reports failure) ---
+    {
+      const errRec = await caos.recordings.create({ projectId: project.id, name: 'E2E Err', startUrl: fixtureUrl, steps: [
+        { type: 'navigate', url: fixtureUrl, ts: 1 },
+        { type: 'click', selector: '#does-not-exist', ts: 2 },
+      ] });
+      await I.refreshRecordings();
+      I.selectRecording(errRec);
+      I.state.settings.replayDelayMs = 20;
+      const rep = await I.replaySelected();
+      check('replay reports unresolved-target failure', rep && rep.failed >= 1 && rep.steps.some((s) => s.type === 'click' && !s.ok), rep && `${rep.passed}/${rep.total}`);
+      await caos.recordings.remove(errRec.id);
+    }
+
+    // --- 16. Recording editor round-trip (reorder + delete + append assert) ---
+    {
+      const r0 = await caos.recordings.create({ projectId: project.id, name: 'E2E Edit', startUrl: fixtureUrl, steps: [
+        { type: 'navigate', url: fixtureUrl, ts: 1 },
+        { type: 'click', selector: '#cta', ts: 2 },
+        { type: 'input', selector: '#email', value: 'a@b.c', ts: 3 },
+      ] });
+      const steps = (await caos.recordings.get(r0.id)).steps.slice();
+      [steps[1], steps[2]] = [steps[2], steps[1]]; // reorder
+      steps.push({ type: 'assert', kind: 'exists', selector: '#cta', ts: 4 }); // append
+      await caos.recordings.update(r0.id, { steps });
+      const saved = await caos.recordings.get(r0.id);
+      check('recording editor round-trip', saved.steps.length === 4 && saved.steps[1].selector === '#email' && saved.steps[3].type === 'assert', 'len=' + saved.steps.length);
+      await caos.recordings.remove(r0.id);
+    }
+
+    // --- 17. Reload restores pins (maybeRestoreAnnotations path) ---
+    {
+      const ready17 = waitDomReady();
+      I.navigateTo(fixtureUrl);
+      await ready17;
+      await sleep(450);
+      const pins = await guest("Array.from(document.querySelectorAll('div[data-caos]')).filter(d => d.style.borderRadius === '50%').length");
+      check('pins restored after reload', pins >= 1, 'pins=' + pins);
+    }
+
     // --- cleanup ---
     await caos.recordings.remove(recording.id);
     await caos.sessions.remove(session.id);

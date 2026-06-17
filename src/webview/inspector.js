@@ -560,13 +560,15 @@ const replay = require('./replay');
   });
 
   ipcRenderer.on('caos:highlight-target', (_e, target) => {
+    let ok = false;
     try {
       const el = anchor.resolve(target);
-      if (el) anchor.highlight(el, { duration: 1400 });
-      else if (target && target.box) anchor.highlight(null, { duration: 1400, box: target.box });
+      if (el) { anchor.highlight(el, { duration: 1400 }); ok = true; }
+      else if (target && target.box) { anchor.highlight(null, { duration: 1400, box: target.box }); ok = true; }
     } catch (_err) {
       /* ignore */
     }
+    ipcRenderer.sendToHost('caos:highlight-ack', { ok });
   });
 
   ipcRenderer.on('caos:start-recording', () => {

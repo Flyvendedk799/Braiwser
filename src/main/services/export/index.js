@@ -19,9 +19,9 @@ function slugify(session) {
 }
 
 // format: 'markdown' | 'prompt' | 'json'
-// data:   { session, annotations }
+// data:   { session, annotations, consoleLog }
 // returns { format, defaultName, content }
-function buildExport(format, { session, annotations } = {}) {
+function buildExport(format, { session, annotations, consoleLog } = {}) {
   const slug = slugify(session);
 
   switch (format) {
@@ -29,13 +29,13 @@ function buildExport(format, { session, annotations } = {}) {
       return {
         format,
         defaultName: `${slug}.md`,
-        content: toMarkdown(session, annotations),
+        content: toMarkdown(session, annotations, consoleLog),
       };
     case 'prompt':
       return {
         format,
         defaultName: `${slug}-fix-prompt.txt`,
-        content: toPrompt(session, annotations),
+        content: toPrompt(session, annotations, consoleLog),
       };
     case 'json':
       return {

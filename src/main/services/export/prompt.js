@@ -2,6 +2,9 @@
 // paste instruction prompt for a CODING AGENT. Imperative and precise so the
 // agent can act on each item directly. Pure function, no I/O, no AI.
 
+const { consoleLines } = require('../format/console');
+const { truncate } = require('../format/text');
+
 // Imperative verb per action tag — phrasing meant for an agent to execute.
 const ACTION_VERBS = {
   remove: 'Remove',
@@ -11,11 +14,6 @@ const ACTION_VERBS = {
   question: 'Answer / investigate',
   comment: 'Address',
 };
-
-function truncate(str, max) {
-  const s = String(str);
-  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
-}
 
 // A precise, single-line description of where a change applies.
 function describeTargetInline(annotation) {
@@ -50,7 +48,7 @@ function byPriority(list) {
     .map((pair) => pair[0]);
 }
 
-function toPrompt(session, annotations) {
+function toPrompt(session, annotations, consoleLog) {
   const list = byPriority(Array.isArray(annotations) ? annotations : []);
   const out = [];
 
@@ -96,6 +94,13 @@ function toPrompt(session, annotations) {
 
     out.push(line);
     index += 1;
+  }
+
+  const cl = consoleLines(consoleLog);
+  if (cl.length) {
+    out.push('');
+    out.push('Console / load errors observed on the page (may be related):');
+    out.push(...cl);
   }
 
   out.push('');

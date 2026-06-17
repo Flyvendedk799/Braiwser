@@ -1,6 +1,9 @@
 // Markdown exporter — turns a review session + its annotations into a clean,
 // human-readable review document. Pure function, no I/O, no AI.
 
+const { consoleLines } = require('../format/console');
+const { truncate } = require('../format/text');
+
 // Human labels for the fixed action tag set (see ../config ACTION_TAGS).
 const ACTION_LABELS = {
   remove: 'Remove',
@@ -58,11 +61,6 @@ function describeTarget(annotation) {
   return lines;
 }
 
-function truncate(str, max) {
-  const s = String(str);
-  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
-}
-
 // Build the document title from the session's title or URL.
 function documentTitle(session) {
   const s = session || {};
@@ -82,7 +80,7 @@ function byPriority(list) {
     .map((pair) => pair[0]);
 }
 
-function toMarkdown(session, annotations) {
+function toMarkdown(session, annotations, consoleLog) {
   const list = byPriority(Array.isArray(annotations) ? annotations : []);
   const out = [];
 
@@ -147,6 +145,14 @@ function toMarkdown(session, annotations) {
 
       index += 1;
     }
+  }
+
+  const cl = consoleLines(consoleLog);
+  if (cl.length) {
+    out.push('## Console / load errors');
+    out.push('');
+    out.push(...cl);
+    out.push('');
   }
 
   return out.join('\n').replace(/\n+$/, '\n');
