@@ -8,8 +8,19 @@ const path = require('path');
 
 function atomicWrite(file, data) {
   const tmp = file + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
-  fs.renameSync(tmp, file);
+  let fd;
+  try {
+    fd = fs.openSync(tmp, 'w');
+    fs.writeFileSync(fd, JSON.stringify(data, null, 2));
+    fs.fsyncSync(fd); // flush to disk before the rename so a crash can't tear it
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try { if (fd !== undefined) fs.closeSync(fd); } catch (_e) { /* ignore */ }
+    try { fs.unlinkSync(tmp); } catch (_e) { /* ignore */ }
+    throw new Error(`Failed to persist ${path.basename(file)}: ${err.message}`);
+  }
 }
 
 class JsonCollection {

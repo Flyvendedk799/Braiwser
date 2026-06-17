@@ -128,6 +128,7 @@ const replay = require('./replay');
   function redraw() {
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (mode !== 'draw' || !strokes.length) return; // nothing to paint
     ctx.lineWidth = 3;
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
@@ -423,6 +424,7 @@ const replay = require('./replay');
       pin.badge.style.left = pos.x + 'px';
       pin.badge.style.top = pos.y + 'px';
     }
+    redraw(); // batch the draw-mode stroke repaint into the same rAF frame
   }
 
   function queuePinSync() {
@@ -519,8 +521,7 @@ const replay = require('./replay');
     window.addEventListener(
       'scroll',
       () => {
-        redraw();
-        queuePinSync();
+        queuePinSync(); // rAF-batched; syncPins() repaints strokes too
       },
       true
     );

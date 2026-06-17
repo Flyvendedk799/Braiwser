@@ -63,6 +63,11 @@ function createRepositories(userDataDir) {
   const annotations = {
     bySession: (sessionId) => annotationsC.find((a) => a.sessionId === sessionId).sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '')),
     bySessionUrl: (sessionId, url) => annotationsC.find((a) => a.sessionId === sessionId && a.url === url),
+    countsBySession: () => {
+      const counts = {};
+      for (const a of annotationsC.all()) counts[a.sessionId] = (counts[a.sessionId] || 0) + 1;
+      return counts;
+    },
     get: (i) => annotationsC.get(i),
     create: (a) => {
       const doc = {
@@ -100,13 +105,21 @@ function createRepositories(userDataDir) {
     remove: (i) => recordingsC.remove(i),
   };
 
+  const HISTORY_MAX = 1000;
   const history = {
     list: (limit) => historyC.all().sort((a, b) => (b.visitedAt || '').localeCompare(a.visitedAt || '')).slice(0, limit || 100),
     record: ({ url, title }) => {
       if (!url) return null;
       const recent = historyC.all().sort((a, b) => (b.visitedAt || '').localeCompare(a.visitedAt || ''))[0];
       if (recent && recent.url === url) return historyC.update(recent.id, { visitedAt: now(), title: title || recent.title });
-      return historyC.insert({ id: id(), url, title: title || '', visitedAt: now() });
+      const inserted = historyC.insert({ id: id(), url, title: title || '', visitedAt: now() });
+      // Bound growth: keep only the newest HISTORY_MAX entries.
+      const all = historyC.all();
+      if (all.length > HISTORY_MAX) {
+        const keep = new Set(all.sort((a, b) => (b.visitedAt || '').localeCompare(a.visitedAt || '')).slice(0, HISTORY_MAX).map((x) => x.id));
+        historyC.removeWhere((x) => !keep.has(x.id));
+      }
+      return inserted;
     },
     clear: () => { historyC.removeWhere(() => true); return true; },
   };

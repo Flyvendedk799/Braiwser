@@ -115,7 +115,7 @@ function buildShell() {
 
   // ---- Right panel ----
   notesPanel = createNotesPanel(state.config, {
-    locate: (a) => wv.send('caos:highlight-target', a.target),
+    locate: (a) => sendWv('caos:highlight-target', a.target),
     editNote: (a, note) => updateAnnotation(a, { note }),
     toggleStatus: (a) => updateAnnotation(a, { status: (a.status || 'open') === 'open' ? 'resolved' : 'open' }),
     setPriority: (a, priority) => updateAnnotation(a, { priority }),
@@ -124,8 +124,8 @@ function buildShell() {
   });
 
   inspectorPanel = createInspectorPanel({
-    requestTree: () => wv.send('caos:request-dom-tree'),
-    highlight: (target) => wv.send('caos:highlight-target', target),
+    requestTree: () => sendWv('caos:request-dom-tree'),
+    highlight: (target) => sendWv('caos:highlight-target', target),
   });
 
   aiPanel = createAiPanel(state.config, {
@@ -217,7 +217,7 @@ function setActiveTab(id) {
   syncToolbar();
   updateBookmarkState();
   renderTabs();
-  try { wv.send('caos:set-mode', state.mode); } catch (_e) { /* not ready */ }
+  try { sendWv('caos:set-mode', state.mode); } catch (_e) { /* not ready */ }
   maybeRestoreAnnotations();
 }
 
@@ -254,6 +254,18 @@ function setupTabWebview(tab) {
 
   el.addEventListener('console-message', (e) => {
     if (e.level >= 2) console.warn(`[guest] ${e.message}`);
+  });
+
+  // Surface load failures (ignore -3 ERR_ABORTED and sub-frame errors) and
+  // recover the guest renderer if it crashes.
+  el.addEventListener('did-fail-load', (e) => {
+    if (e.errorCode === -3 || e.isMainFrame === false) return;
+    tab.errored = true;
+    if (isActive()) toast(`Load failed: ${e.errorDescription || e.errorCode}`, 'error', 4000);
+  });
+  el.addEventListener('render-process-gone', (e) => {
+    if (isActive()) toast(`Page crashed (${(e && e.reason) || 'gone'}) — reloading`, 'error', 4000);
+    try { el.reload(); } catch (_err) { /* ignore */ }
   });
 
   el.addEventListener('did-navigate', (e) => onNavigated(tab, e.url));
@@ -386,10 +398,16 @@ function syncToolbar() {
 
 function safe(fn) { try { return fn(); } catch (_e) { return false; } }
 
+// Send to the active webview, tolerating a null/not-yet-ready/destroyed view.
+function sendWv(channel, ...args) {
+  if (!wv) return;
+  try { wv.send(channel, ...args); } catch (_e) { /* webview not ready or gone */ }
+}
+
 // ============================================================ MODES
 function setMode(mode) {
   state.mode = state.mode === mode ? 'off' : mode;
-  if (wv) wv.send('caos:set-mode', state.mode);
+  if (wv) sendWv('caos:set-mode', state.mode);
   syncToolbar();
 }
 
@@ -436,7 +454,7 @@ function maybeRestoreAnnotations() {
       const i = state.annotations.findIndex((x) => x.id === a.id);
       return { ...a, pinNum: i >= 0 ? i + 1 : null };
     });
-    if (wv) wv.send('caos:restore-annotations', arr);
+    if (wv) sendWv('caos:restore-annotations', arr);
   });
 }
 
@@ -447,7 +465,7 @@ function refreshPins() {
   const list = state.annotations
     .filter((a) => a.url === url)
     .map((a) => ({ ...a, pinNum: state.annotations.indexOf(a) + 1 }));
-  if (wv) wv.send('caos:restore-annotations', list);
+  if (wv) sendWv('caos:restore-annotations', list);
 }
 
 // ============================================================ SESSIONS
@@ -528,7 +546,7 @@ async function deleteSession(session) {
     state.currentSession = null;
     state.annotations = [];
     notesPanel.setAnnotations([]);
-    wv.send('caos:clear-overlays');
+    sendWv('caos:clear-overlays');
   }
   await refreshSessions();
   toast('Session deleted');
@@ -536,13 +554,8 @@ async function deleteSession(session) {
 
 async function refreshSessions() {
   state.sessions = await caos.sessions.list(state.currentProject ? state.currentProject.id : undefined);
-  // Counts for the badge.
-  const counts = {};
-  await Promise.all(state.sessions.map(async (s) => {
-    const list = await caos.annotations.bySession(s.id);
-    counts[s.id] = list.length;
-  }));
-  state.sessionCounts = counts;
+  // Badge counts in ONE pass (was N+1 bySession round-trips).
+  state.sessionCounts = await caos.annotations.countsBySession();
   renderSidebar();
 }
 
@@ -644,7 +657,7 @@ async function toggleRecord() {
 function startRecording() {
   if (state.replaying) return;
   state.recordingBuffer = { startUrl: state.currentUrl, steps: [{ type: 'navigate', url: state.currentUrl, ts: Date.now() }] };
-  wv.send('caos:start-recording');
+  sendWv('caos:start-recording');
   syncToolbar();
   showOverlay(true);
   overlayLabel.innerHTML = '<span class="rec-dot"></span> Recording…';
@@ -654,7 +667,7 @@ function startRecording() {
 }
 
 async function stopRecording() {
-  wv.send('caos:stop-recording');
+  sendWv('caos:stop-recording');
   const buffer = state.recordingBuffer;
   state.recordingBuffer = null;
   syncToolbar();
@@ -910,7 +923,7 @@ function replayStep(step, index) {
     let settled = false;
     const done = (res) => { if (!settled) { settled = true; replayWaiters.delete(index); resolve(res || { ok: false, error: 'timeout' }); } };
     replayWaiters.set(index, { resolve: (p) => done(p) });
-    wv.send('caos:replay-step', { step, index });
+    sendWv('caos:replay-step', { step, index });
     setTimeout(() => done({ ok: false, error: 'no response (timeout)' }), 5000); // per-step timeout
   });
 }
@@ -965,7 +978,7 @@ function requestPageBoxes(annotations) {
       if (e.channel === 'caos:page-boxes') { wv.removeEventListener('ipc-message', handler); resolve(e.args[0] || []); }
     };
     wv.addEventListener('ipc-message', handler);
-    wv.send('caos:request-page-boxes', annotations);
+    sendWv('caos:request-page-boxes', annotations);
     setTimeout(() => { wv.removeEventListener('ipc-message', handler); resolve([]); }, 3000);
   });
 }
@@ -1008,9 +1021,13 @@ async function doScreenshot(full) {
 // ============================================================ AI / EXPORT
 async function saveAiResult(task, text) {
   if (!text) return;
-  const name = `ai-${task}-${stamp()}.md`;
-  const saved = await caos.fs.save({ defaultName: name, content: text });
-  if (saved) toast('Saved', 'success');
+  try {
+    const name = `ai-${task}-${stamp()}.md`;
+    const saved = await caos.fs.save({ defaultName: name, content: text });
+    if (saved) toast('Saved', 'success');
+  } catch (e) {
+    toast('Save failed: ' + (e && e.message ? e.message : e), 'error');
+  }
 }
 
 async function doExport(format) {

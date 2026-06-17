@@ -51,6 +51,7 @@ contextBridge.exposeInMainWorld('caos', {
   annotations: {
     bySession: (sessionId) => invoke('caos:annotations.bySession', sessionId),
     bySessionUrl: (sessionId, url) => invoke('caos:annotations.bySessionUrl', sessionId, url),
+    countsBySession: () => invoke('caos:annotations.countsBySession'),
     create: (a) => invoke('caos:annotations.create', a),
     update: (id, patch) => invoke('caos:annotations.update', id, patch),
     remove: (id) => invoke('caos:annotations.remove', id),

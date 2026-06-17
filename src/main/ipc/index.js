@@ -53,13 +53,15 @@ function register({ repos, paths, getWindow }) {
   on('caos:save', async ({ defaultName, content }) => {
     const r = await dialog.showSaveDialog(win(), { title: 'Save', defaultPath: defaultName || 'export.md' });
     if (r.canceled || !r.filePath) return null;
-    fs.writeFileSync(r.filePath, content, 'utf8');
+    try { fs.writeFileSync(r.filePath, content, 'utf8'); }
+    catch (err) { throw new Error(`Failed to save ${r.filePath}: ${err.message}`); }
     return r.filePath;
   });
   on('caos:save-screenshot', async ({ defaultName, dataUrl }) => {
     const r = await dialog.showSaveDialog(win(), { title: 'Save screenshot', defaultPath: defaultName || 'screenshot.png' });
     if (r.canceled || !r.filePath) return null;
-    fs.writeFileSync(r.filePath, Buffer.from(String(dataUrl).replace(/^data:image\/png;base64,/, ''), 'base64'));
+    try { fs.writeFileSync(r.filePath, Buffer.from(String(dataUrl).replace(/^data:image\/png;base64,/, ''), 'base64')); }
+    catch (err) { throw new Error(`Failed to save ${r.filePath}: ${err.message}`); }
     return r.filePath;
   });
 
@@ -81,6 +83,7 @@ function register({ repos, paths, getWindow }) {
   // --- annotations ---
   on('caos:annotations.bySession', (sessionId) => repos.annotations.bySession(sessionId));
   on('caos:annotations.bySessionUrl', (sessionId, url) => repos.annotations.bySessionUrl(sessionId, url));
+  on('caos:annotations.countsBySession', () => repos.annotations.countsBySession());
   on('caos:annotations.create', (a) => repos.annotations.create(a));
   on('caos:annotations.update', (id, patch) => repos.annotations.update(id, patch));
   on('caos:annotations.remove', (id) => repos.annotations.remove(id));

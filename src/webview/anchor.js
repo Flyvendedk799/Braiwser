@@ -7,9 +7,19 @@
 const OVERLAY_Z = 2147483640;
 
 // ---- robust CSS selector for an element ------------------------------------
+// Test-friendly attributes preferred over brittle structural paths.
+const STABLE_ATTRS = ['data-testid', 'data-test', 'data-cy', 'data-qa', 'name', 'aria-label'];
+
 function cssPath(el) {
   try {
     if (!(el instanceof Element)) return '';
+    // Best path: a stable, test-oriented attribute that uniquely identifies it.
+    for (const attr of STABLE_ATTRS) {
+      const val = el.getAttribute && el.getAttribute(attr);
+      if (!val) continue;
+      const cand = `${el.nodeName.toLowerCase()}[${attr}="${cssEscapeAttr(val)}"]`;
+      try { if (document.querySelectorAll(cand).length === 1) return cand; } catch (_e) { /* invalid */ }
+    }
     // Fast path: a stable id wins outright.
     if (el.id && document.querySelectorAll('#' + cssEscape(el.id)).length === 1) {
       return '#' + cssEscape(el.id);
@@ -53,6 +63,11 @@ function cssEscape(s) {
     /* ignore */
   }
   return String(s).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+}
+
+// Escape a value for use inside an [attr="..."] selector.
+function cssEscapeAttr(s) {
+  return String(s).replace(/(["\\])/g, '\\$1');
 }
 
 // ---- describe an element into a portable target descriptor -----------------

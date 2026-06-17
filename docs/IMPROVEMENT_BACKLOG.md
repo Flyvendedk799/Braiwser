@@ -30,7 +30,7 @@ Files: `src/renderer/app.js`, `src/renderer/components/notes-panel.js`, `src/web
 
 _e2e:_ Must keep 51 checks green; this batch touches the exact replay/restore paths the harness drives. Re-run npm run e2e after each sub-change. The pin-number fix interacts with section-3 pinCount assertions and B10's restore/region tests — verify pin badge text now equals notes '#'. No new checks required here (B10 adds the deeper replay/restore coverage); existing replay sections (5/6/9b) and restore-pins (section 3) are the regression guard.
 
-### [ ] B3 - Persistence error handling (JSON store + save IPC)  `P1` (risk: medium)
+### [x] B3 - Persistence error handling (JSON store + save IPC)  `P1` (risk: medium)
 Files: `src/main/store/db.js`, `src/main/store/repositories.js`, `src/main/ipc/index.js`, `src/renderer/app.js`
 
 - atomicwrite-no-error-handling: harden db.js atomicWrite with fd open/write/fsync/close/rename + catch that closes fd, unlinks the .tmp, and rethrows a clean 'Failed to persist <file>: <msg>' Error (preserves throw-on-failure contract). In app.js onAnnotation wrap caos.annotations.create in try/catch with an error toast and early return (push already runs post-await so no rollback needed).
@@ -38,7 +38,7 @@ Files: `src/main/store/db.js`, `src/main/store/repositories.js`, `src/main/ipc/i
 
 _e2e:_ db.js sits on every persistence path the harness uses (annotations/recordings/settings), so the happy-path contract (throw only on real failure) must be preserved — re-run npm run e2e to confirm 51 checks. No new harness checks needed; error paths are hard to trigger with trusted input. app.js overlap with other batches is confined to onAnnotation + saveAiResult (disjoint from B2's replay region and B6's keydown region).
 
-### [ ] B4 - Performance & history bounding  `P1` (risk: low)
+### [x] B4 - Performance & history bounding  `P1` (risk: low)
 Files: `src/main/store/repositories.js`, `src/renderer/app.js`, `src/main/ipc/index.js`, `src/main/preload.js`
 
 - history-unbounded (MERGED with duplicate history-unbounded-growth): in repositories.js history.record add HISTORY_MAX (~1000) cap, trimming to newest N only when over cap; keep existing consecutive-URL de-dupe; optionally replace per-call .sort dedupe scan with an O(n) reduce. Optional app.js guard: skip caos.history.record while state.replaying.
@@ -47,7 +47,7 @@ Files: `src/main/store/repositories.js`, `src/renderer/app.js`, `src/main/ipc/in
 
 _e2e:_ scroll/redraw change is webview-only (inspector.js) — section-3 pin restore and B10 region/draw tests exercise pin sync, so confirm pins still render after the rAF coalescing change. countsBySession changes the session-count source; the harness reads session badge counts indirectly via state — re-run e2e (51). New optional check: assert caos.annotations.countsBySession() returns a map summing to bySession length. Note inspector.js is also touched by B2 (restoreAnnotations) and B7 (anchor/selector) — those are different functions, but if applied together do them in one inspector.js pass.
 
-### [ ] B5 - Renderer robustness (webview guards, crash handling)  `P1` (risk: low)
+### [x] B5 - Renderer robustness (webview guards, crash handling)  `P1` (risk: low)
 Files: `src/renderer/app.js`, `src/main/services/ai/claude.js`, `src/main/services/ai/openai.js`, `src/main/services/ai/index.js`
 
 - wv-send-unguarded: add a sendWv(channel,...args) helper (try/catch + isDestroyed fallback) near `safe`; route all wv.send calls (lines 118,127-128,216,436,506,622,632,888,943) through it; null-guard toolbar back/forward/reload callbacks; guard requestPageBoxes add/removeEventListener with an early 'if(!wv){resolve([]);return;}'.
@@ -65,7 +65,7 @@ Files: `src/renderer/app.js`, `src/renderer/components/toolbar.js`
 
 _e2e:_ Keep load-state/toolbar mutations gated on isActive() so tab switching + the 51 harness checks stay deterministic. The new keydown listener fires only on app chrome (webview swallows guest keys) so it won't interfere with the harness's trusted webview input. SHARED EVENT with B5: did-fail-load — land a single merged handler. New optional check: drive Cmd+L via a trusted key event and assert addressInput is focused; assert load-error placeholder appears on a bad navigate (errorCode != -3). Otherwise harness stays 51.
 
-### [ ] B7 - Goal: capture precision (stable selectors)  `P1` (risk: low)
+### [x] B7 - Goal: capture precision (stable selectors)  `P1` (risk: low)
 Files: `src/webview/anchor.js`
 
 - selector-no-testid-pref: in cssPath() add a stable-attribute fast-path (data-testid/data-test/data-cy/name/aria-label) guarded by document.querySelectorAll(cand).length===1, placed before the id fast-path; keep id and :nth-of-type chain as fallbacks. In describe().attrs add testid (data-testid||data-test||data-cy), name, and ariaLabel so exports/prompts can surface them.
