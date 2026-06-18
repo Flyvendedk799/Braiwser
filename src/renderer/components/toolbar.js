@@ -44,7 +44,7 @@ export function createToolbar(actions) {
 
   const shotBtn = btn({ icon: 'camera', title: 'Capture screenshot', onClick: actions.screenshot });
   const aiBtn = btn({ icon: 'ai', label: 'AI', title: 'Open the AI tab', onClick: actions.openAi });
-  const settingsBtn = btn({ icon: 'settings', title: 'Settings', onClick: actions.openSettings });
+  const settingsBtn = btn({ icon: 'settings', label: 'Profile', title: 'Profile and AI providers', onClick: actions.openSettings });
 
   const openFileBtn = btn({ icon: 'file', label: 'File', title: 'Open a local file', onClick: actions.openFile });
   const openFolderBtn = btn({ icon: 'folder', label: 'Folder', title: 'Open a local folder', onClick: actions.openFolder });
@@ -62,7 +62,7 @@ export function createToolbar(actions) {
   ]);
 
   function update(state) {
-    const { mode, recording, currentUrl, canGoBack, canGoForward, hasRecording, replaying, bookmarked, loading } = state;
+    const { mode, recording, currentUrl, canGoBack, canGoForward, hasRecording, replaying, bookmarked, loading, aiProvider, providerReady, profileName } = state;
     bookmarkBtn.textContent = bookmarked ? '★' : '☆';
     bookmarkBtn.classList.toggle('on', !!bookmarked);
     inspectBtn.classList.toggle('active', mode === 'inspect');
@@ -79,6 +79,10 @@ export function createToolbar(actions) {
     fwdBtn.disabled = !canGoForward;
     replayBtn.disabled = !hasRecording || replaying || !!recording;
     recBtn.disabled = replaying;
+    settingsBtn.classList.toggle('ready', !!providerReady);
+    settingsBtn.classList.toggle('needs-setup', providerReady === false);
+    settingsBtn.title = profileTooltip({ aiProvider, providerReady, profileName });
+    settingsBtn.setAttribute('aria-label', settingsBtn.title);
     if (currentUrl != null) updateLock(currentUrl);
     if (document.activeElement !== addressInput && currentUrl != null) {
       addressInput.value = prettyUrl(currentUrl);
@@ -114,6 +118,13 @@ export function createToolbar(actions) {
   }
 
   return { root, update, setAddress, setSuggestions, focusAddress };
+}
+
+function profileTooltip({ aiProvider, providerReady, profileName }) {
+  const provider = aiProvider === 'openai' ? 'OpenAI' : 'Claude';
+  const status = providerReady ? 'key set' : 'no key set';
+  const name = profileName ? `${profileName} - ` : '';
+  return `${name}Profile: ${provider} (${status})`;
 }
 
 // Show file:// paths and welcome page more cleanly in the address bar.

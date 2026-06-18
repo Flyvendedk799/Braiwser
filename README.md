@@ -29,9 +29,11 @@ to a coding agent.
   navigations) and replay it step-by-step through the browser.
 - 🌳 **DOM tree inspector** — pull a live, collapsible DOM tree; hover to highlight.
 - 🤖 **AI assistant** — transcribe notes into a polished review, generate a coding-agent
-  prompt, cluster by theme, or summarize. Provider-agnostic (Claude or OpenAI); keys
-  are stored locally in app data and **never** written into a project. **Works offline
-  too**: with no key it synthesizes a useful result locally from your notes.
+  prompt, cluster by theme, or summarize. First-run onboarding and the always-available
+  **Profile** control let you choose Claude or OpenAI, set each model, and add or replace
+  provider API keys at any time. Keys are stored locally in app data and **never** written
+  into a project. **Works offline too**: with no key it synthesizes a useful result
+  locally from your notes.
 - 🧪 **Replay-as-test** — every replay produces a pass/fail report per step (resolved /
   timed-out), saved on the recording, so a journey doubles as a smoke test. Author
   **assertions** (element exists / visible / text / count / URL) via the "Assert" mode or
@@ -103,9 +105,11 @@ project directory.
 
 ## Configuring AI
 
-Open **⚙ Settings**, choose a provider (Claude / OpenAI), set the model, and paste an
-API key. The AI tab then runs tasks over the current session. Without a key, AI tasks
-return a friendly "add a key in Settings" message — everything else works fully offline.
+On first launch, the onboarding flow asks for a local profile name, a default provider
+(Claude or OpenAI), model IDs, and optional API keys. You can change all of that later
+from **Profile** in the toolbar. The AI tab shows which provider is active and whether
+that provider has a key. Without a key, AI tasks use the local fallback so the rest of
+the app continues to work offline.
 
 ## Testing
 

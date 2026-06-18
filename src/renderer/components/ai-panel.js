@@ -1,11 +1,13 @@
 // AI tab: pick a task from config.aiTasks, Run it over the current session via
 // caos.ai.run, show a spinner, then render the result with Copy / Save actions.
-// On error (e.g. missing key) show a message with a link to Settings.
+// On error (e.g. missing key) show a message with a link to Profile.
 import { h, icon, clear, toast, esc } from '../lib/dom.js';
 
 export function createAiPanel(config, actions) {
   const taskIds = Object.keys(config.aiTasks || {});
   let lastText = '';
+  let profileSettings = {};
+  let profileProviders = {};
 
   const select = h('select', { class: 'select' }, taskIds.map((id) =>
     h('option', { value: id, text: prettyTask(id) })
@@ -14,11 +16,13 @@ export function createAiPanel(config, actions) {
   select.addEventListener('change', () => { desc.textContent = config.aiTasks[select.value] || ''; });
 
   const runBtn = h('button', { class: 'btn btn-primary btn-sm', html: icon('ai', 14) + '<span>Run</span>', on: { click: run } });
+  const providerBtn = h('button', { class: 'provider-status', title: 'Open Profile', on: { click: actions.openSettings } });
 
   const resultWrap = h('div', { class: 'ai-result-wrap' });
   const root = h('div', { class: 'tab-body', dataset: { tab: 'ai' } }, [
     h('div', { class: 'ai-bar' }, [
       h('div', { class: 'ai-row' }, [select, runBtn]),
+      h('div', { class: 'ai-profile-row' }, [providerBtn]),
       desc,
     ]),
     resultWrap,
@@ -53,7 +57,7 @@ export function createAiPanel(config, actions) {
       if (!res || res.ok === false) {
         showError((res && res.error) || 'The AI request failed.', isKeyError(res && res.error));
       } else {
-        showResult(res.text || '');
+        showResult(res.text || '', { local: !!res.local });
       }
     } catch (e) {
       showError(String((e && e.message) || e), false);
@@ -71,15 +75,18 @@ export function createAiPanel(config, actions) {
     const box = h('div', { class: 'ai-error' });
     box.innerHTML = renderInline(message);
     if (keyHint) {
-      const link = h('a', { text: 'Open Settings →', on: { click: actions.openSettings } });
+      const link = h('a', { text: 'Open Profile →', on: { click: actions.openSettings } });
       box.appendChild(h('div', { style: { marginTop: '8px' } }, [link]));
     }
     resultWrap.appendChild(box);
   }
 
-  function showResult(text) {
+  function showResult(text, opts = {}) {
     lastText = text;
     clear(resultWrap);
+    if (opts.local) {
+      resultWrap.appendChild(localNotice());
+    }
     const body = h('div', { class: 'ai-result' });
     body.innerHTML = renderMarkdownish(text);
     resultWrap.appendChild(body);
@@ -113,7 +120,7 @@ export function createAiPanel(config, actions) {
     try {
       const res = await actions.run(taskId, actions.currentSessionId(), extra || {});
       if (!res || res.ok === false) showError((res && res.error) || 'The AI request failed.', isKeyError(res && res.error));
-      else showResult(res.text || '');
+      else showResult(res.text || '', { local: !!res.local });
     } catch (e) {
       showError(String((e && e.message) || e), false);
     } finally {
@@ -122,15 +129,40 @@ export function createAiPanel(config, actions) {
   }
 
   idle();
+  setProfile(profileSettings, profileProviders);
   return {
     root,
     runExternal,
+    setProfile,
     focusTask: (id) => { if (id && taskIds.includes(id)) { select.value = id; desc.textContent = config.aiTasks[id] || ''; } },
   };
+
+  function setProfile(settings = {}, providers = {}) {
+    profileSettings = settings || {};
+    profileProviders = providers || {};
+    const provider = profileSettings.aiProvider || 'claude';
+    const ready = !!profileProviders[provider];
+    providerBtn.className = `provider-status ${ready ? 'ready' : 'needs-setup'}`;
+    providerBtn.innerHTML = `${icon(ready ? 'check' : 'settings', 13)}<span>${providerLabel(provider)}</span><span class="provider-status-dot">${ready ? 'Key set' : 'No key'}</span>`;
+    providerBtn.title = `${providerLabel(provider)} ${ready ? 'API key is set' : 'API key is not set'} - open Profile`;
+    providerBtn.setAttribute('aria-label', providerBtn.title);
+  }
+
+  function localNotice() {
+    const link = h('a', { text: 'Open Profile', on: { click: actions.openSettings } });
+    return h('div', { class: 'ai-local-notice' }, [
+      h('span', { text: `${providerLabel(profileSettings.aiProvider || 'claude')} has no API key saved, so this result was generated locally.` }),
+      link,
+    ]);
+  }
 }
 
 function prettyTask(id) {
   return id.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function providerLabel(provider) {
+  return provider === 'openai' ? 'OpenAI' : 'Claude';
 }
 
 // Escape, then apply a light markdown subset: headings, bold, inline code, and

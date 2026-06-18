@@ -107,6 +107,8 @@ button { font-family: inherit; }
 .icon-btn.has-label { padding: 0 11px; }
 .icon-btn.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-line); }
 .icon-btn.rec.active { background: rgba(255, 107, 107, 0.16); color: var(--remove); border-color: rgba(255, 107, 107, 0.42); }
+.icon-btn.ready { color: var(--add); border-color: rgba(61, 220, 151, 0.28); }
+.icon-btn.needs-setup { color: var(--change); border-color: rgba(255, 180, 84, 0.32); background: rgba(255, 180, 84, 0.08); }
 
 /* Address bar */
 .address {
@@ -468,7 +470,46 @@ button { font-family: inherit; }
 /* ============================================================ AI TAB */
 .ai-bar { padding: 12px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
 .ai-row { display: flex; gap: 8px; align-items: center; }
+.ai-profile-row { display: flex; align-items: center; justify-content: flex-start; }
 .ai-task-desc { font-size: 11.5px; color: var(--dim); line-height: 1.45; }
+.provider-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  max-width: 100%;
+  padding: 0 9px;
+  border-radius: 8px;
+  border: 1px solid var(--line2);
+  background: var(--panel);
+  color: var(--dim);
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.provider-status:hover { background: var(--hi); color: var(--text); }
+.provider-status.ready { border-color: rgba(61, 220, 151, 0.34); color: var(--add); }
+.provider-status.needs-setup { border-color: rgba(255, 180, 84, 0.34); color: var(--change); }
+.provider-status-dot {
+  margin-left: 2px;
+  color: var(--faint);
+  font-weight: 600;
+}
+.ai-local-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 180, 84, 0.34);
+  border-radius: 8px;
+  background: rgba(255, 180, 84, 0.08);
+  color: #ffd9a6;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.ai-local-notice a { color: var(--text); cursor: pointer; text-decoration: underline; white-space: nowrap; }
 .select {
   appearance: none;
   flex: 1 1 auto;
@@ -609,6 +650,63 @@ button { font-family: inherit; }
 }
 .switch input:checked + .track { background: var(--accent); }
 .switch input:checked + .track::before { transform: translateX(18px); }
+
+/* Profile + onboarding */
+.profile-callout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 13px 14px;
+  margin-bottom: 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.profile-kicker {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: 3px;
+}
+.profile-title { font-size: 16px; font-weight: 800; color: var(--text); margin-bottom: 3px; }
+.profile-sub { font-size: 12px; color: var(--dim); line-height: 1.4; }
+.profile-provider-pill {
+  flex: 0 0 auto;
+  border: 1px solid var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11.5px;
+  font-weight: 800;
+}
+.onboarding-hero {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 3px 0 18px;
+}
+.onboarding-mark {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid var(--accent-line);
+}
+.onboarding-title { font-size: 18px; font-weight: 800; margin-bottom: 5px; }
+.onboarding-copy { color: var(--dim); font-size: 13px; line-height: 1.5; max-width: 450px; }
+.provider-setup-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 8px; }
+@media (max-width: 640px) {
+  .provider-setup-row { grid-template-columns: 1fr; }
+  .profile-callout { align-items: flex-start; flex-direction: column; }
+}
 
 /* ============================================================ TOAST */
 .toast-host {
