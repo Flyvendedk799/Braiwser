@@ -16,6 +16,74 @@ const crypto = require('crypto');
 const { JsonCollection, JsonDocument } = require('./db');
 const { DEFAULT_SETTINGS } = require('../config');
 
+const AI_PROVIDERS = ['claude', 'openai'];
+
+function normalizeSettings(raw = {}) {
+  const base = { ...DEFAULT_SETTINGS, ...raw };
+  return {
+    ...base,
+    profile: {
+      ...DEFAULT_SETTINGS.profile,
+      ...(base.profile && typeof base.profile === 'object' ? base.profile : {}),
+    },
+    models: {
+      ...DEFAULT_SETTINGS.models,
+      ...(base.models && typeof base.models === 'object' ? base.models : {}),
+    },
+    aiProvider: AI_PROVIDERS.includes(base.aiProvider) ? base.aiProvider : DEFAULT_SETTINGS.aiProvider,
+    onboardingComplete: !!base.onboardingComplete,
+    restoreAnnotationsOnLoad: base.restoreAnnotationsOnLoad !== false,
+    replayDelayMs: Number.isFinite(Number(base.replayDelayMs)) ? Math.max(0, Number(base.replayDelayMs)) : DEFAULT_SETTINGS.replayDelayMs,
+  };
+}
+
+function cleanText(value, max = 120) {
+  if (typeof value !== 'string') return '';
+  return value.trim().slice(0, max);
+}
+
+function sanitizeSettingsPatch(patch, current) {
+  const clean = {};
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return clean;
+
+  if (Object.prototype.hasOwnProperty.call(patch, 'onboardingComplete')) {
+    clean.onboardingComplete = !!patch.onboardingComplete;
+  }
+  if (patch.profile && typeof patch.profile === 'object' && !Array.isArray(patch.profile)) {
+    clean.profile = { ...(current.profile || {}) };
+    if (Object.prototype.hasOwnProperty.call(patch.profile, 'displayName')) {
+      clean.profile.displayName = cleanText(patch.profile.displayName, 80);
+    }
+  }
+  if (typeof patch.aiProvider === 'string' && AI_PROVIDERS.includes(patch.aiProvider)) {
+    clean.aiProvider = patch.aiProvider;
+  }
+  if (patch.models && typeof patch.models === 'object' && !Array.isArray(patch.models)) {
+    clean.models = { ...(current.models || {}) };
+    for (const provider of AI_PROVIDERS) {
+      if (Object.prototype.hasOwnProperty.call(patch.models, provider)) {
+        clean.models[provider] = cleanText(patch.models[provider], 120) || DEFAULT_SETTINGS.models[provider];
+      }
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'replayDelayMs')) {
+    clean.replayDelayMs = Math.max(0, Number.parseInt(patch.replayDelayMs, 10) || 0);
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'restoreAnnotationsOnLoad')) {
+    clean.restoreAnnotationsOnLoad = patch.restoreAnnotationsOnLoad !== false;
+  }
+  if (typeof patch.theme === 'string') clean.theme = cleanText(patch.theme, 40) || DEFAULT_SETTINGS.theme;
+  if (typeof patch.agentCommand === 'string') clean.agentCommand = patch.agentCommand.trim().slice(0, 2000);
+  if (Array.isArray(patch.openTabs)) {
+    clean.openTabs = patch.openTabs.filter((url) => typeof url === 'string' && url.length <= 4096).slice(0, 30);
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'activeTabIndex')) {
+    clean.activeTabIndex = Math.max(0, Number.parseInt(patch.activeTabIndex, 10) || 0);
+  }
+
+  return clean;
+}
+
 function createRepositories(userDataDir) {
   const dir = path.join(userDataDir, 'caos');
   fs.mkdirSync(dir, { recursive: true });
@@ -138,8 +206,11 @@ function createRepositories(userDataDir) {
   };
 
   const settings = {
-    get: () => settingsD.data(),
-    set: (patch) => settingsD.merge(patch),
+    get: () => normalizeSettings(settingsD.data()),
+    set: (patch) => {
+      const current = normalizeSettings(settingsD.data());
+      return normalizeSettings(settingsD.merge(sanitizeSettingsPatch(patch, current)));
+    },
   };
 
   const secrets = {

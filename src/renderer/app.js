@@ -8,7 +8,7 @@ import { createSidebar } from './components/sidebar.js';
 import { createNotesPanel } from './components/notes-panel.js';
 import { createInspectorPanel } from './components/inspector-panel.js';
 import { createAiPanel } from './components/ai-panel.js';
-import { openSettingsModal } from './components/settings-modal.js';
+import { openOnboardingModal, openSettingsModal } from './components/settings-modal.js';
 import { createTabStrip } from './components/tabs.js';
 import { compositeAnnotations } from './lib/screenshots.js';
 
@@ -17,6 +17,7 @@ const caos = window.caos;
 const state = {
   config: null,
   settings: null,
+  providers: {},
   projects: [],
   currentProject: null,
   sessions: [],
@@ -53,6 +54,7 @@ const activeTab = () => state.tabs.find((t) => t.id === state.activeTabId) || nu
 async function boot() {
   state.config = await caos.config();
   state.settings = await caos.settings.get();
+  state.providers = await caos.secrets.providers();
   buildShell();
   setupShortcuts();
   await refreshProjects();
@@ -67,6 +69,10 @@ async function boot() {
     if (state.tabs[idx]) setActiveTab(state.tabs[idx].id);
   } else {
     createTab(state.config.welcomeUrl);
+  }
+
+  if (!caos.e2e && !state.settings.onboardingComplete) {
+    setTimeout(openOnboarding, 250);
   }
 
   if (caos.e2e) {
@@ -145,6 +151,7 @@ function buildShell() {
     save: saveAiResult,
     openSettings: openSettings,
   });
+  syncProfileUi();
 
   const tabs = h('div', { class: 'tabs' });
   ['notes', 'inspector', 'ai'].forEach((id) => {
@@ -442,6 +449,7 @@ function resolveAddress(value) {
 }
 
 function syncToolbar() {
+  const aiProvider = state.settings && state.settings.aiProvider;
   toolbar.update({
     mode: state.mode,
     recording: !!state.recordingBuffer,
@@ -452,6 +460,9 @@ function syncToolbar() {
     replaying: state.replaying,
     bookmarked: state.bookmarked,
     loading: !!(activeTab() && activeTab().loading),
+    aiProvider,
+    providerReady: !!(aiProvider && state.providers && state.providers[aiProvider]),
+    profileName: state.settings && state.settings.profile && state.settings.profile.displayName,
   });
 }
 
@@ -1205,21 +1216,48 @@ async function handoffToAgent() {
 }
 
 // ============================================================ SETTINGS
+async function openOnboarding() {
+  state.providers = await caos.secrets.providers();
+  openOnboardingModal({
+    settings: state.settings,
+    providers: { ...state.providers },
+    actions: profileActions(),
+  });
+}
+
 async function openSettings() {
-  const providers = await caos.secrets.providers();
+  state.providers = await caos.secrets.providers();
   openSettingsModal({
     settings: state.settings,
-    providers,
-    actions: {
-      setSettings: async (patch) => {
-        const next = await caos.settings.set(patch);
-        if (next) state.settings = next;
-        return state.settings;
-      },
-      setKey: (provider, key) => caos.secrets.setKey(provider, key),
-      clearKey: (provider) => caos.secrets.clearKey(provider),
-    },
+    providers: { ...state.providers },
+    actions: profileActions(),
   });
+}
+
+function profileActions() {
+  return {
+    setSettings: async (patch) => {
+      const next = await caos.settings.set(patch);
+      if (next) state.settings = next;
+      syncProfileUi();
+      return state.settings;
+    },
+    setKey: async (provider, key) => {
+      state.providers = await caos.secrets.setKey(provider, key);
+      syncProfileUi();
+      return state.providers;
+    },
+    clearKey: async (provider) => {
+      state.providers = await caos.secrets.clearKey(provider);
+      syncProfileUi();
+      return state.providers;
+    },
+  };
+}
+
+function syncProfileUi() {
+  if (aiPanel && aiPanel.setProfile) aiPanel.setProfile(state.settings, state.providers);
+  if (toolbar) syncToolbar();
 }
 
 // ============================================================ HELPERS

@@ -34,6 +34,10 @@ const AI_TASKS = {
 };
 
 const DEFAULT_SETTINGS = {
+  onboardingComplete: false,
+  profile: {
+    displayName: '',
+  },
   aiProvider: 'claude',
   models: {
     claude: 'claude-sonnet-4-6',
