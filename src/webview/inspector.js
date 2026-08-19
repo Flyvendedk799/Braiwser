@@ -189,7 +189,10 @@ const replay = require('./replay');
 
   // ---- draw mode ------------------------------------------------------------
   function onDown(e) {
-    if (mode !== 'draw' || isOwnUI(e.target)) return;
+    // The drawing canvas itself carries data-caos (see 'caos:clear-overlays'),
+    // so isOwnUI(e.target) would otherwise reject every stroke drawn on it —
+    // only reject clicks on OTHER own-UI chrome (draw bar, note popup).
+    if (mode !== 'draw' || (isOwnUI(e.target) && e.target !== canvas)) return;
     drawing = true;
     curStroke = [{ x: e.clientX + window.scrollX, y: e.clientY + window.scrollY }];
     strokes.push(curStroke);

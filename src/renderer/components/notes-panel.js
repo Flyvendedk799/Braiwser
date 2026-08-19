@@ -74,7 +74,16 @@ export function createNotesPanel(config, actions) {
     const resolved = (a.status || 'open') === 'resolved';
     const prio = a.priority || 'normal';
 
-    const card = h('div', { class: `note ${resolved ? 'resolved' : ''}` });
+    const card = h('div', {
+      class: `note ${resolved ? 'resolved' : ''}`,
+      on: {
+        click: (e) => {
+          // Ignore clicks on interactive children — they have their own handlers.
+          if (e.target.closest('.note-actions, .note-edit, .prio-select')) return;
+          actions.locate(a);
+        },
+      },
+    });
     card.style.setProperty('--stripe', color);
 
     const hasSelector = !!(a.target && a.target.selector);

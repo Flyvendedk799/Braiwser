@@ -375,8 +375,9 @@ button { font-family: inherit; }
   padding: 11px 12px 11px 16px;
   overflow: hidden;
   transition: border-color 0.12s;
+  cursor: pointer;
 }
-.note:hover { border-color: var(--line2); }
+.note:hover { border-color: var(--accent-line, var(--line2)); }
 .note::before {
   content: "";
   position: absolute;
