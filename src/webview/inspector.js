@@ -16,7 +16,7 @@ const replay = require('./replay');
 (function () {
   'use strict';
 
-  let mode = 'off'; // 'off' | 'inspect' | 'draw' | 'assert'
+  let mode = 'off'; // 'off' | 'inspect' | 'draw' | 'assert' | 'arrange'
   let hovered = null; // element under cursor (inspect mode)
   let root, highlight, tooltip, canvas, ctx, popup, drawBar, pinLayer;
   let drawing = false;
@@ -25,6 +25,12 @@ const replay = require('./replay');
   let pins = []; // [{ el, target, badge, action }] restored annotation pins
   let pinSyncQueued = false;
   let lastPickedEl = null; // live ref to the last layout-hierarchy selection, for reorder refocus
+
+  // ---- rearrange-mode state ---------------------------------------------------
+  let arrangeSel = null; // the selected live element
+  let arrangeUI = null; // { box, barEl, label, undoBtn, handles: {...} }
+  let arrangeDrag = null; // active drag descriptor (move or resize)
+  const editStack = []; // applied edits: { type, annId, undo }
 
   const ACTIONS = [
     { id: 'remove', label: 'Remove', color: '#ff6b6b' },
@@ -91,17 +97,23 @@ const replay = require('./replay');
     document.documentElement.appendChild(root);
 
     // The draw-mode surface. It only receives pointer events while draw mode
-    // is on (setMode toggles pointer-events), so its own mousedown/mousemove/
-    // mouseup listeners never fight with page content or other own-UI chrome —
-    // no target-filtering needed, unlike the document-level pick handlers.
+    // is on (setMode toggles pointer-events), so its own handlers never fight
+    // with page content or other own-UI chrome — no target-filtering needed,
+    // unlike the document-level pick handlers. Pointer Events (not mouse
+    // events) so pen/touch drags work too, and setPointerCapture guarantees
+    // the move/up events keep arriving even when the pointer leaves the
+    // webview mid-drag — with window mouse listeners, releasing the button
+    // outside the page left `drawing` stuck on and the stroke glued to the
+    // cursor. touch-action:none stops touch drags from scrolling instead.
     canvas = document.createElement('canvas');
     canvas.setAttribute('data-caos', '');
-    canvas.style.cssText = 'position:fixed;inset:0;display:none;z-index:2147483645;cursor:crosshair;';
+    canvas.style.cssText = 'position:fixed;inset:0;display:none;z-index:2147483645;cursor:crosshair;touch-action:none;';
     document.documentElement.appendChild(canvas);
     ctx = canvas.getContext('2d');
-    canvas.addEventListener('mousedown', onCanvasDown);
-    window.addEventListener('mousemove', onCanvasMove);
-    window.addEventListener('mouseup', onCanvasUp);
+    canvas.addEventListener('pointerdown', onCanvasDown);
+    canvas.addEventListener('pointermove', onCanvasMove);
+    canvas.addEventListener('pointerup', onCanvasUp);
+    canvas.addEventListener('pointercancel', onCanvasCancel);
 
     drawBar = document.createElement('div');
     drawBar.setAttribute('data-caos', '');
@@ -109,7 +121,7 @@ const replay = require('./replay');
       'position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:2147483647;display:none;' +
       'background:#11131a;border:1px solid #2a2e3a;border-radius:10px;padding:8px 14px;box-shadow:0 8px 30px rgba(0,0,0,.45);' +
       'color:#9aa2b1;font:12px sans-serif;pointer-events:none;';
-    drawBar.textContent = 'Drag on the page to circle something — release to add a note';
+    drawBar.textContent = DRAW_HINT;
     document.documentElement.appendChild(drawBar);
 
     sizeCanvas();
@@ -147,8 +159,14 @@ const replay = require('./replay');
 
   // ---- inspect mode ---------------------------------------------------------
   function onMove(e) {
-    if (mode !== 'inspect' && mode !== 'assert') return;
+    if (mode !== 'inspect' && mode !== 'assert' && mode !== 'arrange') return;
+    if (mode === 'arrange' && arrangeDrag) return; // no hover flicker mid-drag
     const el = document.elementFromPoint(e.clientX, e.clientY);
+    if (mode === 'arrange' && el === arrangeSel) {
+      // the selection box already outlines it — skip the hover overlay
+      highlight.style.display = tooltip.style.display = 'none';
+      return;
+    }
     if (!el || isOwnUI(el)) {
       highlight.style.display = tooltip.style.display = 'none';
       hovered = null;
@@ -169,12 +187,16 @@ const replay = require('./replay');
   }
 
   function onClick(e) {
-    if (mode !== 'inspect' && mode !== 'assert') return;
+    if (mode !== 'inspect' && mode !== 'assert' && mode !== 'arrange') return;
     const el = document.elementFromPoint(e.clientX, e.clientY);
-    if (isOwnUI(el)) return; // let popup interactions through
+    if (isOwnUI(el)) return; // let popup / arrange-bar interactions through
     e.preventDefault();
     e.stopPropagation();
     if (!el) return;
+    if (mode === 'arrange') {
+      arrangeSelect(el);
+      return;
+    }
     if (mode === 'assert') {
       // Point at an element; the host opens the assertion editor pre-filled.
       try {
@@ -192,14 +214,29 @@ const replay = require('./replay');
   }
 
   // ---- draw mode ------------------------------------------------------------
-  // Handlers are bound directly on the canvas/window (see ensureUI), so no
-  // mode or own-UI check is strictly needed here — but the mode check guards
-  // against a stray event during a mode switch mid-drag.
-  const DRAW_MIN = 6; // px — below this, treat the drag as an accidental click
+  // Handlers are bound directly on the canvas (see ensureUI), so no mode or
+  // own-UI check is strictly needed here — but the mode check guards against
+  // a stray event during a mode switch mid-drag.
+  const DRAW_MIN = 6; // px — below this in EVERY direction, treat as an accidental click
+  const DRAW_THIN = 14; // px — pad a thinner-than-this region box out to a usable size
+  const DRAW_HINT = 'Drag on the page to circle something — release to add a note';
+  let drawHintTimer = null;
+
+  function flashDrawHint(msg) {
+    if (!drawBar) return;
+    drawBar.textContent = msg;
+    drawBar.style.color = '#ffb454';
+    clearTimeout(drawHintTimer);
+    drawHintTimer = setTimeout(() => {
+      drawBar.textContent = DRAW_HINT;
+      drawBar.style.color = '#9aa2b1';
+    }, 1600);
+  }
 
   function onCanvasDown(e) {
-    if (mode !== 'draw') return;
+    if (mode !== 'draw' || (e.button != null && e.button !== 0)) return;
     e.preventDefault();
+    try { canvas.setPointerCapture(e.pointerId); } catch (_e) { /* ignore */ }
     drawing = true;
     curStroke = [{ x: e.clientX + window.scrollX, y: e.clientY + window.scrollY }];
     strokes = [curStroke]; // one region per draw — a fresh drag replaces any prior stroke
@@ -210,16 +247,28 @@ const replay = require('./replay');
     curStroke.push({ x: e.clientX + window.scrollX, y: e.clientY + window.scrollY });
     redraw();
   }
-  function onCanvasUp() {
+  function onCanvasUp(e) {
     if (!drawing) return;
     drawing = false;
+    try { canvas.releasePointerCapture(e.pointerId); } catch (_e) { /* ignore */ }
     const box = strokesBox();
-    if (box && box.w >= DRAW_MIN && box.h >= DRAW_MIN) {
+    // A mark only needs to be long in ONE direction — an underline or a strike
+    // across a row is a perfectly good region. Only a near-zero blob (a click
+    // with hand jitter) is discarded.
+    if (box && Math.max(box.w, box.h) >= DRAW_MIN) {
       openRegionNote(); // drag was a real mark — go straight to the note
     } else {
       strokes = []; // accidental click — leave no mark behind
       redraw();
+      flashDrawHint('Keep dragging a little further to mark an area');
     }
+  }
+  function onCanvasCancel() {
+    // Pointer was taken away mid-drag (e.g. touch gesture stolen) — discard.
+    if (!drawing) return;
+    drawing = false;
+    strokes = [];
+    redraw();
   }
 
   function strokesBox() {
@@ -355,6 +404,561 @@ const replay = require('./replay');
     }
   }
 
+  // ---- rearrange mode ---------------------------------------------------------
+  // Select any element, then: drag to reorder it among its siblings (the DOM
+  // actually moves, live), Alt-drag (or drag a positioned element) to nudge it
+  // freehand, pull the handles to resize, hide it, or apply a smart re-layout
+  // to its container (row / column / grid / tidy). Every committed change is
+  // applied to the live page AND captured as a kind:'edit' annotation carrying
+  // the exact CSS / reorder details, so it exports straight to a coding agent.
+  // Undo/Reset revert the page and retract the captured note.
+
+  const ARRANGE_COLOR = '#3ddc97';
+  const DRAG_CLICK_MAX = 4; // px — under this, a drag on the selection is a click-through
+
+  function elChildren(parent, excludeEl) {
+    return Array.prototype.filter.call(
+      parent.children,
+      (c) => c.nodeType === 1 && !isOwnUI(c) && c !== excludeEl
+    );
+  }
+  function indexIn(parent, el) {
+    return elChildren(parent).indexOf(el);
+  }
+
+  function ensureArrangeUI() {
+    if (arrangeUI && root.contains(arrangeUI.box)) return arrangeUI;
+
+    const box = document.createElement('div');
+    box.setAttribute('data-caos', '');
+    box.setAttribute('data-caos-arrange', 'box');
+    box.style.cssText =
+      'position:fixed;display:none;border:2px dashed ' + ARRANGE_COLOR + ';border-radius:3px;' +
+      'background:rgba(61,220,151,.07);pointer-events:auto;cursor:move;z-index:2147483644;touch-action:none;';
+
+    const mkHandle = (kind, cursor) => {
+      const hd = document.createElement('div');
+      hd.setAttribute('data-caos', '');
+      hd.setAttribute('data-caos-arrange', 'handle-' + kind);
+      hd.style.cssText =
+        'position:fixed;display:none;width:11px;height:11px;border-radius:3px;background:' + ARRANGE_COLOR + ';' +
+        'border:2px solid #0e0f13;box-shadow:0 1px 4px rgba(0,0,0,.5);pointer-events:auto;z-index:2147483645;cursor:' +
+        cursor + ';touch-action:none;';
+      hd.addEventListener('pointerdown', (e) => startResize(e, kind, hd));
+      root.appendChild(hd);
+      return hd;
+    };
+
+    const bar = document.createElement('div');
+    bar.setAttribute('data-caos', '');
+    bar.setAttribute('data-caos-arrange', 'bar');
+    bar.style.cssText =
+      'position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:2147483647;display:none;' +
+      'align-items:center;gap:6px;background:#11131a;border:1px solid #2a2e3a;border-radius:10px;padding:7px 10px;' +
+      'box-shadow:0 8px 30px rgba(0,0,0,.45);color:#9aa2b1;font:12px sans-serif;pointer-events:auto;flex-wrap:wrap;max-width:92vw;';
+
+    const label = document.createElement('span');
+    label.style.cssText =
+      'font:600 11px ui-monospace,monospace;color:#3ddc97;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+    bar.appendChild(label);
+
+    const mkBtn = (slug, text, title, onClick) => {
+      const b = document.createElement('button');
+      b.textContent = text;
+      b.title = title;
+      b.setAttribute('data-caos-arrange', 'btn-' + slug);
+      b.style.cssText =
+        'cursor:pointer;border:1px solid #2a2e3a;border-radius:7px;padding:4px 9px;background:#171a22;' +
+        'color:#cdd6f4;font:600 11px sans-serif;white-space:nowrap;';
+      b.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        onClick();
+      });
+      bar.appendChild(b);
+      return b;
+    };
+    const mkSep = () => {
+      const s = document.createElement('span');
+      s.style.cssText = 'width:1px;height:16px;background:#2a2e3a;';
+      bar.appendChild(s);
+    };
+
+    mkBtn('up', '↑', 'Move earlier among its siblings', () => nudgeOrder(-1));
+    mkBtn('down', '↓', 'Move later among its siblings', () => nudgeOrder(1));
+    mkSep();
+    mkBtn('row', 'Row', 'Smart re-layout the container as a flex row', () => smartLayout('row'));
+    mkBtn('column', 'Column', 'Smart re-layout the container as a flex column', () => smartLayout('column'));
+    mkBtn('grid', 'Grid', 'Smart re-layout the container as a responsive grid', () => smartLayout('grid'));
+    mkBtn('tidy', 'Tidy', 'Normalize the container: consistent gaps and alignment', () => smartLayout('tidy'));
+    mkSep();
+    mkBtn('hide', 'Hide', 'Hide this element (records a removal edit)', () => hideSelected());
+    mkSep();
+    const undoBtn = mkBtn('undo', 'Undo', 'Undo the last layout edit (also retracts its note)', () => undoLastEdit());
+    mkBtn('reset', 'Reset', 'Undo ALL layout edits made in this session', () => resetEdits());
+
+    const hint = document.createElement('span');
+    hint.textContent = 'drag = reorder · Alt-drag = free move · handles = resize · Esc = done';
+    hint.style.cssText = 'color:#6b7280;font:11px sans-serif;';
+    bar.appendChild(hint);
+
+    box.addEventListener('pointerdown', startMove);
+    root.appendChild(box);
+    root.appendChild(bar);
+
+    arrangeUI = {
+      box,
+      barEl: bar,
+      label,
+      undoBtn,
+      handles: {
+        e: mkHandle('e', 'ew-resize'),
+        s: mkHandle('s', 'ns-resize'),
+        se: mkHandle('se', 'nwse-resize'),
+      },
+    };
+    updateArrangeBar();
+    return arrangeUI;
+  }
+
+  function updateArrangeBar() {
+    if (!arrangeUI) return;
+    arrangeUI.undoBtn.textContent = editStack.length ? 'Undo (' + editStack.length + ')' : 'Undo';
+    arrangeUI.undoBtn.disabled = !editStack.length;
+    arrangeUI.undoBtn.style.opacity = editStack.length ? '1' : '.45';
+  }
+
+  function arrangeLabel(el) {
+    let s = el.nodeName.toLowerCase();
+    if (el.id) s += '#' + el.id;
+    else if (el.classList && el.classList.length) s += '.' + el.classList[0];
+    return s;
+  }
+
+  function arrangeSelect(el) {
+    if (!el || el.nodeType !== 1 || isOwnUI(el)) return;
+    if (el === document.body || el === document.documentElement) {
+      arrangeDeselect();
+      return;
+    }
+    arrangeSel = el;
+    ensureArrangeUI();
+    arrangeUI.label.textContent = arrangeLabel(el);
+    arrangeUI.label.title = anchor.cssPath(el);
+    syncArrange();
+    pickLayout(el); // keep the Inspector panel's hierarchy view in step
+  }
+
+  function arrangeDeselect() {
+    arrangeSel = null;
+    arrangeDrag = null;
+    if (!arrangeUI) return;
+    arrangeUI.box.style.display = 'none';
+    for (const k in arrangeUI.handles) arrangeUI.handles[k].style.display = 'none';
+    arrangeUI.label.textContent = '';
+  }
+
+  // Position the selection box + handles over the live element.
+  function syncArrange() {
+    if (!arrangeSel || !arrangeUI || mode !== 'arrange') return;
+    if (!document.documentElement.contains(arrangeSel)) {
+      arrangeDeselect();
+      return;
+    }
+    const r = arrangeSel.getBoundingClientRect();
+    const b = arrangeUI.box;
+    b.style.display = 'block';
+    b.style.left = r.left - 2 + 'px';
+    b.style.top = r.top - 2 + 'px';
+    b.style.width = Math.max(0, r.width) + 'px';
+    b.style.height = Math.max(0, r.height) + 'px';
+    const hs = arrangeUI.handles;
+    const place = (hd, x, y) => {
+      hd.style.display = 'block';
+      hd.style.left = x - 5 + 'px';
+      hd.style.top = y - 5 + 'px';
+    };
+    place(hs.e, r.right, r.top + r.height / 2);
+    place(hs.s, r.left + r.width / 2, r.bottom);
+    place(hs.se, r.right, r.bottom);
+  }
+
+  // ---- committing edits -------------------------------------------------------
+  // Applies are done by the caller; this records the undo, sends the edit
+  // annotation to the host, and refreshes the overlay.
+  function commitEdit(el, entry) {
+    const annId = uid();
+    editStack.push({ type: entry.type, annId, undo: entry.undo });
+    send({
+      id: annId,
+      kind: 'edit',
+      action: entry.action || 'change',
+      note: entry.note,
+      target: anchor.describe(el),
+      edit: { type: entry.type, css: entry.css || '', details: entry.details || {} },
+    });
+    updateArrangeBar();
+    syncArrange();
+  }
+
+  function undoLastEdit() {
+    const entry = editStack.pop();
+    if (!entry) return;
+    try {
+      entry.undo();
+    } catch (_e) {
+      /* element may be gone — nothing to revert */
+    }
+    ipcRenderer.sendToHost('caos:edit-undo', { id: entry.annId });
+    updateArrangeBar();
+    syncArrange();
+  }
+
+  function resetEdits() {
+    while (editStack.length) undoLastEdit();
+  }
+
+  // Snapshot an element's inline style so undo can restore it exactly.
+  function styleSnapshot(el) {
+    const before = el.getAttribute('style');
+    return () => {
+      if (before == null) el.removeAttribute('style');
+      else el.setAttribute('style', before);
+    };
+  }
+
+  function px(n) {
+    return Math.round(n) + 'px';
+  }
+
+  // ---- move / reorder drag ------------------------------------------------------
+  function startMove(e) {
+    if (!arrangeSel || (e.button != null && e.button !== 0)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const el = arrangeSel;
+    const parent = el.parentElement;
+    const cs = getComputedStyle(el);
+    const free = e.altKey || cs.position === 'absolute' || cs.position === 'fixed' || !parent || isOwnUI(parent);
+    const surface = arrangeUI.box;
+    try { surface.setPointerCapture(e.pointerId); } catch (_e) { /* ignore */ }
+    arrangeDrag = {
+      kind: free ? 'free' : 'reorder',
+      el,
+      parent,
+      startX: e.clientX,
+      startY: e.clientY,
+      moved: false,
+      startIndex: parent ? indexIn(parent, el) : -1,
+      restoreStyle: styleSnapshot(el),
+      baseTransform: el.style.transform || '',
+      surface,
+    };
+    // Listen on window (capture is only belt-and-braces): the selection box
+    // lags behind the cursor while the element reflows, so element-scoped
+    // listeners would drop moves the moment the pointer escapes it.
+    const onMoveEv = (ev) => dragMove(ev);
+    const onUpEv = (ev) => {
+      window.removeEventListener('pointermove', onMoveEv, true);
+      window.removeEventListener('pointerup', onUpEv, true);
+      window.removeEventListener('pointercancel', onUpEv, true);
+      dragEnd(ev);
+    };
+    window.addEventListener('pointermove', onMoveEv, true);
+    window.addEventListener('pointerup', onUpEv, true);
+    window.addEventListener('pointercancel', onUpEv, true);
+  }
+
+  function dragMove(e) {
+    const d = arrangeDrag;
+    if (!d) return;
+    const dx = e.clientX - d.startX;
+    const dy = e.clientY - d.startY;
+    if (!d.moved && Math.abs(dx) < DRAG_CLICK_MAX && Math.abs(dy) < DRAG_CLICK_MAX) return;
+    d.moved = true;
+    d.el.style.opacity = '0.65';
+    if (d.kind === 'free') {
+      d.dx = dx;
+      d.dy = dy;
+      d.el.style.transform = (d.baseTransform ? d.baseTransform + ' ' : '') + 'translate(' + dx + 'px,' + dy + 'px)';
+    } else {
+      // Live reorder: actually move the node when the pointer crosses a
+      // sibling midpoint — the page shows the real result the whole time.
+      const ref = insertionRef(d.parent, d.el, e.clientX, e.clientY);
+      if (ref !== d.el && ref !== d.el.nextElementSibling) {
+        try {
+          d.parent.insertBefore(d.el, ref);
+        } catch (_e) {
+          /* ignore */
+        }
+      }
+    }
+    syncArrange();
+  }
+
+  function dragEnd(e) {
+    const d = arrangeDrag;
+    arrangeDrag = null;
+    if (!d) return;
+    try { d.surface.releasePointerCapture(e.pointerId); } catch (_e) { /* ignore */ }
+    d.el.style.opacity = '';
+    if (!d.moved) {
+      // Effectively a click on the selection — drill through to whatever is
+      // under the pointer (lets you select a child inside the selected box).
+      arrangeUI.box.style.display = 'none';
+      const under = document.elementFromPoint(e.clientX, e.clientY);
+      arrangeUI.box.style.display = 'block';
+      if (under && !isOwnUI(under)) arrangeSelect(under);
+      else syncArrange();
+      return;
+    }
+    if (d.kind === 'free') {
+      const dx = Math.round(d.dx || 0);
+      const dy = Math.round(d.dy || 0);
+      if (!dx && !dy) {
+        d.restoreStyle();
+        syncArrange();
+        return;
+      }
+      const css = 'transform: ' + d.el.style.transform + ';';
+      commitEdit(d.el, {
+        type: 'move',
+        note: 'Reposition `' + anchor.cssPath(d.el) + '` by ' + dx + 'px horizontally, ' + dy + 'px vertically (freehand drag).',
+        css,
+        details: { dx, dy },
+        undo: d.restoreStyle,
+      });
+    } else {
+      const endIndex = indexIn(d.parent, d.el);
+      if (endIndex === d.startIndex || d.startIndex < 0 || endIndex < 0) {
+        syncArrange();
+        return;
+      }
+      const parentSel = anchor.cssPath(d.parent);
+      const n = elChildren(d.parent).length;
+      const el = d.el;
+      const parent = d.parent;
+      const startIndex = d.startIndex;
+      commitEdit(el, {
+        type: 'reorder',
+        note:
+          'Move `' + anchor.cssPath(el) + '` from position ' + (d.startIndex + 1) + ' to position ' + (endIndex + 1) +
+          ' (of ' + n + ') inside `' + parentSel + '`.',
+        details: { parentSelector: parentSel, fromIndex: d.startIndex, toIndex: endIndex },
+        undo: () => {
+          const kids = elChildren(parent, el);
+          parent.insertBefore(el, kids[startIndex] || null);
+        },
+      });
+    }
+  }
+
+  // Where would the dragged element land if dropped at (x, y)?
+  // Returns the child to insert BEFORE (null = append at the end).
+  function insertionRef(parent, el, x, y) {
+    const kids = elChildren(parent, el);
+    if (!kids.length) return null;
+    const kind = containerKind(getComputedStyle(parent)).kind;
+    if (kind === 'grid') {
+      let best = null;
+      let bestD = Infinity;
+      for (const k of kids) {
+        const r = k.getBoundingClientRect();
+        const cx = r.left + r.width / 2;
+        const cy = r.top + r.height / 2;
+        const dd = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+        if (dd < bestD) {
+          bestD = dd;
+          best = { k, r, cx, cy };
+        }
+      }
+      if (!best) return null;
+      const after = y > best.cy + best.r.height / 2 || (Math.abs(y - best.cy) <= best.r.height / 2 && x > best.cx);
+      return after ? best.k.nextElementSibling : best.k;
+    }
+    const horiz = kind === 'row';
+    for (const k of kids) {
+      const r = k.getBoundingClientRect();
+      const c = horiz ? r.left + r.width / 2 : r.top + r.height / 2;
+      if ((horiz ? x : y) < c) return k;
+    }
+    return null;
+  }
+
+  // Keyboard-precise reorder from the action bar (↑ / ↓).
+  function nudgeOrder(delta) {
+    const el = arrangeSel;
+    if (!el || !el.parentElement) return;
+    const parent = el.parentElement;
+    const from = indexIn(parent, el);
+    const to = from + delta;
+    const kids = elChildren(parent);
+    if (from < 0 || to < 0 || to >= kids.length) return;
+    const ref = kids[delta > 0 ? to + 1 : to] || null;
+    parent.insertBefore(el, ref === el ? el.nextElementSibling : ref);
+    const parentSel = anchor.cssPath(parent);
+    commitEdit(el, {
+      type: 'reorder',
+      note:
+        'Move `' + anchor.cssPath(el) + '` from position ' + (from + 1) + ' to position ' + (to + 1) +
+        ' (of ' + kids.length + ') inside `' + parentSel + '`.',
+      details: { parentSelector: parentSel, fromIndex: from, toIndex: to },
+      undo: () => {
+        const k2 = elChildren(parent, el);
+        parent.insertBefore(el, k2[from] || null);
+      },
+    });
+  }
+
+  // ---- resize drag --------------------------------------------------------------
+  function startResize(e, kind, handleEl) {
+    if (!arrangeSel || (e.button != null && e.button !== 0)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const el = arrangeSel;
+    const r = el.getBoundingClientRect();
+    try { handleEl.setPointerCapture(e.pointerId); } catch (_e) { /* ignore */ }
+    const restoreStyle = styleSnapshot(el);
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let moved = false;
+    const onMoveEv = (ev) => {
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      if (!moved && Math.abs(dx) < 2 && Math.abs(dy) < 2) return;
+      moved = true;
+      if (kind === 'e' || kind === 'se') el.style.width = px(Math.max(8, r.width + dx));
+      if (kind === 's' || kind === 'se') el.style.height = px(Math.max(8, r.height + dy));
+      if (kind === 'se' || kind === 'e' || kind === 's') el.style.boxSizing = 'border-box';
+      syncArrange();
+    };
+    const onUpEv = (ev) => {
+      window.removeEventListener('pointermove', onMoveEv, true);
+      window.removeEventListener('pointerup', onUpEv, true);
+      window.removeEventListener('pointercancel', onUpEv, true);
+      try { handleEl.releasePointerCapture(ev.pointerId); } catch (_e) { /* ignore */ }
+      if (!moved) return;
+      const r2 = el.getBoundingClientRect();
+      const parts = [];
+      if (kind === 'e' || kind === 'se') parts.push('width: ' + px(r2.width) + ';');
+      if (kind === 's' || kind === 'se') parts.push('height: ' + px(r2.height) + ';');
+      commitEdit(el, {
+        type: 'resize',
+        note:
+          'Resize `' + anchor.cssPath(el) + '` to ' + Math.round(r2.width) + '×' + Math.round(r2.height) +
+          'px (was ' + Math.round(r.width) + '×' + Math.round(r.height) + 'px).',
+        css: parts.join(' '),
+        details: {
+          before: { w: Math.round(r.width), h: Math.round(r.height) },
+          after: { w: Math.round(r2.width), h: Math.round(r2.height) },
+        },
+        undo: restoreStyle,
+      });
+    };
+    // Window-scoped for the same reason as startMove: the handle chases the
+    // corner it resizes, so the pointer routinely outruns it mid-drag.
+    window.addEventListener('pointermove', onMoveEv, true);
+    window.addEventListener('pointerup', onUpEv, true);
+    window.addEventListener('pointercancel', onUpEv, true);
+  }
+
+  // ---- hide + smart re-layout -----------------------------------------------------
+  function hideSelected() {
+    const el = arrangeSel;
+    if (!el) return;
+    const restore = styleSnapshot(el);
+    el.style.display = 'none';
+    commitEdit(el, {
+      type: 'hide',
+      action: 'remove',
+      note: 'Remove `' + anchor.cssPath(el) + '` from the page (hidden in preview with display:none).',
+      css: 'display: none;',
+      undo: restore,
+    });
+    arrangeDeselect();
+  }
+
+  // The container a smart layout applies to: the selection itself when it has
+  // 2+ real children, otherwise its parent.
+  function smartTarget() {
+    const el = arrangeSel;
+    if (!el) return null;
+    if (elChildren(el).length >= 2) return el;
+    const p = el.parentElement;
+    if (p && p.nodeType === 1 && !isOwnUI(p) && p !== document.documentElement) return p;
+    return null;
+  }
+
+  // Median gap between consecutive children along the container's main axis —
+  // used so re-layouts keep the page's existing rhythm instead of forcing one.
+  function medianGap(kids, horiz) {
+    const gaps = [];
+    for (let i = 1; i < kids.length; i++) {
+      const a = kids[i - 1].getBoundingClientRect();
+      const b = kids[i].getBoundingClientRect();
+      const g = horiz ? b.left - a.right : b.top - a.bottom;
+      if (isFinite(g) && g >= 0 && g < 400) gaps.push(g);
+    }
+    if (!gaps.length) return 12;
+    gaps.sort((x, y) => x - y);
+    return Math.max(4, Math.round(gaps[Math.floor(gaps.length / 2)]));
+  }
+
+  function smartLayout(kindWanted) {
+    const container = smartTarget();
+    if (!container) return;
+    const kids = elChildren(container);
+    if (kids.length < 2 && kindWanted !== 'tidy') return;
+    const cs = getComputedStyle(container);
+    const currentKind = containerKind(cs).kind;
+    const horiz = kindWanted === 'row' || (kindWanted === 'tidy' && currentKind === 'row');
+    const gap = medianGap(kids, currentKind === 'row');
+    const restore = styleSnapshot(container);
+
+    const decl = {};
+    if (kindWanted === 'row') {
+      decl.display = 'flex';
+      decl['flex-direction'] = 'row';
+      decl['flex-wrap'] = 'wrap';
+      decl['align-items'] = 'center';
+      decl.gap = gap + 'px';
+    } else if (kindWanted === 'column') {
+      decl.display = 'flex';
+      decl['flex-direction'] = 'column';
+      decl['align-items'] = 'stretch';
+      decl.gap = gap + 'px';
+    } else if (kindWanted === 'grid') {
+      let minW = Infinity;
+      for (const k of kids) minW = Math.min(minW, k.getBoundingClientRect().width);
+      if (!isFinite(minW) || minW < 80) minW = 160;
+      decl.display = 'grid';
+      decl['grid-template-columns'] = 'repeat(auto-fit, minmax(' + Math.round(Math.min(minW, 420)) + 'px, 1fr))';
+      decl.gap = gap + 'px';
+    } else {
+      // tidy — keep the axis it already flows in, normalize gap + alignment
+      decl.display = 'flex';
+      decl['flex-direction'] = horiz ? 'row' : 'column';
+      decl['align-items'] = horiz ? 'center' : 'stretch';
+      decl.gap = gap + 'px';
+      if (horiz) decl['flex-wrap'] = 'wrap';
+    }
+    let css = '';
+    for (const k in decl) {
+      container.style.setProperty(k, decl[k]);
+      css += k + ': ' + decl[k] + '; ';
+    }
+    css = css.trim();
+    const names = { row: 'a horizontal flex row', column: 'a vertical flex column', grid: 'a responsive grid', tidy: 'a tidied ' + (horiz ? 'row' : 'column') + ' with consistent spacing' };
+    commitEdit(container, {
+      type: 'layout',
+      note: 'Re-layout `' + anchor.cssPath(container) + '` (' + kids.length + ' children) as ' + names[kindWanted] + '. Apply: ' + css,
+      css,
+      details: { layout: kindWanted, gap },
+      undo: restore,
+    });
+    arrangeSelect(container);
+  }
+
   // ---- note popup -----------------------------------------------------------
   function openElementNote(el) {
     const meta = anchor.describe(el);
@@ -367,6 +971,18 @@ const replay = require('./replay');
   function openRegionNote() {
     const box = strokesBox();
     if (!box) return;
+    // Pad a razor-thin mark (an underline / a vertical tick) out to a usable
+    // region so the stored box actually covers what the user pointed at.
+    if (box.h < DRAW_THIN) {
+      const pad = Math.ceil((DRAW_THIN - box.h) / 2);
+      box.y -= pad;
+      box.h += pad * 2;
+    }
+    if (box.w < DRAW_THIN) {
+      const pad = Math.ceil((DRAW_THIN - box.w) / 2);
+      box.x -= pad;
+      box.w += pad * 2;
+    }
     const anchorRect = {
       left: box.x - window.scrollX,
       top: box.y - window.scrollY,
@@ -382,13 +998,25 @@ const replay = require('./replay');
       (note, action) => {
         send({ id: uid(), kind: 'region', action, note, target: { box } });
         clearStroke();
+        // Flash the captured region so it's obvious the note registered.
+        anchor.highlight(null, { duration: 900, color: ACTION_COLOR[action] || '#ff5d8f', box: anchorRect2Box(anchorRect) });
       },
       clearStroke // cancelling a region note just discards the mark — stay in draw mode to try again
     );
   }
 
+  function anchorRect2Box(r) {
+    return { x: r.left, y: r.top, w: r.right - r.left, h: r.bottom - r.top };
+  }
+
+  let popupCancel = null; // cancel path of the OPEN popup, for the global Escape
+
   function showPopup(ctxObj, onSave, onCancel) {
     closePopup();
+    popupCancel = () => {
+      closePopup();
+      if (onCancel) onCancel();
+    };
     popup = document.createElement('div');
     popup.setAttribute('data-caos', '');
     popup.style.cssText =
@@ -476,6 +1104,7 @@ const replay = require('./replay');
       popup.remove();
       popup = null;
     }
+    popupCancel = null;
   }
 
   // ---- restored annotation pins ---------------------------------------------
@@ -562,6 +1191,7 @@ const replay = require('./replay');
       pin.badge.style.top = pos.y + 'px';
     }
     redraw(); // batch the draw-mode stroke repaint into the same rAF frame
+    syncArrange(); // keep the rearrange selection glued to its element too
   }
 
   function queuePinSync() {
@@ -623,7 +1253,16 @@ const replay = require('./replay');
     canvas.style.display = drawOn ? 'block' : 'none';
     canvas.style.pointerEvents = drawOn ? 'auto' : 'none';
     drawBar.style.display = drawOn ? 'block' : 'none';
-    if (document.body) document.body.style.cursor = next === 'inspect' || next === 'assert' ? 'crosshair' : '';
+    const arrangeOn = next === 'arrange';
+    if (arrangeOn) {
+      ensureArrangeUI();
+      arrangeUI.barEl.style.display = 'flex';
+      updateArrangeBar();
+    } else {
+      arrangeDeselect();
+      if (arrangeUI) arrangeUI.barEl.style.display = 'none';
+    }
+    if (document.body) document.body.style.cursor = next === 'inspect' || next === 'assert' || arrangeOn ? 'crosshair' : '';
   }
 
   function send(annotation) {
@@ -645,8 +1284,15 @@ const replay = require('./replay');
       'keydown',
       (e) => {
         if (e.key === 'Escape') {
-          closePopup();
-          ipcRenderer.sendToHost('caos:escape');
+          // First Escape only cancels an open note popup (its cancel path may
+          // keep the current mode alive, e.g. draw mode after a region note).
+          // Only with no popup open does Escape exit the mode host-side.
+          if (popupCancel) {
+            e.stopPropagation();
+            popupCancel();
+          } else {
+            ipcRenderer.sendToHost('caos:escape');
+          }
         }
       },
       true

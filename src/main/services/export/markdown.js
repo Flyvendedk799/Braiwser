@@ -131,6 +131,26 @@ function toMarkdown(session, annotations, consoleLog) {
       for (const line of targetLines) out.push(line);
       if (targetLines.length) out.push('');
 
+      // Rearrange edits carry the exact change that was previewed live.
+      if (a.edit) {
+        if (a.edit.css) {
+          out.push('Apply this CSS to the target:');
+          out.push('');
+          out.push('```css');
+          out.push(a.edit.css);
+          out.push('```');
+          out.push('');
+        }
+        const d = a.edit.details || {};
+        if (a.edit.type === 'reorder' && d.parentSelector != null) {
+          out.push(
+            `- **Reorder:** move from index ${d.fromIndex} to index ${d.toIndex} ` +
+              `inside \`${d.parentSelector}\` (0-based DOM order)`
+          );
+          out.push('');
+        }
+      }
+
       // The note itself.
       if (a.note) {
         out.push(a.note.trim());

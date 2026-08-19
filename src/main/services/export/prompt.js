@@ -87,6 +87,15 @@ function toPrompt(session, annotations, consoleLog) {
     let line = `${index}. ${verb}: ${target}.`;
     if (note) line += ` ${note}`;
 
+    // Rearrange edits were previewed live — pass the agent the exact change.
+    if (a.edit && a.edit.css) {
+      line += ` Implement it in the source styles as: \`${a.edit.css}\` (previewed live on the page).`;
+    }
+    if (a.edit && a.edit.type === 'reorder' && a.edit.details && a.edit.details.parentSelector != null) {
+      const d = a.edit.details;
+      line += ` Reorder the element in the markup from index ${d.fromIndex} to index ${d.toIndex} (0-based) inside \`${d.parentSelector}\`.`;
+    }
+
     // Surface priority when it is above the baseline so the agent can order work.
     if (a.priority && a.priority !== 'normal') {
       line += ` [priority: ${a.priority}]`;

@@ -351,6 +351,10 @@ function setupTabWebview(tab) {
       case 'caos:annotation':
         if (isActive()) onAnnotation(payload);
         break;
+      case 'caos:edit-undo':
+        // The guest reverted a rearrange edit — retract its captured note.
+        if (isActive() && payload && payload.id) retractAnnotation(payload.id);
+        break;
       case 'caos:escape':
         setMode('off');
         break;
@@ -516,6 +520,19 @@ async function removeAnnotation(a) {
   if (state.currentSession) bumpSessionCount(state.currentSession.id, -1);
   refreshPins();
   toast('Note deleted');
+}
+
+// Silently remove an annotation by id (used when a rearrange edit is undone —
+// the note must disappear together with the reverted change, no confirm).
+async function retractAnnotation(id) {
+  const a = state.annotations.find((x) => x.id === id);
+  if (!a) return;
+  await caos.annotations.remove(id);
+  state.annotations = state.annotations.filter((x) => x.id !== id);
+  notesPanel.setAnnotations(state.annotations);
+  if (state.currentSession) bumpSessionCount(state.currentSession.id, -1);
+  refreshPins();
+  toast('Edit undone — note removed');
 }
 
 function maybeRestoreAnnotations() {
