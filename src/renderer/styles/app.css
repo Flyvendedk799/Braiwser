@@ -446,6 +446,10 @@ button { font-family: inherit; }
 .note-time { font-size: 11px; color: var(--faint); margin-left: auto; }
 
 /* ============================================================ INSPECTOR TAB */
+.inspector-section-label {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--faint);
+  padding: 10px 12px 0;
+}
 .inspector-bar { padding: 12px; border-bottom: 1px solid var(--line); display: flex; gap: 8px; }
 .tree { padding: 8px 6px 20px; font-family: var(--mono); font-size: 12px; }
 .tree-node { user-select: none; }
@@ -468,7 +472,7 @@ button { font-family: inherit; }
 .tree-text { color: var(--faint); font-style: italic; margin-left: 4px; }
 .tree-children { margin-left: 13px; border-left: 1px solid var(--line); padding-left: 4px; }
 
-/* ============================================================ LAYERS TAB */
+/* ---- Inspector tab: layout hierarchy (breadcrumb / container / siblings) ---- */
 .layers-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; padding: 12px 12px 8px; border-bottom: 1px solid var(--line); }
 .crumb {
   appearance: none; border: 0; background: transparent; cursor: pointer;
