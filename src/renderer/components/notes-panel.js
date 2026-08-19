@@ -54,9 +54,15 @@ export function createNotesPanel(config, actions) {
 
   function targetLabel(a) {
     const t = a.target || {};
-    if (a.kind === 'region' || t.box) {
+    // Only true region notes read as a box — element/edit targets also carry a
+    // box (from describe()) but their selector is the meaningful label.
+    if (a.kind === 'region') {
       const b = t.box || {};
       return `region · ${Math.round(b.w || 0)}×${Math.round(b.h || 0)} @ ${Math.round(b.x || 0)},${Math.round(b.y || 0)}`;
+    }
+    if (a.kind === 'edit') {
+      const type = (a.edit && a.edit.type) || 'edit';
+      return `${type} · ${t.selector || (t.tag ? `<${t.tag}>` : 'element')}`;
     }
     return t.selector || (t.tag ? `<${t.tag}>` : 'element');
   }
@@ -102,7 +108,7 @@ export function createNotesPanel(config, actions) {
         text: (actionMap[a.action] && actionMap[a.action].label) || a.action || 'comment',
         style: { color, background: color + '22' },
       }),
-      h('span', { class: 'note-kind', text: a.kind === 'region' ? 'region' : 'element' }),
+      h('span', { class: 'note-kind', text: a.kind === 'region' ? 'region' : a.kind === 'edit' ? 'edit' : 'element' }),
       h('span', { class: 'note-grow' }),
       actsRow,
       h('span', { class: 'note-num', text: '#' + (index + 1) }),

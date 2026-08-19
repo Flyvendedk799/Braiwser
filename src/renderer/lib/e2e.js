@@ -106,6 +106,193 @@ export async function run(I) {
     const pinCount = await guest("Array.from(document.querySelectorAll('div[data-caos]')).filter(d => d.style.borderRadius === '50%').length");
     check('annotation pin rendered (exactly 1, no dupes)', pinCount === 1, 'pins=' + pinCount);
 
+    // --- 3b. Draw mode: trusted drag → stroke → region note → annotation ---
+    {
+      // Enter draw mode through the REAL toolbar button, like a user would.
+      const drawBtn = Array.from(document.querySelectorAll('.toolbar .icon-btn')).find((b) => /draw/i.test(b.title || '') || /Draw/.test(b.textContent || ''));
+      check('toolbar has a Draw button', !!drawBtn);
+      if (drawBtn) drawBtn.click(); else I.setMode('draw');
+      check('draw mode on', I.state.mode === 'draw');
+      check('draw button shows active', !drawBtn || drawBtn.classList.contains('active'));
+      await sleep(250);
+      const canvasOn = await guest("(() => { const c = document.querySelector('canvas[data-caos]'); return !!c && c.style.display === 'block' && c.style.pointerEvents === 'auto'; })()");
+      check('draw canvas active', canvasOn);
+      // Drag a ~120×90 region with real (trusted) mouse events.
+      wv.sendInputEvent({ type: 'mouseDown', x: 260, y: 220, button: 'left', clickCount: 1 });
+      for (let i = 1; i <= 10; i++) {
+        wv.sendInputEvent({ type: 'mouseMove', x: 260 + i * 12, y: 220 + i * 9 });
+        await sleep(10);
+      }
+      // Mid-drag, the stroke must be VISIBLY painted on the overlay canvas.
+      await sleep(80);
+      const strokeVisible = await (async () => {
+        try {
+          const img = await wv.capturePage();
+          const png = img.toDataURL();
+          const probe = new Image();
+          await new Promise((res, rej) => { probe.onload = res; probe.onerror = rej; probe.src = png; });
+          const c = document.createElement('canvas');
+          c.width = probe.width; c.height = probe.height;
+          const cx = c.getContext('2d');
+          cx.drawImage(probe, 0, 0);
+          const scale = probe.width / wv.clientWidth;
+          const d = cx.getImageData(Math.round(200 * scale), Math.round(170 * scale), Math.round(220 * scale), Math.round(190 * scale)).data;
+          for (let i = 0; i < d.length; i += 4) {
+            // stroke color #ff5d8f ± antialiasing tolerance
+            if (Math.abs(d[i] - 255) < 40 && Math.abs(d[i + 1] - 93) < 60 && Math.abs(d[i + 2] - 143) < 60) return true;
+          }
+          return false;
+        } catch (e) { return 'err:' + e.message; }
+      })();
+      check('stroke visibly painted mid-drag', strokeVisible === true, String(strokeVisible));
+      wv.sendInputEvent({ type: 'mouseUp', x: 380, y: 310, button: 'left', clickCount: 1 });
+      await sleep(300);
+      const regionPopup = await guest("!!document.querySelector('[data-caos] textarea')");
+      check('draw drag opened region note popup', regionPopup);
+      const regionMsg = onceChannel('caos:annotation', 3000);
+      await clickSel('[data-caos] textarea');
+      await typeText('Rework this area');
+      await clickSel('[data-caos] [data-save]');
+      const sentRegion = await regionMsg;
+      check('guest sent region annotation', !!sentRegion && sentRegion.kind === 'region', sentRegion ? sentRegion.kind : 'no message');
+      const rBox = sentRegion && sentRegion.target && sentRegion.target.box;
+      check('region box captured from drag', !!rBox && rBox.w >= 100 && rBox.h >= 70, rBox ? `${rBox.w}x${rBox.h}@${rBox.x},${rBox.y}` : 'no box');
+      await sleep(300);
+      const persistedRegion = (await caos.annotations.bySession(session.id)).find((a) => a.kind === 'region');
+      check('region annotation persisted', !!persistedRegion, persistedRegion && persistedRegion.note);
+      // A second drag right after saving must work too (mode stays on).
+      wv.sendInputEvent({ type: 'mouseDown', x: 420, y: 180, button: 'left', clickCount: 1 });
+      for (let i = 1; i <= 6; i++) { wv.sendInputEvent({ type: 'mouseMove', x: 420 + i * 10, y: 180 + i * 10 }); await sleep(10); }
+      wv.sendInputEvent({ type: 'mouseUp', x: 480, y: 240, button: 'left', clickCount: 1 });
+      await sleep(250);
+      const secondPopup = await guest("!!document.querySelector('[data-caos] textarea')");
+      check('second draw after save works', secondPopup);
+      // Cancelling discards the mark but stays in draw mode.
+      await clickSel('[data-caos] [data-cancel]');
+      await sleep(200);
+      check('cancel keeps draw mode on', I.state.mode === 'draw');
+      // A tiny drag (below the accidental-click threshold) must NOT open a popup.
+      wv.sendInputEvent({ type: 'mouseDown', x: 500, y: 400, button: 'left', clickCount: 1 });
+      wv.sendInputEvent({ type: 'mouseMove', x: 502, y: 402 });
+      wv.sendInputEvent({ type: 'mouseUp', x: 502, y: 402, button: 'left', clickCount: 1 });
+      await sleep(250);
+      const tinyPopup = await guest("!!document.querySelector('[data-caos] textarea')");
+      check('tiny drag ignored (no popup)', !tinyPopup);
+      // A flat horizontal swipe (underline gesture) is a valid mark too — the
+      // stored box gets padded out to a usable height.
+      wv.sendInputEvent({ type: 'mouseDown', x: 200, y: 350, button: 'left', clickCount: 1 });
+      for (let i = 1; i <= 8; i++) { wv.sendInputEvent({ type: 'mouseMove', x: 200 + i * 15, y: 350 }); await sleep(10); }
+      wv.sendInputEvent({ type: 'mouseUp', x: 320, y: 350, button: 'left', clickCount: 1 });
+      await sleep(250);
+      const flatMsg = onceChannel('caos:annotation', 3000);
+      const flatPopup = await guest("!!document.querySelector('[data-caos] textarea')");
+      check('flat horizontal swipe registers', flatPopup);
+      await clickSel('[data-caos] textarea');
+      await typeText('Underline mark');
+      await clickSel('[data-caos] [data-save]');
+      const flatAnn = await flatMsg;
+      const flatBox = flatAnn && flatAnn.target && flatAnn.target.box;
+      check('thin region box padded to usable size', !!flatBox && flatBox.w >= 100 && flatBox.h >= 12, flatBox ? `${flatBox.w}x${flatBox.h}` : 'none');
+      I.setMode('off');
+    }
+
+    // --- 3c. Rearrange mode: select / smart layout / undo / reorder / resize / hide ---
+    {
+      const arrangeBtn = Array.from(document.querySelectorAll('.toolbar .icon-btn')).find((b) => /rearrange/i.test(b.title || ''));
+      check('toolbar has a Rearrange button', !!arrangeBtn);
+      if (arrangeBtn) arrangeBtn.click(); else I.setMode('arrange');
+      check('arrange mode on', I.state.mode === 'arrange');
+      await sleep(250);
+      const barShown = await guest("(() => { const b = document.querySelector('[data-caos-arrange=\\\"bar\\\"]'); return !!b && b.style.display === 'flex'; })()");
+      check('arrange action bar shown', barShown);
+
+      // Select #cta with a real click → selection box appears.
+      await clickSel('#cta');
+      await sleep(200);
+      const selShown = await guest("(() => { const b = document.querySelector('[data-caos-arrange=\\\"box\\\"]'); return !!b && b.style.display === 'block'; })()");
+      check('clicking an element selects it', selShown);
+
+      // Smart re-layout the parent (<main>) as a column → live style + edit note.
+      const layoutMsg = onceChannel('caos:annotation', 3000);
+      await clickSel('[data-caos-arrange="btn-column"]');
+      const layoutAnn = await layoutMsg;
+      check('smart layout emitted an edit annotation', !!layoutAnn && layoutAnn.kind === 'edit' && layoutAnn.edit && layoutAnn.edit.type === 'layout', layoutAnn && layoutAnn.edit && layoutAnn.edit.css);
+      const mainFlex = await guest("(() => { const m = document.querySelector('main'); return m.style.display === 'flex' && m.style.flexDirection === 'column'; })()");
+      check('smart layout applied live to the page', mainFlex);
+      await sleep(300);
+      const withLayout = (await caos.annotations.bySession(session.id)).filter((a) => a.kind === 'edit');
+      check('edit annotation persisted with payload', withLayout.length === 1 && !!withLayout[0].edit && /flex/.test(withLayout[0].edit.css || ''), withLayout.length + ' edits');
+
+      // Undo reverts the page AND retracts the note.
+      await clickSel('[data-caos-arrange="btn-undo"]');
+      await sleep(400);
+      const mainReverted = await guest("(() => { const m = document.querySelector('main'); return m.style.display !== 'flex'; })()");
+      check('undo reverted the live page', mainReverted);
+      const afterUndo = (await caos.annotations.bySession(session.id)).filter((a) => a.kind === 'edit');
+      check('undo retracted the edit note', afterUndo.length === 0, afterUndo.length + ' edits left');
+
+      // Reorder #cta one position later via the bar (↓).
+      await clickSel('#cta');
+      await sleep(150);
+      const reorderMsg = onceChannel('caos:annotation', 3000);
+      await clickSel('[data-caos-arrange="btn-down"]');
+      const reorderAnn = await reorderMsg;
+      check('reorder emitted an edit annotation', !!reorderAnn && reorderAnn.edit && reorderAnn.edit.type === 'reorder', reorderAnn && JSON.stringify((reorderAnn.edit || {}).details));
+      const newOrder = await guest("(() => { const k = Array.from(document.querySelector('main').children).filter(c => !c.hasAttribute('data-caos')); return k[0] && k[0].id; })()");
+      check('reorder moved the element in the DOM', newOrder === 'email', 'first child = ' + newOrder);
+
+      // Resize #cta by dragging the SE handle with real input.
+      await clickSel('#cta');
+      await sleep(150);
+      const w0 = await guest("document.getElementById('cta').getBoundingClientRect().width");
+      const hpos = await guest("(() => { const h = document.querySelector('[data-caos-arrange=\\\"handle-se\\\"]'); if (!h) return null; return { x: Math.round(parseFloat(h.style.left)) + 5, y: Math.round(parseFloat(h.style.top)) + 5 }; })()");
+      check('resize handle rendered', !!hpos, JSON.stringify(hpos));
+      const resizeMsg = onceChannel('caos:annotation', 3000);
+      if (hpos) {
+        wv.sendInputEvent({ type: 'mouseDown', x: hpos.x, y: hpos.y, button: 'left', clickCount: 1 });
+        for (let i = 1; i <= 6; i++) { wv.sendInputEvent({ type: 'mouseMove', x: hpos.x + i * 10, y: hpos.y + i * 3 }); await sleep(10); }
+        wv.sendInputEvent({ type: 'mouseUp', x: hpos.x + 60, y: hpos.y + 18, button: 'left', clickCount: 1 });
+      }
+      const resizeAnn = await resizeMsg;
+      const w1 = await guest("document.getElementById('cta').getBoundingClientRect().width");
+      check('resize handle grew the element', w1 >= w0 + 40, `${Math.round(w0)} -> ${Math.round(w1)}`);
+      check('resize emitted an edit annotation', !!resizeAnn && resizeAnn.edit && resizeAnn.edit.type === 'resize' && /width/.test(resizeAnn.edit.css || ''), resizeAnn && resizeAnn.edit && resizeAnn.edit.css);
+
+      // Alt-drag the selection → freehand move recorded as a transform edit.
+      await clickSel('#cta');
+      await sleep(150);
+      const cta2 = await guest(`(() => { const r = document.getElementById('cta').getBoundingClientRect(); return { x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) }; })()`);
+      const moveMsg = onceChannel('caos:annotation', 3000);
+      wv.sendInputEvent({ type: 'mouseDown', x: cta2.x, y: cta2.y, button: 'left', clickCount: 1, modifiers: ['alt'] });
+      for (let i = 1; i <= 5; i++) { wv.sendInputEvent({ type: 'mouseMove', x: cta2.x + i * 8, y: cta2.y + i * 5, modifiers: ['alt'] }); await sleep(10); }
+      wv.sendInputEvent({ type: 'mouseUp', x: cta2.x + 40, y: cta2.y + 25, button: 'left', clickCount: 1, modifiers: ['alt'] });
+      const moveAnn = await moveMsg;
+      check('alt-drag emitted a free-move edit', !!moveAnn && moveAnn.edit && moveAnn.edit.type === 'move' && /translate/.test(moveAnn.edit.css || ''), moveAnn && moveAnn.edit && moveAnn.edit.css);
+      const ctaMoved = await guest("/translate/.test(document.getElementById('cta').style.transform)");
+      check('free-move applied live to the page', ctaMoved);
+
+      // Hide an element, then undo it (page + note retraction round-trip).
+      await clickSel('#log');
+      await sleep(150);
+      await clickSel('[data-caos-arrange="btn-hide"]');
+      await sleep(250);
+      const logHidden = await guest("document.getElementById('log').style.display === 'none'");
+      check('hide removed the element from view', logHidden);
+      await clickSel('[data-caos-arrange="btn-undo"]');
+      await sleep(300);
+      const logBack = await guest("document.getElementById('log').style.display !== 'none'");
+      check('undo restored the hidden element', logBack);
+
+      // The persisted edits surface their exact change in the agent prompt.
+      const promptOut = await caos.export.build('prompt', session.id);
+      check('prompt export carries live-previewed CSS', promptOut && /previewed live on the page/.test(promptOut.content), 'prompt+edits');
+      const mdOut = await caos.export.build('markdown', session.id);
+      check('markdown export carries the edit CSS block', mdOut && /```css/.test(mdOut.content));
+
+      I.setMode('off');
+      check('arrange mode off', I.state.mode === 'off');
+    }
+
     // --- 4. DOM tree serializer ---
     const treeP = onceChannel('caos:dom-tree');
     wv.send('caos:request-dom-tree');

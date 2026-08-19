@@ -18,7 +18,13 @@ to a coding agent.
   bar; both in the sidebar).
 - ⌖ **Inspect mode** — DevTools-style hover highlight; click an element to capture its
   CSS selector, id, classes, text, attributes, computed styles, and bounding box.
-- ✎ **Draw mode** — freehand-circle a region and attach a note to it.
+- ✎ **Draw mode** — freehand-circle (or underline) a region and attach a note to it.
+- ✥ **Rearrange mode** — edit the layout live: click to select any element, drag to
+  reorder it among its siblings, Alt-drag to free-move, pull handles to resize, hide
+  elements, or apply a smart re-layout (row / column / grid / tidy) to a container.
+  Every change is previewed on the page AND captured as an `edit` note carrying the
+  exact CSS / reorder details, so it exports straight to a coding agent. Undo/Reset
+  revert the page and retract the notes.
 - 🏷️ **Action tags & triage** — remove / change / fix / add / question / comment, plus
   per-note **status** (open/resolved) and **priority** (low→critical).
 - 📌 **Persistent pins** — saved annotations are re-anchored and re-pinned on the page

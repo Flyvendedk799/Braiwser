@@ -4,8 +4,10 @@
 // Data model:
 //   Project    { id, name, path, kind:'local'|'url', createdAt, lastOpenedAt }
 //   Session    { id, projectId, name, url, title, createdAt, updatedAt }
-//   Annotation { id, sessionId, kind:'element'|'region', action, note, target,
-//                url, title, status, priority, createdAt, updatedAt }
+//   Annotation { id, sessionId, kind:'element'|'region'|'edit', action, note,
+//                target, url, title, status, priority, createdAt, updatedAt,
+//                edit? { type, css, details } — present on kind:'edit' only
+//                (a live rearrange change captured with its exact CSS) }
 //   Recording  { id, projectId, name, startUrl, steps[], createdAt, updatedAt }
 //
 // Secrets (API keys) live in their OWN file under userData and are NEVER written
@@ -152,6 +154,7 @@ function createRepositories(userDataDir) {
         createdAt: a.ts || now(),
         updatedAt: now(),
       };
+      if (a.edit) doc.edit = a.edit; // rearrange edits carry their CSS/reorder payload
       const saved = annotationsC.insert(doc);
       if (a.sessionId) sessionsC.update(a.sessionId, { updatedAt: now() });
       return saved;
