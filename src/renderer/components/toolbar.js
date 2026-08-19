@@ -35,9 +35,8 @@ export function createToolbar(actions) {
   const fwdBtn = btn({ icon: 'forward', title: 'Forward', onClick: actions.forward });
   const reloadBtn = btn({ icon: 'reload', title: 'Reload', onClick: actions.reload });
 
-  const inspectBtn = btn({ icon: 'inspect', label: 'Inspect', title: 'Inspect element (capture by clicking)', onClick: () => actions.toggleMode('inspect') });
-  const drawBtn = btn({ icon: 'draw', label: 'Draw', title: 'Draw a region to annotate', onClick: () => actions.toggleMode('draw') });
-  const layersBtn = btn({ icon: 'layers', label: 'Layers', title: 'Inspect layout hierarchy (click a UI section)', onClick: () => actions.toggleMode('layers') });
+  const inspectBtn = btn({ icon: 'inspect', label: 'Inspect', title: 'Inspect element — capture a note and view its layout hierarchy (click an element)', onClick: () => actions.toggleMode('inspect') });
+  const drawBtn = btn({ icon: 'draw', label: 'Draw', title: 'Drag on the page to circle an area, then add a note', onClick: () => actions.toggleMode('draw') });
   const assertBtn = btn({ icon: 'check', label: 'Assert', title: 'Add an assertion to the recording (click an element)', onClick: () => actions.toggleMode('assert') });
 
   const recBtn = btn({ icon: 'record', class: 'rec', label: 'Record', title: 'Record a user journey', onClick: actions.toggleRecord });
@@ -55,7 +54,7 @@ export function createToolbar(actions) {
     h('div', { class: 'address' }, [lock, addressInput, bookmarkBtn, suggestions]),
     h('div', { class: 'tb-group' }, [openFileBtn, openFolderBtn]),
     h('div', { class: 'tb-sep' }),
-    h('div', { class: 'tb-group' }, [inspectBtn, drawBtn, layersBtn]),
+    h('div', { class: 'tb-group' }, [inspectBtn, drawBtn]),
     h('div', { class: 'tb-sep' }),
     h('div', { class: 'tb-group' }, [recBtn, replayBtn, assertBtn]),
     h('div', { class: 'tb-sep' }),
@@ -68,7 +67,6 @@ export function createToolbar(actions) {
     bookmarkBtn.classList.toggle('on', !!bookmarked);
     inspectBtn.classList.toggle('active', mode === 'inspect');
     drawBtn.classList.toggle('active', mode === 'draw');
-    layersBtn.classList.toggle('active', mode === 'layers');
     assertBtn.classList.toggle('active', mode === 'assert');
     assertBtn.classList.toggle('hot', mode === 'assert' && !!recording);
     recBtn.classList.toggle('active', !!recording);

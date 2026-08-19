@@ -16,7 +16,7 @@ const replay = require('./replay');
 (function () {
   'use strict';
 
-  let mode = 'off'; // 'off' | 'inspect' | 'draw' | 'assert' | 'layers'
+  let mode = 'off'; // 'off' | 'inspect' | 'draw' | 'assert'
   let hovered = null; // element under cursor (inspect mode)
   let root, highlight, tooltip, canvas, ctx, popup, drawBar, pinLayer;
   let drawing = false;
@@ -24,7 +24,7 @@ const replay = require('./replay');
   let curStroke = null;
   let pins = []; // [{ el, target, badge, action }] restored annotation pins
   let pinSyncQueued = false;
-  let lastPickedEl = null; // live ref to the last Layers-mode selection, for reorder refocus
+  let lastPickedEl = null; // live ref to the last layout-hierarchy selection, for reorder refocus
 
   const ACTIONS = [
     { id: 'remove', label: 'Remove', color: '#ff6b6b' },
@@ -90,27 +90,27 @@ const replay = require('./replay');
     root.appendChild(pinLayer);
     document.documentElement.appendChild(root);
 
+    // The draw-mode surface. It only receives pointer events while draw mode
+    // is on (setMode toggles pointer-events), so its own mousedown/mousemove/
+    // mouseup listeners never fight with page content or other own-UI chrome —
+    // no target-filtering needed, unlike the document-level pick handlers.
     canvas = document.createElement('canvas');
     canvas.setAttribute('data-caos', '');
-    canvas.style.cssText = 'position:fixed;inset:0;display:none;z-index:2147483645;';
+    canvas.style.cssText = 'position:fixed;inset:0;display:none;z-index:2147483645;cursor:crosshair;';
     document.documentElement.appendChild(canvas);
     ctx = canvas.getContext('2d');
+    canvas.addEventListener('mousedown', onCanvasDown);
+    window.addEventListener('mousemove', onCanvasMove);
+    window.addEventListener('mouseup', onCanvasUp);
 
     drawBar = document.createElement('div');
     drawBar.setAttribute('data-caos', '');
     drawBar.style.cssText =
-      'position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:2147483647;display:none;gap:8px;' +
-      'background:#11131a;border:1px solid #2a2e3a;border-radius:10px;padding:8px 10px;box-shadow:0 8px 30px rgba(0,0,0,.45);';
-    drawBar.innerHTML =
-      '<span style="color:#9aa2b1;font:12px sans-serif;align-self:center;padding:0 4px">Draw to circle an area</span>' +
-      '<button data-act="note" style="cursor:pointer;border:0;border-radius:7px;padding:6px 12px;background:#5b8cff;color:#fff;font:600 12px sans-serif">Add note</button>' +
-      '<button data-act="clear" style="cursor:pointer;border:0;border-radius:7px;padding:6px 12px;background:#22262f;color:#cdd6f4;font:600 12px sans-serif">Clear</button>';
+      'position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:2147483647;display:none;' +
+      'background:#11131a;border:1px solid #2a2e3a;border-radius:10px;padding:8px 14px;box-shadow:0 8px 30px rgba(0,0,0,.45);' +
+      'color:#9aa2b1;font:12px sans-serif;pointer-events:none;';
+    drawBar.textContent = 'Drag on the page to circle something — release to add a note';
     document.documentElement.appendChild(drawBar);
-    drawBar.querySelector('[data-act=note]').addEventListener('click', openRegionNote);
-    drawBar.querySelector('[data-act=clear]').addEventListener('click', () => {
-      strokes = [];
-      redraw();
-    });
 
     sizeCanvas();
   }
@@ -147,7 +147,7 @@ const replay = require('./replay');
 
   // ---- inspect mode ---------------------------------------------------------
   function onMove(e) {
-    if (mode !== 'inspect' && mode !== 'assert' && mode !== 'layers') return;
+    if (mode !== 'inspect' && mode !== 'assert') return;
     const el = document.elementFromPoint(e.clientX, e.clientY);
     if (!el || isOwnUI(el)) {
       highlight.style.display = tooltip.style.display = 'none';
@@ -169,7 +169,7 @@ const replay = require('./replay');
   }
 
   function onClick(e) {
-    if (mode !== 'inspect' && mode !== 'assert' && mode !== 'layers') return;
+    if (mode !== 'inspect' && mode !== 'assert') return;
     const el = document.elementFromPoint(e.clientX, e.clientY);
     if (isOwnUI(el)) return; // let popup interactions through
     e.preventDefault();
@@ -185,30 +185,41 @@ const replay = require('./replay');
       }
       return;
     }
-    if (mode === 'layers') {
-      pickLayout(el);
-      return;
-    }
+    // Inspect mode does both: update the Inspector tab's layout/hierarchy
+    // view for this element, and open the note popup to capture a comment.
+    pickLayout(el);
     openElementNote(el);
   }
 
   // ---- draw mode ------------------------------------------------------------
-  function onDown(e) {
-    // The drawing canvas itself carries data-caos (see 'caos:clear-overlays'),
-    // so isOwnUI(e.target) would otherwise reject every stroke drawn on it —
-    // only reject clicks on OTHER own-UI chrome (draw bar, note popup).
-    if (mode !== 'draw' || (isOwnUI(e.target) && e.target !== canvas)) return;
+  // Handlers are bound directly on the canvas/window (see ensureUI), so no
+  // mode or own-UI check is strictly needed here — but the mode check guards
+  // against a stray event during a mode switch mid-drag.
+  const DRAW_MIN = 6; // px — below this, treat the drag as an accidental click
+
+  function onCanvasDown(e) {
+    if (mode !== 'draw') return;
+    e.preventDefault();
     drawing = true;
     curStroke = [{ x: e.clientX + window.scrollX, y: e.clientY + window.scrollY }];
-    strokes.push(curStroke);
+    strokes = [curStroke]; // one region per draw — a fresh drag replaces any prior stroke
+    redraw();
   }
-  function onDraw(e) {
+  function onCanvasMove(e) {
     if (!drawing) return;
     curStroke.push({ x: e.clientX + window.scrollX, y: e.clientY + window.scrollY });
     redraw();
   }
-  function onUp() {
+  function onCanvasUp() {
+    if (!drawing) return;
     drawing = false;
+    const box = strokesBox();
+    if (box && box.w >= DRAW_MIN && box.h >= DRAW_MIN) {
+      openRegionNote(); // drag was a real mark — go straight to the note
+    } else {
+      strokes = []; // accidental click — leave no mark behind
+      redraw();
+    }
   }
 
   function strokesBox() {
@@ -362,17 +373,21 @@ const replay = require('./replay');
       bottom: box.y - window.scrollY + box.h,
       right: box.x - window.scrollX + box.w,
     };
+    const clearStroke = () => {
+      strokes = [];
+      redraw();
+    };
     showPopup(
       { kind: 'region', target: { box }, anchor: anchorRect },
       (note, action) => {
         send({ id: uid(), kind: 'region', action, note, target: { box } });
-        strokes = [];
-        redraw();
-      }
+        clearStroke();
+      },
+      clearStroke // cancelling a region note just discards the mark — stay in draw mode to try again
     );
   }
 
-  function showPopup(ctxObj, onSave) {
+  function showPopup(ctxObj, onSave, onCancel) {
     closePopup();
     popup = document.createElement('div');
     popup.setAttribute('data-caos', '');
@@ -433,7 +448,8 @@ const replay = require('./replay');
     ta.focus();
     popup.querySelector('[data-cancel]').addEventListener('click', () => {
       closePopup();
-      ipcRenderer.sendToHost('caos:escape');
+      if (onCancel) onCancel();
+      else ipcRenderer.sendToHost('caos:escape');
     });
     popup.querySelector('[data-save]').addEventListener('click', () => {
       const note = ta.value.trim();
@@ -449,7 +465,8 @@ const replay = require('./replay');
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) popup.querySelector('[data-save]').click();
       if (e.key === 'Escape') {
         closePopup();
-        ipcRenderer.sendToHost('caos:escape');
+        if (onCancel) onCancel();
+        else ipcRenderer.sendToHost('caos:escape');
       }
     });
   }
@@ -605,8 +622,8 @@ const replay = require('./replay');
     const drawOn = next === 'draw';
     canvas.style.display = drawOn ? 'block' : 'none';
     canvas.style.pointerEvents = drawOn ? 'auto' : 'none';
-    drawBar.style.display = drawOn ? 'flex' : 'none';
-    if (document.body) document.body.style.cursor = next === 'inspect' || next === 'assert' || next === 'layers' ? 'crosshair' : '';
+    drawBar.style.display = drawOn ? 'block' : 'none';
+    if (document.body) document.body.style.cursor = next === 'inspect' || next === 'assert' ? 'crosshair' : '';
   }
 
   function send(annotation) {
@@ -621,9 +638,9 @@ const replay = require('./replay');
     ensureUI();
     document.addEventListener('mousemove', onMove, true);
     document.addEventListener('click', onClick, true);
-    document.addEventListener('mousedown', onDown, true);
-    document.addEventListener('mousemove', onDraw, true);
-    document.addEventListener('mouseup', onUp, true);
+    // Draw-mode dragging is handled by canvas/window listeners bound in
+    // ensureUI() — the canvas only accepts pointer events while draw mode is
+    // on, so it never needs to compete with these document-level pick handlers.
     document.addEventListener(
       'keydown',
       (e) => {

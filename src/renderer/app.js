@@ -7,7 +7,6 @@ import { createToolbar } from './components/toolbar.js';
 import { createSidebar } from './components/sidebar.js';
 import { createNotesPanel } from './components/notes-panel.js';
 import { createInspectorPanel } from './components/inspector-panel.js';
-import { createLayersPanel } from './components/layers-panel.js';
 import { createAiPanel } from './components/ai-panel.js';
 import { openOnboardingModal, openSettingsModal } from './components/settings-modal.js';
 import { createTabStrip } from './components/tabs.js';
@@ -42,7 +41,7 @@ const state = {
 };
 
 let wv; // the ACTIVE tab's <webview>
-let toolbar, sidebar, notesPanel, inspectorPanel, layersPanel, aiPanel, tabStrip, webviewHost;
+let toolbar, sidebar, notesPanel, inspectorPanel, aiPanel, tabStrip, webviewHost;
 let tabButtons = {};
 let stageOverlay, overlayLabel, overlayFill, overlayCancelBtn;
 const replayWaiters = new Map(); // index -> {resolve}
@@ -144,10 +143,7 @@ function buildShell() {
     requestTree: () => sendWv('caos:request-dom-tree'),
     highlight: (target) => sendWv('caos:highlight-target', target),
     copySelector: (sel) => copyText(sel, 'Selector copied'),
-  });
-
-  layersPanel = createLayersPanel({
-    select: (target) => sendWv('caos:request-layout', target),
+    selectLayout: (target) => sendWv('caos:request-layout', target),
     reorder: (payload) => sendWv('caos:reorder-sibling', payload),
   });
 
@@ -160,8 +156,8 @@ function buildShell() {
   syncProfileUi();
 
   const tabs = h('div', { class: 'tabs' });
-  ['notes', 'inspector', 'layers', 'ai'].forEach((id) => {
-    const labels = { notes: 'Notes', inspector: 'Inspector', layers: 'Layers', ai: 'AI' };
+  ['notes', 'inspector', 'ai'].forEach((id) => {
+    const labels = { notes: 'Notes', inspector: 'Inspector', ai: 'AI' };
     const showPill = id === 'notes';
     const btn = h('button', {
       class: `tab ${id === state.activeTab ? 'active' : ''}`,
@@ -180,7 +176,7 @@ function buildShell() {
     h('button', { class: 'btn btn-sm btn-primary', text: '→ Agent', title: 'Hand off this session to a coding agent', on: { click: handoffToAgent } }),
   ]);
 
-  const panel = h('aside', { class: 'panel' }, [tabs, notesPanel.root, inspectorPanel.root, layersPanel.root, aiPanel.root, footer]);
+  const panel = h('aside', { class: 'panel' }, [tabs, notesPanel.root, inspectorPanel.root, aiPanel.root, footer]);
 
   // ---- Stage (tab strip + webview host) ----
   tabStrip = createTabStrip({ newTab: () => createTab(state.config.welcomeUrl), selectTab: setActiveTab, closeTab: closeTab });
@@ -206,8 +202,8 @@ function exportBtn(label, format) {
 function switchTab(id) {
   state.activeTab = id;
   Object.entries(tabButtons).forEach(([k, b]) => b.classList.toggle('active', k === id));
-  [notesPanel, inspectorPanel, layersPanel, aiPanel].forEach((p) => p.root.classList.remove('active'));
-  ({ notes: notesPanel, inspector: inspectorPanel, layers: layersPanel, ai: aiPanel })[id].root.classList.add('active');
+  [notesPanel, inspectorPanel, aiPanel].forEach((p) => p.root.classList.remove('active'));
+  ({ notes: notesPanel, inspector: inspectorPanel, ai: aiPanel })[id].root.classList.add('active');
 }
 
 // ============================================================ SHORTCUTS
@@ -371,7 +367,7 @@ function setupTabWebview(tab) {
         if (isActive()) inspectorPanel.setTree(payload);
         break;
       case 'caos:layout-picked':
-        if (isActive()) { switchTab('layers'); layersPanel.setLayout(payload); }
+        if (isActive()) inspectorPanel.setLayout(payload);
         break;
       case 'caos:assert-pick':
         if (isActive()) onAssertPick(payload);
