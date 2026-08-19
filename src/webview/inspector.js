@@ -16,7 +16,7 @@ const replay = require('./replay');
 (function () {
   'use strict';
 
-  let mode = 'off'; // 'off' | 'inspect' | 'draw'
+  let mode = 'off'; // 'off' | 'inspect' | 'draw' | 'assert' | 'layers'
   let hovered = null; // element under cursor (inspect mode)
   let root, highlight, tooltip, canvas, ctx, popup, drawBar, pinLayer;
   let drawing = false;
@@ -24,6 +24,7 @@ const replay = require('./replay');
   let curStroke = null;
   let pins = []; // [{ el, target, badge, action }] restored annotation pins
   let pinSyncQueued = false;
+  let lastPickedEl = null; // live ref to the last Layers-mode selection, for reorder refocus
 
   const ACTIONS = [
     { id: 'remove', label: 'Remove', color: '#ff6b6b' },
@@ -146,7 +147,7 @@ const replay = require('./replay');
 
   // ---- inspect mode ---------------------------------------------------------
   function onMove(e) {
-    if (mode !== 'inspect' && mode !== 'assert') return;
+    if (mode !== 'inspect' && mode !== 'assert' && mode !== 'layers') return;
     const el = document.elementFromPoint(e.clientX, e.clientY);
     if (!el || isOwnUI(el)) {
       highlight.style.display = tooltip.style.display = 'none';
@@ -168,7 +169,7 @@ const replay = require('./replay');
   }
 
   function onClick(e) {
-    if (mode !== 'inspect' && mode !== 'assert') return;
+    if (mode !== 'inspect' && mode !== 'assert' && mode !== 'layers') return;
     const el = document.elementFromPoint(e.clientX, e.clientY);
     if (isOwnUI(el)) return; // let popup interactions through
     e.preventDefault();
@@ -184,12 +185,19 @@ const replay = require('./replay');
       }
       return;
     }
+    if (mode === 'layers') {
+      pickLayout(el);
+      return;
+    }
     openElementNote(el);
   }
 
   // ---- draw mode ------------------------------------------------------------
   function onDown(e) {
-    if (mode !== 'draw' || isOwnUI(e.target)) return;
+    // The drawing canvas itself carries data-caos (see 'caos:clear-overlays'),
+    // so isOwnUI(e.target) would otherwise reject every stroke drawn on it —
+    // only reject clicks on OTHER own-UI chrome (draw bar, note popup).
+    if (mode !== 'draw' || (isOwnUI(e.target) && e.target !== canvas)) return;
     drawing = true;
     curStroke = [{ x: e.clientX + window.scrollX, y: e.clientY + window.scrollY }];
     strokes.push(curStroke);
@@ -222,6 +230,118 @@ const replay = require('./replay');
       w: Math.round(maxX - minX),
       h: Math.round(maxY - minY),
     };
+  }
+
+  // ---- layout hierarchy (Layers mode) ----------------------------------------
+  // Describes a clicked element's spot in the layout: its ancestor breadcrumb,
+  // its parent container's layout kind (row/column/grid/stacked block flow),
+  // and the parent's children ("layers") with box/position/z-index — enough
+  // for the host panel to render the hierarchy and let the user reorder it.
+  function nodeBrief(el) {
+    return {
+      selector: anchor.cssPath(el),
+      tag: el.nodeName.toLowerCase(),
+      id: el.id || null,
+      classes: Array.prototype.slice.call(el.classList || []),
+    };
+  }
+
+  function ancestorChain(el) {
+    const chain = [];
+    let node = el;
+    let depth = 0;
+    while (node && node.nodeType === 1 && depth < 12) {
+      if (!isOwnUI(node)) chain.unshift(nodeBrief(node));
+      if (node === document.body) break;
+      node = node.parentElement;
+      depth++;
+    }
+    return chain;
+  }
+
+  function rectsOverlap(a, b) {
+    const ix = Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left));
+    const iy = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
+    const inter = ix * iy;
+    if (inter <= 0) return false;
+    const minArea = Math.min(a.width * a.height, b.width * b.height) || 1;
+    return inter / minArea > 0.3;
+  }
+
+  function containerKind(cs) {
+    const display = cs.display || '';
+    if (display.indexOf('grid') !== -1) {
+      const cols = (cs.gridTemplateColumns || '').split(' ').filter(Boolean).length;
+      const rows = (cs.gridTemplateRows || '').split(' ').filter(Boolean).length;
+      return { kind: 'grid', detail: cols && rows ? cols + '×' + rows : 'grid' };
+    }
+    if (display.indexOf('flex') !== -1) {
+      const dir = cs.flexDirection || 'row';
+      const wrap = cs.flexWrap && cs.flexWrap !== 'nowrap';
+      return { kind: dir.indexOf('column') === 0 ? 'column' : 'row', detail: dir + (wrap ? ' · wrap' : '') };
+    }
+    return { kind: 'block', detail: 'block flow' };
+  }
+
+  function layerList(parent, targetEl) {
+    const kids = Array.prototype.filter.call(parent.children, (c) => c.nodeType === 1 && !isOwnUI(c));
+    const boxes = kids.map((k) => k.getBoundingClientRect());
+    return kids.map((k, i) => {
+      const r = boxes[i];
+      const kcs = getComputedStyle(k);
+      const overlapping = boxes.some((r2, j) => j !== i && rectsOverlap(r, r2));
+      return {
+        selector: anchor.cssPath(k),
+        tag: k.nodeName.toLowerCase(),
+        id: k.id || null,
+        classes: Array.prototype.slice.call(k.classList || []),
+        index: i,
+        box: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) },
+        position: kcs.position,
+        zIndex: kcs.zIndex,
+        overlapping,
+        isTarget: k === targetEl,
+      };
+    });
+  }
+
+  function describeLayout(el) {
+    if (!el || el.nodeType !== 1 || isOwnUI(el)) return null;
+    const parent = el.parentElement;
+    let container = null;
+    let siblings = [];
+    if (parent && parent.nodeType === 1 && !isOwnUI(parent)) {
+      const pcs = getComputedStyle(parent);
+      const k = containerKind(pcs);
+      siblings = layerList(parent, el);
+      container = {
+        selector: anchor.cssPath(parent),
+        tag: parent.nodeName.toLowerCase(),
+        id: parent.id || null,
+        classes: Array.prototype.slice.call(parent.classList || []),
+        kind: k.kind,
+        detail: k.detail,
+        childCount: siblings.length,
+      };
+    }
+    return {
+      selector: anchor.cssPath(el),
+      target: nodeBrief(el),
+      breadcrumb: ancestorChain(el),
+      container,
+      siblings,
+    };
+  }
+
+  function pickLayout(el) {
+    try {
+      lastPickedEl = el;
+      anchor.highlight(el, { duration: 700, color: '#3ddc97' });
+      const info = describeLayout(el);
+      if (info) ipcRenderer.sendToHost('caos:layout-picked', info);
+    } catch (_e) {
+      /* ignore */
+    }
   }
 
   // ---- note popup -----------------------------------------------------------
@@ -486,7 +606,7 @@ const replay = require('./replay');
     canvas.style.display = drawOn ? 'block' : 'none';
     canvas.style.pointerEvents = drawOn ? 'auto' : 'none';
     drawBar.style.display = drawOn ? 'flex' : 'none';
-    if (document.body) document.body.style.cursor = next === 'inspect' || next === 'assert' ? 'crosshair' : '';
+    if (document.body) document.body.style.cursor = next === 'inspect' || next === 'assert' || next === 'layers' ? 'crosshair' : '';
   }
 
   function send(annotation) {
@@ -569,6 +689,43 @@ const replay = require('./replay');
       /* ignore */
     }
     ipcRenderer.sendToHost('caos:highlight-ack', { ok });
+  });
+
+  // Re-target the Layers panel to a specific node — used for breadcrumb clicks
+  // and drilling into a sibling row, independent of whether Layers mode is on.
+  ipcRenderer.on('caos:request-layout', (_e, target) => {
+    try {
+      let el = target && target.selector ? document.querySelector(target.selector) : null;
+      if (!el && target) el = anchor.resolve(target);
+      if (el) pickLayout(el);
+    } catch (_e) {
+      /* ignore */
+    }
+  });
+
+  // Move a container's child from one index to another (DOM order — this is
+  // what actually drives row/column and default paint order for that parent).
+  ipcRenderer.on('caos:reorder-sibling', (_e, payload) => {
+    try {
+      const p = payload || {};
+      const parent = p.parentSelector && document.querySelector(p.parentSelector);
+      if (!parent) return;
+      const kids = Array.prototype.filter.call(parent.children, (c) => c.nodeType === 1 && !isOwnUI(c));
+      const from = p.fromIndex,
+        to = p.toIndex;
+      if (from == null || to == null || from < 0 || from >= kids.length || to < 0 || to >= kids.length || from === to) return;
+      const node = kids[from];
+      const ref = kids[to > from ? to + 1 : to] || null;
+      parent.insertBefore(node, ref);
+      // Refocus on whatever was selected before the move (usually — but not
+      // always — the moved node itself) using the LIVE reference, not a
+      // re-derived selector: reordering can shift nth-of-type-based selectors
+      // for every reshuffled sibling, not just the one that moved.
+      const targetEl = lastPickedEl && document.documentElement.contains(lastPickedEl) ? lastPickedEl : node;
+      pickLayout(targetEl);
+    } catch (_e) {
+      /* ignore */
+    }
   });
 
   ipcRenderer.on('caos:start-recording', () => {
