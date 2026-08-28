@@ -22,6 +22,15 @@
     <div id="tall" style="height:1600px; background:linear-gradient(#fafafa,#e8e8f0);"></div>
     <footer id="foot">bottom</footer>
   </main>
+  <!-- Deliberate audit bait: each element trips exactly one rule, so the audit
+       suite can assert on specific ruleIds. Placed after <main> so it never
+       shifts the coordinates the inspect/draw/arrange sections click at. -->
+  <section id="audit-bait">
+    <img id="a-img" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==" width="20" height="20" />
+    <button id="a-noname" style="width:30px;height:30px"></button>
+    <input id="a-nolabel" type="text" />
+    <p id="a-contrast" style="color:#bbbbbb;background:#ffffff">barely readable</p>
+  </section>
   <script>
     // Record interactions so replay can be observed.
     let n = 0;

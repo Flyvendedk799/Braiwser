@@ -1,5 +1,10 @@
 # Braiwser — improvement backlog (from ultracode review wf_9644bfd6)
 
+> **Historical.** Every batch below is applied. This file records the review that
+> produced them; it is not a live to-do list. See `README.md` for the current
+> product and `CHANGELOG.md` for the 1.0 summary.
+
+
 Generated from an exhaustive 9-dimension review with adversarial verification: 58 findings, 44 confirmed worth applying, synthesized into 10 batches.
 
 **Invariants preserved by every change:** contextIsolation ON, webview `sandbox=no`, renderer ESM/`window.caos`-only, main/webview CommonJS, e2e suite stays green (>=51 checks).

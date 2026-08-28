@@ -13,8 +13,14 @@ function register({ repos, paths, getWindow }) {
 
   // --- e2e self-test: print report and exit ---
   on('caos:e2e-done', (report) => {
+    const failures = ((report && report.checks) || []).filter((c) => !c.pass);
+    const failed = !report || report.ok === false || !!report.fatal || failures.length > 0;
+    if (report && report.fatal) console.log('E2E FATAL: ' + report.fatal);
+    for (const f of failures) console.log(`E2E FAIL: ${f.name}${f.detail ? ' :: ' + f.detail : ''}`);
+    console.log(`E2E ${failed ? 'FAILED' : 'PASSED'} — ${(report && report.passed) || 0}/${(report && report.total) || 0} checks`);
     console.log('CAOS_E2E_REPORT ' + JSON.stringify(report));
-    setTimeout(() => app.quit(), 100);
+    // Exit non-zero on failure so CI actually goes red.
+    setTimeout(() => app.exit(failed ? 1 : 0), 100);
     return true;
   });
 

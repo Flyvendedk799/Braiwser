@@ -1,6 +1,6 @@
 // Agent hand-off. Turns a review session into action:
 //   1) writeRequest — always writes the change-request prompt to a .md file
-//      (into <project>/.caos for local projects, else the app data dir).
+//      (into <project>/.braiwser for local projects, else the app data dir).
 //   2) runCommand   — optionally spawns a user-configured agent command in the
 //      project directory, streaming stdout/stderr back via onChunk.
 const fs = require('fs');
@@ -17,7 +17,7 @@ function isLocal(project) {
 }
 
 function requestDir(project, appDir) {
-  return isLocal(project) ? path.join(project.path, '.caos') : path.join(appDir, 'requests');
+  return isLocal(project) ? path.join(project.path, '.braiwser') : path.join(appDir, 'requests');
 }
 
 function cwdFor(project, dir) {

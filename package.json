@@ -1,6 +1,6 @@
 {
   "name": "braiwser",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Braiwser — an annotation-first inspector browser for agentic UI review and testing. Open any web project, click any element, leave notes, audit accessibility, record journeys, and hand the whole review to a coding agent.",
   "main": "src/main/main.js",
@@ -9,7 +9,9 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
-    "e2e": "CAOS_E2E=1 electron .",
+    "check": "node scripts/check.js",
+    "e2e": "CAOS_E2E=1 electron . --no-sandbox",
+    "test": "npm run check && npm run e2e",
     "dist": "electron-builder",
     "dist:dir": "electron-builder --dir"
   },
