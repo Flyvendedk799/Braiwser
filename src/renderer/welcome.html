@@ -61,7 +61,8 @@
       display: grid; place-items: center; font-weight: 800; font-size: 13px;
       border: 1px solid var(--accent);
     }
-    .step b { display: block; margin-bottom: 4px; font-size: 13.5px; }
+    .step > div > b { display: block; margin-bottom: 4px; font-size: 13.5px; }
+    .step span b { display: inline; font-size: inherit; margin: 0; }
     .step span { color: var(--dim); font-size: 12.8px; line-height: 1.5; }
     .step kbd {
       font-size: 11px; font-weight: 700; color: var(--dim);

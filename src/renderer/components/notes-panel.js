@@ -289,5 +289,9 @@ export function createNotesPanel(config, actions) {
     searchInput.select();
   }
 
+  // Paint the filters and the empty state immediately — before this, the Notes
+  // tab was blank until the first session was opened.
+  render();
+
   return { root, setAnnotations, render, focusSearch, selectedIds: () => Array.from(selected) };
 }

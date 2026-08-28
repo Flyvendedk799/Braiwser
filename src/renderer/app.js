@@ -204,7 +204,13 @@ function buildShell() {
     exportBtn('Markdown', 'markdown'),
     exportBtn('Prompt', 'prompt'),
     exportBtn('JSON', 'json'),
-    h('button', { class: 'btn btn-sm', text: 'Copy prompt', title: 'Copy the agent prompt to the clipboard', on: { click: () => copyExport('prompt') } }),
+    h('button', {
+      class: 'btn btn-sm btn-icon-only',
+      html: icon('copy', 14),
+      title: 'Copy the agent prompt to the clipboard',
+      'aria-label': 'Copy the agent prompt to the clipboard',
+      on: { click: () => copyExport('prompt') },
+    }),
     h('button', { class: 'btn btn-sm btn-primary', text: '→ Agent', title: 'Hand off this session to a coding agent', on: { click: handoffToAgent } }),
   ]);
 

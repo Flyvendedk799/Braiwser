@@ -10,7 +10,8 @@ export function createToolbar(actions) {
     type: 'text',
     spellcheck: 'false',
     list: 'caos-address-suggestions',
-    placeholder: 'Search or enter address — URL, domain, /abs/path, or text',
+    placeholder: 'Search or enter address',
+    title: 'Enter a URL, a bare domain, an absolute path, or a search phrase',
     on: {
       keydown: (e) => {
         if (e.key === 'Enter') actions.navigate(addressInput.value.trim());

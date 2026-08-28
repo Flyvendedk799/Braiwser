@@ -1037,3 +1037,16 @@ kbd {
 /* Model picker: a known-good dropdown above a free-text id field. */
 .model-field { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
 @media (min-width: 520px) { .model-field { grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); } }
+
+/* The toolbar paints its own gradient rather than a token, so light mode needs
+   an explicit counterpart. */
+:root[data-theme='light'] .toolbar { background: linear-gradient(180deg, #ffffff, #f1f3f7); }
+:root[data-theme='light'] .toolbar .icon-btn.active { background: var(--accent); border-color: var(--accent); }
+
+/* Five actions never fit one row in a 360px panel — the primary one led the
+   row and got clipped. Give it its own full-width row above the exports. */
+.panel-footer { flex-wrap: wrap; }
+.panel-footer .btn { flex: 1 1 60px; min-width: 0; padding: 0 8px; }
+.panel-footer .btn-primary { flex: 1 0 100%; order: -1; }
+/* Icon-only footer action: it must not claim an equal share of the row. */
+.panel-footer .btn-icon-only { flex: 0 0 34px; padding: 0; justify-content: center; }
