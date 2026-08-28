@@ -57,3 +57,12 @@ jobs:
         run: npm run dist:dir
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Run the same suite against the packaged artifact on Linux. This is what
+      # catches bundling faults the dev tree can't — most importantly that the
+      # webview's inspector preload still loads from inside app.asar.
+      - name: End-to-end suite against the packaged app
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          xvfb-run -a --server-args="-screen 0 1600x1200x24" \
+            env CAOS_E2E=1 ./dist/linux-unpacked/braiwser --no-sandbox

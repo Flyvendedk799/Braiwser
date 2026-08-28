@@ -523,9 +523,14 @@ export async function run(I) {
       check('audit flags low contrast', rules.has('contrast'));
       check('audit flags the missing h1', rules.has('heading-no-h1'));
       check('audit flags the missing viewport meta', rules.has('doc-viewport'));
-      // Anchoring: a finding must carry a selector we can resolve back.
-      const anchored = (report.findings || []).find((f) => f.target && f.target.selector);
-      check('findings carry a resolvable anchor', !!anchored, anchored && anchored.target.selector);
+      // Anchoring: EVERY finding must carry a selector we can resolve back —
+      // including document-level ones, whose target is <html>.
+      const findings = report.findings || [];
+      const unanchored = findings.filter((f) => !(f.target && f.target.selector));
+      check('every finding carries a resolvable anchor', unanchored.length === 0, unanchored.map((f) => f.ruleId).join(',') || 'all anchored');
+      const docLevel = findings.find((f) => f.ruleId === 'doc-viewport');
+      check('document-level findings anchor to html', !!docLevel && docLevel.target.selector === 'html', docLevel && docLevel.target.selector);
+      check('every finding promotes as an element note', findings.every((f) => !!(f.target && f.target.selector)));
       // Severity counts must add up to the finding total.
       const summed = Object.values((report && report.counts) || {}).reduce((a, b) => a + b, 0);
       check('audit severity counts match the total', summed === report.total, `${summed} vs ${report.total}`);

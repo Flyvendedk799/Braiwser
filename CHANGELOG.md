@@ -67,13 +67,17 @@ The release that takes Braiwser from a capable prototype to a finished product.
 - `npm run check` — a dependency-free static gate: every source file parses,
   renderer imports resolve, and the module-system invariant holds (renderer ESM
   under `contextIsolation`, main and webview CommonJS).
-- The e2e suite grew from 94 to **147 checks**, covering the audit engine and
+- The e2e suite grew from 94 to **149 checks**, covering the audit engine and
   finding promotion, device viewports, themes, note search and bulk triage,
   Playwright export, bundle round-trips, and the menu command bus.
 - The e2e suite now **exits non-zero when a check fails** — it previously exited 0
   regardless, so a failing suite could not have failed CI.
-- CI workflow running both gates under Xvfb, then packaging the unpacked app on
-  Linux, macOS and Windows.
+- CI workflow running both gates under Xvfb, packaging the unpacked app on
+  Linux, macOS and Windows, and re-running the whole suite against the packaged
+  Linux artifact — which is what proves the webview's inspector preload still
+  loads from inside `app.asar`.
+- `anchor.cssPath` now names `<html>` and `<body>` instead of returning an empty
+  selector, so page-level targets resolve and highlight.
 - `LICENSE` (MIT) added to match the declared license.
 
 ## 0.2.0 and earlier

@@ -13,6 +13,11 @@ const STABLE_ATTRS = ['data-testid', 'data-test', 'data-cy', 'data-qa', 'name', 
 function cssPath(el) {
   try {
     if (!(el instanceof Element)) return '';
+    // The document root and body have no ancestor chain to walk, and the loop
+    // below stops before them — name them directly so page-level targets (audit
+    // findings on <html>, say) still resolve and highlight.
+    if (el === document.documentElement) return 'html';
+    if (el === document.body) return 'body';
     // Best path: a stable, test-oriented attribute that uniquely identifies it.
     for (const attr of STABLE_ATTRS) {
       const val = el.getAttribute && el.getAttribute(attr);

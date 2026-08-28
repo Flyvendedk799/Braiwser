@@ -240,10 +240,13 @@ viewports, themes, note search and bulk triage, DOM tree, record and replay,
 assertions and their failure paths, full-page capture and compositing, tabs,
 history and bookmarks, persistence and restore, exports (Markdown / prompt / JSON /
 Playwright), project bundle round-trips, the agent hand-off, and the menu command
-bus. **147 checks.** It exits non-zero when any check fails, so CI goes red.
+bus. **149 checks.** It exits non-zero when any check fails, so CI goes red.
 
-CI (`.github/workflows/ci.yml`) runs both gates under Xvfb and then builds the
-unpacked app on Linux, macOS and Windows.
+CI (`.github/workflows/ci.yml`) runs both gates under Xvfb, builds the unpacked
+app on Linux, macOS and Windows, and then runs the whole suite **again against
+the packaged Linux artifact** — which is what proves the bundle is real, most
+importantly that the webview's inspector preload still loads from inside
+`app.asar`.
 
 ---
 
