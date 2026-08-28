@@ -10,10 +10,12 @@ export function createSidebar(actions) {
   const bookmarksList = h('div', { class: 'side-list' });
   const historyList = h('div', { class: 'side-list' });
 
-  const clearHistoryBtn = h('button', { class: 'side-add', title: 'Clear history', html: icon('trash', 13), on: { click: () => actions.clearHistory && actions.clearHistory() } });
+  const clearHistoryBtn = h('button', { class: 'side-add', title: 'Clear history', 'aria-label': 'Clear history', html: icon('trash', 13), on: { click: () => actions.clearHistory && actions.clearHistory() } });
+  const importBtn = h('button', { class: 'side-add', title: 'Import a project bundle', 'aria-label': 'Import a project bundle', html: icon('upload', 13), on: { click: () => actions.importBundle && actions.importBundle() } });
+  const newProjectBtn = h('button', { class: 'side-add', title: 'New project', 'aria-label': 'New project', html: icon('plus', 14), on: { click: actions.newProject } });
 
   const root = h('aside', { class: 'sidebar' }, [
-    section('Projects', projectsList, actions.newProject),
+    section('Projects', projectsList, null, h('div', { class: 'side-head-acts' }, [importBtn, newProjectBtn])),
     section('Sessions', sessionsList, actions.newSession),
     section('Recordings', recordingsList, null),
     section('Bookmarks', bookmarksList, null),
@@ -21,8 +23,9 @@ export function createSidebar(actions) {
   ]);
 
   function section(title, list, onAdd, customBtn) {
+    const label = 'New ' + title.slice(0, -1).toLowerCase();
     const add = customBtn || (onAdd
-      ? h('button', { class: 'side-add', title: 'New ' + title.slice(0, -1).toLowerCase(), html: icon('plus', 14), on: { click: onAdd } })
+      ? h('button', { class: 'side-add', title: label, 'aria-label': label, html: icon('plus', 14), on: { click: onAdd } })
       : null);
     return h('div', { class: 'side-section' }, [
       h('div', { class: 'side-head' }, [h('h3', { text: title }), add]),
@@ -42,6 +45,7 @@ export function createSidebar(actions) {
         h('button', {
           class: `sr-act ${a.danger ? 'danger' : ''}`,
           title: a.title,
+          'aria-label': a.title,
           html: icon(a.icon, 13),
           on: {
             click: (e) => {
@@ -52,7 +56,24 @@ export function createSidebar(actions) {
         })
       )
     );
-    return h('div', { class: `side-row ${active ? 'active' : ''}`, on: { click: onClick } }, [
+    // Rows are clickable divs (they contain their own buttons, so a <button>
+    // wrapper would nest interactive elements). Give them button semantics and
+    // keyboard operation by hand instead.
+    return h('div', {
+      class: `side-row ${active ? 'active' : ''}`,
+      role: 'button',
+      tabindex: '0',
+      'aria-pressed': active ? 'true' : 'false',
+      on: {
+        click: onClick,
+        keydown: (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            if (onClick) onClick();
+          }
+        },
+      },
+    }, [
       h('span', { class: 'sr-icon', html: icon(ic, 15) }),
       h('div', { class: 'sr-body' }, [
         h('div', { class: 'sr-name', text: name }),
@@ -80,6 +101,7 @@ export function createSidebar(actions) {
           active: currentProject && currentProject.id === p.id,
           onClick: () => actions.openProject(p),
           rowActions: [
+            { icon: 'download', title: 'Export project bundle', onClick: () => actions.exportBundle(p) },
             { icon: 'edit', title: 'Rename', onClick: () => actions.renameProject(p) },
             { icon: 'trash', title: 'Delete', danger: true, onClick: () => actions.deleteProject(p) },
           ],
@@ -126,6 +148,7 @@ export function createSidebar(actions) {
           onClick: () => actions.selectRecording(r),
           rowActions: [
             { icon: 'replay', title: 'Replay', onClick: () => actions.replayRecording(r) },
+            { icon: 'download', title: 'Export as a Playwright test', onClick: () => actions.exportRecording(r) },
             { icon: 'edit', title: 'Edit steps & assertions', onClick: () => actions.editRecording(r) },
             { icon: 'trash', title: 'Delete', danger: true, onClick: () => actions.deleteRecording(r) },
           ],

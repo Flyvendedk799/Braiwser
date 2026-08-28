@@ -1,10 +1,10 @@
 {
-  "name": "chrome-ai-os",
+  "name": "braiwser",
   "version": "0.2.0",
   "private": true,
-  "description": "An annotation-first inspector browser for agentic UI testing — open any web project, click any element, leave notes, record journeys, and export to Markdown / AI prompts.",
+  "description": "Braiwser — an annotation-first inspector browser for agentic UI review and testing. Open any web project, click any element, leave notes, audit accessibility, record journeys, and hand the whole review to a coding agent.",
   "main": "src/main/main.js",
-  "author": "Chrome AI OS",
+  "author": "Braiwser",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
@@ -14,8 +14,8 @@
     "dist:dir": "electron-builder --dir"
   },
   "build": {
-    "appId": "com.chromeaios.app",
-    "productName": "Chrome AI OS",
+    "appId": "com.braiwser.app",
+    "productName": "Braiwser",
     "files": ["src/**/*", "package.json"],
     "directories": { "output": "dist" },
     "mac": { "category": "public.app-category.developer-tools", "target": ["dmg", "zip"] },

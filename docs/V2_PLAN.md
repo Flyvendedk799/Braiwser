@@ -1,4 +1,4 @@
-# Chrome AI OS — v2 plan
+# Braiwser — v2 plan
 
 Four features, grounded in the current codebase. Each is scoped with: contract
 changes, files touched, approach, verification (extend `npm run e2e`), effort, risk.

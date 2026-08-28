@@ -2,7 +2,7 @@
 // the preload (src/main/preload.js) maps a clean named API onto these channels.
 // Services (AI, export) are required lazily so a syntax error in one doesn't
 // take down app boot, and so they pick up edits during dev reloads.
-const { ipcMain, dialog, BrowserWindow, app, shell, webContents } = require('electron');
+const { ipcMain, dialog, BrowserWindow, app, shell, webContents, nativeTheme } = require('electron');
 const fs = require('fs');
 const { pathToFileURL } = require('url');
 const config = require('../config');
@@ -24,10 +24,20 @@ function register({ repos, paths, getWindow }) {
     priorities: config.PRIORITIES,
     statuses: config.STATUSES,
     assertionKinds: config.ASSERTION_KINDS,
+    devicePresets: config.DEVICE_PRESETS,
+    themes: config.THEMES,
+    modelChoices: config.MODEL_CHOICES,
+    auditSeverities: config.AUDIT_SEVERITIES,
+    shortcuts: config.SHORTCUTS,
     aiTasks: config.AI_TASKS,
+    appVersion: app.getVersion(),
+    platform: process.platform,
     inspectorPath: pathToFileURL(paths.inspector).href,
     welcomeUrl: pathToFileURL(paths.welcome).href,
   }));
+
+  // Current effective system theme, for settings.theme === 'system'.
+  on('caos:system-theme.get', () => (nativeTheme.shouldUseDarkColors ? 'dark' : 'light'));
 
   // --- filesystem ---
   on('caos:open-file', async () => {
@@ -49,6 +59,19 @@ function register({ repos, paths, getWindow }) {
       if (fs.existsSync(p)) { entry = p; break; }
     }
     return { path: dir, entry, url: entry ? pathToFileURL(entry).href : null };
+  });
+  on('caos:open-json', async () => {
+    const r = await dialog.showOpenDialog(win(), {
+      title: 'Import a Braiwser project bundle',
+      properties: ['openFile'],
+      filters: [{ name: 'Braiwser bundle', extensions: ['json'] }, { name: 'All files', extensions: ['*'] }],
+    });
+    if (r.canceled || !r.filePaths.length) return null;
+    try {
+      return { path: r.filePaths[0], text: fs.readFileSync(r.filePaths[0], 'utf8') };
+    } catch (err) {
+      throw new Error(`Could not read ${r.filePaths[0]}: ${err.message}`);
+    }
   });
   on('caos:save', async ({ defaultName, content }) => {
     const r = await dialog.showSaveDialog(win(), { title: 'Save', defaultPath: defaultName || 'export.md' });
@@ -106,10 +129,34 @@ function register({ repos, paths, getWindow }) {
 
   // --- settings + secrets ---
   on('caos:settings.get', () => repos.settings.get());
-  on('caos:settings.set', (patch) => repos.settings.set(patch));
+  on('caos:settings.set', (patch) => {
+    const next = repos.settings.set(patch);
+    // Keep Electron's own chrome (native dialogs, form controls, scrollbars) in
+    // step with the app theme the moment the user changes it.
+    nativeTheme.themeSource = next.theme === 'light' || next.theme === 'dark' ? next.theme : 'system';
+    return next;
+  });
   on('caos:secrets.providers', () => repos.secrets.providers());
   on('caos:secrets.setKey', (provider, key) => repos.secrets.setKey(provider, key));
   on('caos:secrets.clearKey', (provider) => repos.secrets.clearKey(provider));
+
+  // --- recording exports (Playwright spec / raw JSON) ---
+  on('caos:export.recording', (format, recordingId) => {
+    const { toPlaywrightSpec, toRecordingJson } = require('../services/export/playwright');
+    const rec = repos.recordings.get(recordingId);
+    if (!rec) throw new Error('Recording not found');
+    return format === 'json' ? toRecordingJson(rec) : toPlaywrightSpec(rec);
+  });
+
+  // --- project bundles (share / archive a whole review) ---
+  on('caos:bundle.export', (projectId) => {
+    const { exportBundle } = require('../services/bundle');
+    return exportBundle(repos, projectId);
+  });
+  on('caos:bundle.import', (text) => {
+    const { importBundle } = require('../services/bundle');
+    return importBundle(repos, text);
+  });
 
   // --- AI ---
   on('caos:ai.run', async (payload) => {

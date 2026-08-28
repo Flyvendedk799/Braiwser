@@ -1,4 +1,4 @@
-// Chrome AI OS — anchor.js
+// Braiwser — anchor.js
 // Element identity & re-resolution utilities, shared by inspector/recorder/replay.
 // Runs inside the guest page's world. Pure DOM, no IPC. Defensive everywhere.
 
@@ -103,6 +103,8 @@ function describe(el) {
         alt: get('alt'),
         role: get('role'),
         ariaLabel: get('aria-label'),
+        testid: get('data-testid') || get('data-test') || get('data-cy') || get('data-qa'),
+        name: get('name'),
       },
       box: {
         x: Math.round(r.left),

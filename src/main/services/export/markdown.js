@@ -51,6 +51,11 @@ function describeTarget(annotation) {
   if (attrs.role) lines.push(`- **role:** ${attrs.role}`);
   if (attrs.ariaLabel) lines.push(`- **aria-label:** ${attrs.ariaLabel}`);
 
+  if (annotation.viewport && annotation.viewport.w) {
+    const v = annotation.viewport;
+    lines.push(`- **Captured at:** ${v.label || 'viewport'} ${v.w}×${v.h}`);
+  }
+
   const box = t.box;
   if (box) {
     lines.push(

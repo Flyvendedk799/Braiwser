@@ -16,9 +16,11 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { JsonCollection, JsonDocument } = require('./db');
-const { DEFAULT_SETTINGS } = require('../config');
+const { DEFAULT_SETTINGS, DEVICE_PRESETS, THEMES } = require('../config');
 
 const AI_PROVIDERS = ['claude', 'openai'];
+const DEVICE_IDS = DEVICE_PRESETS.map((d) => d.id);
+const THEME_IDS = THEMES.map((t) => t.id);
 
 function normalizeSettings(raw = {}) {
   const base = { ...DEFAULT_SETTINGS, ...raw };
@@ -36,6 +38,9 @@ function normalizeSettings(raw = {}) {
     onboardingComplete: !!base.onboardingComplete,
     restoreAnnotationsOnLoad: base.restoreAnnotationsOnLoad !== false,
     replayDelayMs: Number.isFinite(Number(base.replayDelayMs)) ? Math.max(0, Number(base.replayDelayMs)) : DEFAULT_SETTINGS.replayDelayMs,
+    theme: THEME_IDS.includes(base.theme) ? base.theme : DEFAULT_SETTINGS.theme,
+    device: DEVICE_IDS.includes(base.device) ? base.device : DEFAULT_SETTINGS.device,
+    deviceLandscape: !!base.deviceLandscape,
   };
 }
 
@@ -74,7 +79,9 @@ function sanitizeSettingsPatch(patch, current) {
   if (Object.prototype.hasOwnProperty.call(patch, 'restoreAnnotationsOnLoad')) {
     clean.restoreAnnotationsOnLoad = patch.restoreAnnotationsOnLoad !== false;
   }
-  if (typeof patch.theme === 'string') clean.theme = cleanText(patch.theme, 40) || DEFAULT_SETTINGS.theme;
+  if (typeof patch.theme === 'string' && THEME_IDS.includes(patch.theme)) clean.theme = patch.theme;
+  if (typeof patch.device === 'string' && DEVICE_IDS.includes(patch.device)) clean.device = patch.device;
+  if (Object.prototype.hasOwnProperty.call(patch, 'deviceLandscape')) clean.deviceLandscape = !!patch.deviceLandscape;
   if (typeof patch.agentCommand === 'string') clean.agentCommand = patch.agentCommand.trim().slice(0, 2000);
   if (Array.isArray(patch.openTabs)) {
     clean.openTabs = patch.openTabs.filter((url) => typeof url === 'string' && url.length <= 4096).slice(0, 30);
@@ -155,6 +162,9 @@ function createRepositories(userDataDir) {
         updatedAt: now(),
       };
       if (a.edit) doc.edit = a.edit; // rearrange edits carry their CSS/reorder payload
+      // The viewport a note was captured at matters for responsive review, so
+      // it travels with the annotation into every export.
+      if (a.viewport && typeof a.viewport === 'object') doc.viewport = a.viewport;
       const saved = annotationsC.insert(doc);
       if (a.sessionId) sessionsC.update(a.sessionId, { updatedAt: now() });
       return saved;
