@@ -1,9 +1,14 @@
 name: CI
 
+# Pushes to a branch with an open PR would otherwise run the whole matrix
+# twice — once for `push`, once for `pull_request`. Restricting `push` to the
+# default branch keeps post-merge verification while letting `pull_request`
+# cover everything else exactly once.
 on:
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
