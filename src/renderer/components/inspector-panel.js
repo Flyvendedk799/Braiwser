@@ -191,15 +191,27 @@ export function createInspectorPanel(actions) {
   function renderNode(node, depth) {
     const hasChildren = node.children && node.children.length;
     const toggle = h('span', { class: `tree-toggle ${hasChildren ? '' : 'leaf'} ${depth < 2 ? 'open' : ''}`, html: icon('chevron', 10) });
-    const self = h('div', { class: 'tree-self', html: nodeLabel(node) });
+    const self = h('div', {
+      class: 'tree-self',
+      html: nodeLabel(node),
+      role: 'treeitem',
+      tabindex: '0',
+      ...(hasChildren ? { 'aria-expanded': depth < 2 ? 'true' : 'false' } : {}),
+    });
     self.insertBefore(toggle, self.firstChild);
     if (node.selector && actions.copySelector) {
-      const copyBtn = h('button', { class: 'tree-copy', title: 'Copy selector', html: icon('copy', 12), on: { click: (e) => { e.stopPropagation(); actions.copySelector(node.selector); } } });
+      const copyBtn = h('button', { class: 'tree-copy', title: 'Copy selector', 'aria-label': 'Copy selector', html: icon('copy', 12), on: { click: (e) => { e.stopPropagation(); actions.copySelector(node.selector); } } });
       self.appendChild(copyBtn);
     }
 
     const highlight = () => actions.highlight({ selector: node.selector });
     self.addEventListener('mouseenter', highlight);
+    self.addEventListener('focus', highlight);
+    self.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      self.click();
+    });
     self.addEventListener('click', (e) => {
       if (e.target === toggle || toggle.contains(e.target)) return;
       if (hotNode) hotNode.classList.remove('hot');
@@ -223,6 +235,7 @@ export function createInspectorPanel(actions) {
       toggle.addEventListener('click', (e) => {
         e.stopPropagation();
         toggle.classList.toggle('open');
+        self.setAttribute('aria-expanded', toggle.classList.contains('open') ? 'true' : 'false');
         sync();
       });
       wrap.appendChild(childBox);

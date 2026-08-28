@@ -1,5 +1,6 @@
-// Settings + onboarding modals: local profile, provider choice, per-provider
-// model + API key management, replay delay, and restore-annotations toggle.
+// Settings + onboarding modals: appearance, local profile, provider choice,
+// per-provider model + API key management, replay delay, and the
+// restore-annotations toggle.
 import { h, modal, icon, toast } from '../lib/dom.js';
 
 const PROVIDERS = ['claude', 'openai'];
@@ -8,9 +9,41 @@ const PROVIDER_LABELS = {
   openai: 'OpenAI',
 };
 const MODEL_PLACEHOLDERS = {
-  claude: 'claude-sonnet-4-6',
+  claude: 'claude-sonnet-5',
   openai: 'gpt-4o',
 };
+
+// A model field: a picker of known-good ids plus free text, so a model released
+// after this build can still be typed in.
+function modelField(provider, value, choices, onChange) {
+  const known = (choices && choices[provider]) || [];
+  const input = h('input', {
+    class: 'input mono',
+    type: 'text',
+    value: value || '',
+    placeholder: MODEL_PLACEHOLDERS[provider],
+    list: `caos-models-${provider}`,
+    'aria-label': `${PROVIDER_LABELS[provider] || provider} model id`,
+  });
+  const datalist = h('datalist', { id: `caos-models-${provider}` }, known.map((m) => {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.label = m.label;
+    return opt;
+  }));
+  const picker = h('select', { class: 'select', 'aria-label': `Pick a ${PROVIDER_LABELS[provider] || provider} model` }, [
+    h('option', { value: '', text: 'Choose a model…' }),
+    ...known.map((m) => h('option', { value: m.id, text: m.label })),
+  ]);
+  picker.addEventListener('change', () => {
+    if (!picker.value) return;
+    input.value = picker.value;
+    onChange(picker.value);
+    picker.value = '';
+  });
+  input.addEventListener('change', () => onChange(input.value.trim()));
+  return { root: h('div', { class: 'model-field' }, [picker, input, datalist]), input };
+}
 
 export function openSettingsModal({ settings, providers, actions }) {
   let provider = settings.aiProvider || 'claude';
@@ -18,6 +51,29 @@ export function openSettingsModal({ settings, providers, actions }) {
   const models = { ...(settings.models || {}) };
 
   const body = h('div', {});
+
+  // ---- Appearance ----
+  const themes = (settings.availableThemes || []).length
+    ? settings.availableThemes
+    : [{ id: 'dark', label: 'Dark' }, { id: 'light', label: 'Light' }, { id: 'system', label: 'Match system' }];
+  const themeGroup = h('div', { class: 'radio-group' });
+  const themeCards = {};
+  themes.forEach((t) => {
+    const radio = h('input', { type: 'radio', name: 'theme', value: t.id, checked: (settings.theme || 'dark') === t.id });
+    const card = h('label', { class: `radio-card ${(settings.theme || 'dark') === t.id ? 'sel' : ''}` }, [
+      radio,
+      h('span', { class: 'rc-name', text: t.label }),
+    ]);
+    radio.addEventListener('change', () => {
+      Object.values(themeCards).forEach((c) => c.classList.remove('sel'));
+      card.classList.add('sel');
+      persist({ theme: t.id });
+    });
+    themeCards[t.id] = card;
+    themeGroup.appendChild(card);
+  });
+  body.appendChild(field('Appearance', themeGroup, 'Applies to the whole app immediately. “Match system” follows your OS setting.'));
+
   body.appendChild(
     h('div', { class: 'profile-callout' }, [
       h('div', {}, [
@@ -69,9 +125,8 @@ export function openSettingsModal({ settings, providers, actions }) {
 
   // ---- Per-provider model + key ----
   PROVIDERS.forEach((p) => {
-    const modelInput = h('input', { class: 'input mono', type: 'text', value: models[p] || '', placeholder: MODEL_PLACEHOLDERS[p] });
-    modelInput.addEventListener('change', () => {
-      models[p] = modelInput.value.trim();
+    const model = modelField(p, models[p], settings.modelChoices, (v) => {
+      models[p] = v;
       persist({ models: { ...models } });
     });
 
@@ -102,7 +157,7 @@ export function openSettingsModal({ settings, providers, actions }) {
     } });
 
     const group = h('div', {}, [
-      h('div', { style: { marginBottom: '8px' } }, [modelInput]),
+      h('div', { style: { marginBottom: '8px' } }, [model.root]),
       h('div', { class: 'input-row' }, [keyInput, saveKeyBtn, clearKeyBtn]),
     ]);
     body.appendChild(field(`${providerLabel(p)} - model and API key`, group));
@@ -187,8 +242,7 @@ export function openOnboardingModal({ settings, providers, actions }) {
   body.appendChild(field('Default AI provider', radioGroup, 'AI tasks will use this provider first. Both Claude and OpenAI can be configured.'));
 
   PROVIDERS.forEach((p) => {
-    const modelInput = h('input', { class: 'input mono', type: 'text', value: models[p] || '', placeholder: MODEL_PLACEHOLDERS[p] });
-    modelInput.addEventListener('input', () => { models[p] = modelInput.value.trim(); });
+    const model = modelField(p, models[p], settings.modelChoices, (v) => { models[p] = v; });
     const keyInput = h('input', {
       class: 'input',
       type: 'password',
@@ -196,7 +250,7 @@ export function openOnboardingModal({ settings, providers, actions }) {
     });
     keyInputs[p] = keyInput;
     body.appendChild(field(`${providerLabel(p)} setup`, h('div', { class: 'provider-setup-row' }, [
-      modelInput,
+      model.root,
       keyInput,
     ])));
   });
@@ -224,7 +278,7 @@ export function openOnboardingModal({ settings, providers, actions }) {
     body,
     actions: [
       { label: 'Skip for now', kind: 'ghost', onClick: () => finish(true) },
-      { label: 'Start using Chrome AI OS', kind: 'primary', onClick: () => finish(false) },
+      { label: 'Start using Braiwser', kind: 'primary', onClick: () => finish(false) },
     ],
   });
 }

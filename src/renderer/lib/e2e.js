@@ -357,7 +357,8 @@ export async function run(I) {
       { type: 'navigate', url: fixtureUrl, ts: 1 },
       { type: 'assert', kind: 'exists', selector: '#cta', ts: 2 },
       { type: 'assert', kind: 'text', selector: '#hero', op: 'contains', expected: 'Promo', ts: 3 },
-      { type: 'assert', kind: 'count', selector: 'button', op: 'equals', expected: 1, ts: 4 },
+      // Scoped to <main> so growing the fixture elsewhere can't flip this count.
+      { type: 'assert', kind: 'count', selector: 'main button', op: 'equals', expected: 1, ts: 4 },
       { type: 'assert', kind: 'url', op: 'contains', expected: 'fixture.html', ts: 5 },
       { type: 'assert', kind: 'exists', selector: '#nonexistent', ts: 6 },
       { type: 'assert', kind: 'text', selector: '#hero', op: 'equals', expected: 'Nope', ts: 7 },
@@ -507,6 +508,221 @@ export async function run(I) {
       await sleep(450);
       const pins = await guest("Array.from(document.querySelectorAll('div[data-caos]')).filter(d => d.style.borderRadius === '50%').length");
       check('pins restored after reload', pins >= 1, 'pins=' + pins);
+    }
+
+    // --- 18. Page audit: run it, assert real rules fire, promote a finding ---
+    {
+      const auditMsg = onceChannel('caos:audit-result', 10000);
+      I.runAudit();
+      const report = await auditMsg;
+      check('audit returned a report', !!report && Array.isArray(report.findings), report && 'total=' + report.total);
+      const rules = new Set((report && report.findings ? report.findings : []).map((f) => f.ruleId));
+      check('audit flags the missing alt text', rules.has('img-alt'), Array.from(rules).join(','));
+      check('audit flags the unlabelled input', rules.has('form-label'));
+      check('audit flags the nameless button', rules.has('control-name'));
+      check('audit flags low contrast', rules.has('contrast'));
+      check('audit flags the missing h1', rules.has('heading-no-h1'));
+      check('audit flags the missing viewport meta', rules.has('doc-viewport'));
+      // Anchoring: EVERY finding must carry a selector we can resolve back —
+      // including document-level ones, whose target is <html>.
+      const findings = report.findings || [];
+      const unanchored = findings.filter((f) => !(f.target && f.target.selector));
+      check('every finding carries a resolvable anchor', unanchored.length === 0, unanchored.map((f) => f.ruleId).join(',') || 'all anchored');
+      const docLevel = findings.find((f) => f.ruleId === 'doc-viewport');
+      check('document-level findings anchor to html', !!docLevel && docLevel.target.selector === 'html', docLevel && docLevel.target.selector);
+      check('every finding promotes as an element note', findings.every((f) => !!(f.target && f.target.selector)));
+      // Severity counts must add up to the finding total.
+      const summed = Object.values((report && report.counts) || {}).reduce((a, b) => a + b, 0);
+      check('audit severity counts match the total', summed === report.total, `${summed} vs ${report.total}`);
+      // The panel received it.
+      await sleep(150);
+      const panelReport = I.auditPanel().getReport();
+      check('audit panel holds the report', !!panelReport && panelReport.total === report.total);
+      check('audit switched to the Audit tab', I.state.activeTab === 'audit');
+
+      // Promote one finding into a real note in this session.
+      const before = (await caos.annotations.bySession(session.id)).length;
+      const target = (report.findings || []).find((f) => f.ruleId === 'img-alt') || report.findings[0];
+      await I.runCommand('panel.audit');
+      const cards = document.querySelectorAll('.audit-list .finding');
+      check('audit panel rendered finding cards', cards.length >= 1, 'cards=' + cards.length);
+      // Drive the real button rather than the internal helper.
+      const addBtn = cards[0] && Array.from(cards[0].querySelectorAll('.note-act')).pop();
+      if (addBtn) addBtn.click();
+      await sleep(400);
+      const after = await caos.annotations.bySession(session.id);
+      const promoted = after.find((a) => /^\[audit:/.test(a.note || ''));
+      check('a finding promotes into a note', after.length === before + 1 && !!promoted, promoted && promoted.note.slice(0, 40));
+      check('promoted note is triaged by severity', !!promoted && ['critical', 'high', 'normal', 'low'].includes(promoted.priority), promoted && promoted.priority);
+      if (promoted) await caos.annotations.remove(promoted.id);
+      void target;
+      I.runCommand('panel.notes');
+    }
+
+    // --- 19. Device viewport emulation ---
+    {
+      await I.setDevice('tablet');
+      const d = I.currentDevice();
+      check('device preset resolves', d.id === 'tablet' && d.w === 820 && d.h === 1180, `${d.w}x${d.h}`);
+      const host = document.querySelector('.wv-host');
+      check('stage enters device mode', host && host.classList.contains('device'));
+      check('active webview is sized to the device', I.getWv().style.width === '820px' && I.getWv().style.height === '1180px', I.getWv().style.width);
+      check('device badge is shown', !!document.querySelector('.device-badge.show'));
+      await I.runCommand('view.rotate');
+      await sleep(60);
+      const rot = I.currentDevice();
+      check('rotate swaps width and height', rot.w === 1180 && rot.h === 820, `${rot.w}x${rot.h}`);
+      // A note captured now must record the viewport it was seen at.
+      const vpNote = await caos.annotations.create({
+        sessionId: session.id, kind: 'element', action: 'comment', note: 'viewport probe',
+        url: fixtureUrl, target: { selector: '#cta' }, viewport: { id: rot.id, label: rot.label, w: rot.w, h: rot.h },
+      });
+      const fetchedVp = (await caos.annotations.bySession(session.id)).find((a) => a.id === vpNote.id);
+      check('annotation stores its capture viewport', !!fetchedVp && fetchedVp.viewport && fetchedVp.viewport.w === 1180, fetchedVp && JSON.stringify(fetchedVp.viewport));
+      const vpExport = await caos.export.build('prompt', session.id);
+      check('viewport reaches the agent prompt', /viewport \(1180/.test(vpExport.content) || /Tablet viewport/.test(vpExport.content), 'prompt+viewport');
+      await caos.annotations.remove(vpNote.id);
+
+      await I.runCommand('view.rotate'); // back to portrait
+      await I.setDevice('fit');
+      await sleep(60);
+      check('fit clears the device sizing', I.getWv().style.width === '' && !document.querySelector('.wv-host').classList.contains('device'));
+    }
+
+    // --- 20. Theme switching ---
+    {
+      I.state.settings.theme = 'light';
+      I.applyTheme();
+      check('light theme is applied to the document', document.documentElement.dataset.theme === 'light');
+      const lightBg = getComputedStyle(document.body).backgroundColor;
+      I.state.settings.theme = 'dark';
+      I.applyTheme();
+      check('dark theme is applied to the document', document.documentElement.dataset.theme === 'dark');
+      const darkBg = getComputedStyle(document.body).backgroundColor;
+      check('theme actually repaints the shell', lightBg !== darkBg, `${lightBg} vs ${darkBg}`);
+      I.state.settings.theme = 'system';
+      I.applyTheme();
+      check('system theme resolves to a concrete value', ['dark', 'light'].includes(document.documentElement.dataset.theme), document.documentElement.dataset.theme);
+      I.state.settings.theme = 'dark';
+      I.applyTheme();
+    }
+
+    // --- 21. Notes search + bulk triage (driven through the real panel) ---
+    {
+      I.runCommand('panel.notes');
+      const mk = (note, selector) => caos.annotations.create({ sessionId: session.id, kind: 'element', action: 'comment', note, url: fixtureUrl, target: { selector } });
+      const n1 = await mk('needle alpha', '#cta');
+      const n2 = await mk('needle beta', '#email');
+      const n3 = await mk('unrelated gamma', '#foot');
+      I.state.annotations = await caos.annotations.bySession(session.id);
+      I.notesPanel().setAnnotations(I.state.annotations);
+      await sleep(60);
+
+      const searchInput = document.querySelector('.notes-search-row input');
+      check('notes panel has a search field', !!searchInput);
+      searchInput.value = 'needle';
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+      await sleep(60);
+      const shown = document.querySelectorAll('.notes-list .note').length;
+      check('search narrows the note list', shown === 2, 'shown=' + shown);
+      searchInput.value = '#foot';
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+      await sleep(60);
+      check('search matches selectors too', document.querySelectorAll('.notes-list .note').length === 1);
+      searchInput.value = '';
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+      await sleep(60);
+
+      // Bulk: tick two notes and resolve them through the bulk bar.
+      const boxes = document.querySelectorAll('.notes-list .note .note-check');
+      check('notes are selectable', boxes.length >= 3, 'boxes=' + boxes.length);
+      boxes[0].click();
+      await sleep(40);
+      document.querySelectorAll('.notes-list .note .note-check')[1].click();
+      await sleep(60);
+      const bar = document.querySelector('.bulk-bar.show');
+      check('bulk bar appears with a count', !!bar && /2 selected/.test(bar.textContent), bar && bar.textContent.slice(0, 20));
+      const resolveBtn = Array.from(bar.querySelectorAll('button')).find((b) => b.textContent === 'Resolve');
+      resolveBtn.click();
+      await sleep(400);
+      const resolved = (await caos.annotations.bySession(session.id)).filter((a) => a.status === 'resolved');
+      check('bulk resolve persists', resolved.length >= 2, 'resolved=' + resolved.length);
+
+      for (const a of [n1, n2, n3]) await caos.annotations.remove(a.id);
+      I.state.annotations = await caos.annotations.bySession(session.id);
+      I.notesPanel().setAnnotations(I.state.annotations);
+    }
+
+    // --- 22. Journey → Playwright spec ---
+    {
+      const rec = await caos.recordings.create({
+        projectId: project.id,
+        name: 'Checkout smoke',
+        startUrl: fixtureUrl,
+        steps: [
+          { type: 'navigate', url: fixtureUrl, ts: 1 },
+          { type: 'click', selector: '#cta', ts: 2 },
+          { type: 'input', selector: '#email', value: 'hi@test.com', ts: 3 },
+          { type: 'key', selector: '#email', key: 'Enter', ts: 4 },
+          { type: 'assert', kind: 'text', selector: '#count', op: 'equals', expected: '1', ts: 5 },
+          { type: 'assert', kind: 'url', op: 'contains', expected: 'fixture', ts: 6 },
+          { type: 'assert', kind: 'count', selector: 'button', op: 'equals', expected: '2', ts: 7 },
+        ],
+      });
+      const spec = await caos.export.recording('playwright', rec.id);
+      const c = spec.content;
+      check('playwright export names the spec file', /\.spec\.js$/.test(spec.defaultName), spec.defaultName);
+      check('playwright export imports the test runner', /@playwright\/test/.test(c));
+      check('playwright export maps navigate', /page\.goto\(/.test(c));
+      check('playwright export maps click', /locator\("#cta"\)\.first\(\)\.click\(\)/.test(c));
+      check('playwright export maps input to fill', /\.fill\("hi@test\.com"\)/.test(c));
+      check('playwright export maps key press', /\.press\("Enter"\)/.test(c));
+      check('playwright export maps text assertion', /toHaveText\("1"\)/.test(c));
+      check('playwright export maps url assertion', /toHaveURL\(/.test(c));
+      check('playwright export maps count assertion', /toHaveCount\(2\)/.test(c));
+      const raw = await caos.export.recording('json', rec.id);
+      check('journey also exports as raw json', /"steps"/.test(raw.content) && /\.json$/.test(raw.defaultName), raw.defaultName);
+      await caos.recordings.remove(rec.id);
+    }
+
+    // --- 23. Project bundle round-trip ---
+    {
+      const bundle = await caos.bundle.export(project.id);
+      check('bundle export names the file', /\.braiwser\.json$/.test(bundle.defaultName), bundle.defaultName);
+      const parsed = JSON.parse(bundle.content);
+      check('bundle carries the project and its sessions', parsed.project.id === project.id && parsed.sessions.length >= 1, 'sessions=' + parsed.sessions.length);
+      const noteCount = parsed.annotations.length;
+
+      const imported = await I.importBundleText(bundle.content);
+      check('bundle imports as a new project', !!imported && imported.project.id !== project.id, imported && imported.project.name);
+      check('imported project keeps every note', !!imported && imported.counts.annotations === noteCount, imported && `${imported.counts.annotations}/${noteCount}`);
+      const importedSessions = await caos.sessions.list(imported.project.id);
+      const importedNotes = [];
+      for (const s2 of importedSessions) importedNotes.push(...(await caos.annotations.bySession(s2.id)));
+      check('imported notes are re-keyed, not aliased', importedNotes.every((a) => !parsed.annotations.some((o) => o.id === a.id)), 'notes=' + importedNotes.length);
+
+      // A non-bundle file must be refused rather than half-imported.
+      let refused = false;
+      try { await caos.bundle.import('{"kind":"something-else"}'); } catch (_e) { refused = true; }
+      check('a foreign file is refused', refused);
+
+      await caos.projects.remove(imported.project.id);
+      // Re-open the original project so later state stays coherent.
+      I.state.currentProject = project;
+      await I.openSession(session);
+    }
+
+    // --- 24. Menu command bus ---
+    {
+      check('unknown commands are ignored safely', I.runCommand('does.not.exist') === false);
+      I.runCommand('panel.inspector');
+      check('command switches the panel', I.state.activeTab === 'inspector');
+      I.runCommand('panel.notes');
+      check('command switches back', I.state.activeTab === 'notes');
+      I.runCommand('mode.inspect');
+      check('command toggles a review mode', I.state.mode === 'inspect');
+      I.runCommand('mode.off');
+      check('command exits the mode', I.state.mode === 'off');
     }
 
     // --- cleanup ---

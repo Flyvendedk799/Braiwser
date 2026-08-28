@@ -1,4 +1,10 @@
-# Chrome AI OS — v2 plan
+# Braiwser — v2 plan
+
+> **Historical.** All four phases below shipped, and the product has since gone
+> well beyond them (page audit, device viewports, themes, Playwright export,
+> project bundles, native menu). See `README.md` for what Braiwser does today
+> and `CHANGELOG.md` for the 1.0 summary. Kept for the design rationale.
+
 
 Four features, grounded in the current codebase. Each is scoped with: contract
 changes, files touched, approach, verification (extend `npm run e2e`), effort, risk.

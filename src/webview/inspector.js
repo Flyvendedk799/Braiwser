@@ -1,4 +1,4 @@
-// Chrome AI OS — inspector preload, injected into every page in the <webview>.
+// Braiwser — inspector preload, injected into every page in the <webview>.
 // Runs in the guest page's isolated world and is the ENTRY for all in-page
 // engines. It wires together:
 //   • anchor.js   — element identity / re-resolution / highlight
@@ -12,6 +12,7 @@ const { ipcRenderer } = require('electron');
 const anchor = require('./anchor');
 const recorder = require('./recorder');
 const replay = require('./replay');
+const audit = require('./audit');
 
 (function () {
   'use strict';
@@ -1408,6 +1409,19 @@ const replay = require('./replay');
       r = { ok: false, error: String((err && err.message) || err) };
     }
     ipcRenderer.sendToHost('caos:replay-ack', { index: p.index, ok: !!r.ok, error: r.error, actual: r.actual });
+  });
+
+  // Run the offline accessibility / quality audit over the live page and hand
+  // the findings back to the shell. Anchoring uses the same describe() the
+  // inspector uses, so a finding can be located or promoted to a note.
+  ipcRenderer.on('caos:run-audit', () => {
+    let report;
+    try {
+      report = audit.runAudit({ describe: anchor.describe });
+    } catch (err) {
+      report = { error: String((err && err.message) || err), findings: [], counts: {}, total: 0 };
+    }
+    ipcRenderer.sendToHost('caos:audit-result', report);
   });
 
   ipcRenderer.on('caos:request-dom-tree', () => {

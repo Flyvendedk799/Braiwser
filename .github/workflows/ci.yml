@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  test:
+    name: check + e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Static check
+        run: npm run check
+
+      # The e2e suite drives a real Electron window with trusted input events,
+      # so it needs a display. Xvfb gives it one; the suite exits non-zero when
+      # any check fails.
+      - name: End-to-end suite
+        run: xvfb-run -a --server-args="-screen 0 1600x1200x24" npm run e2e
+
+  package:
+    name: package (${{ matrix.os }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # --dir builds the unpacked app: it proves the bundle is complete and
+      # launchable on every platform without spending time on installers.
+      - name: Build unpacked app
+        run: npm run dist:dir
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Run the same suite against the packaged artifact on Linux. This is what
+      # catches bundling faults the dev tree can't — most importantly that the
+      # webview's inspector preload still loads from inside app.asar.
+      - name: End-to-end suite against the packaged app
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          xvfb-run -a --server-args="-screen 0 1600x1200x24" \
+            env CAOS_E2E=1 ./dist/linux-unpacked/braiwser --no-sandbox

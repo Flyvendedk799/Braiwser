@@ -1,22 +1,31 @@
-// Chrome AI OS — Electron main process.
-// Boots the store, registers IPC, and creates the shell window. The guest web
-// project loads inside a <webview> in the renderer; all persistence and AI calls
-// flow through IPC to this process.
-const { app, BrowserWindow, webContents, shell } = require('electron');
+// Braiwser — Electron main process.
+// Boots the store, registers IPC, installs the native menu, and creates the
+// shell window. The guest web project loads inside a <webview> in the renderer;
+// all persistence and AI calls flow through IPC to this process.
+const { app, BrowserWindow, nativeTheme, shell } = require('electron');
 const path = require('path');
 const { createRepositories } = require('./store/repositories');
+const { migrateLegacyUserData } = require('./migrate');
+const { installMenu } = require('./menu');
+const config = require('./config');
 const registerIpc = require('./ipc');
 
 let mainWindow = null;
 
-function createWindow() {
+// Window chrome must not flash the wrong colour before the renderer paints.
+function shellBackground(theme) {
+  const dark = theme === 'dark' || (theme !== 'light' && nativeTheme.shouldUseDarkColors);
+  return dark ? '#0e0f13' : '#f6f7f9';
+}
+
+function createWindow(settings) {
   mainWindow = new BrowserWindow({
     width: 1480,
     height: 940,
     minWidth: 960,
     minHeight: 600,
-    title: 'Chrome AI OS',
-    backgroundColor: '#0e0f13',
+    title: 'Braiwser',
+    backgroundColor: shellBackground(settings && settings.theme),
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -29,13 +38,11 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
   const e2e = process.env.CAOS_E2E === '1';
-  if (process.argv.includes('--dev') || e2e) {
-    if (e2e) {
-      const levels = ['log', 'warn', 'error'];
-      mainWindow.webContents.on('console-message', (_e, level, message) => {
-        console.log(`[renderer:${levels[level] || level}] ${message}`);
-      });
-    }
+  if (e2e) {
+    const levels = ['log', 'warn', 'error'];
+    mainWindow.webContents.on('console-message', (_e, level, message) => {
+      console.log(`[renderer:${levels[level] || level}] ${message}`);
+    });
   }
   if (process.argv.includes('--dev')) {
     mainWindow.webContents.openDevTools({ mode: 'detach' });
@@ -77,14 +84,42 @@ app.on('web-contents-created', (_e, contents) => {
 });
 
 app.whenReady().then(() => {
+  // Carry a pre-rename (Chrome AI OS) store over on first launch as Braiwser.
+  migrateLegacyUserData({ appDataDir: app.getPath('appData'), userDataDir: app.getPath('userData') });
+
   const repos = createRepositories(app.getPath('userData'));
   const paths = {
     inspector: path.join(__dirname, '..', 'webview', 'inspector.js'),
     welcome: path.join(__dirname, '..', 'renderer', 'welcome.html'),
+    audit: path.join(__dirname, '..', 'webview', 'audit.js'),
   };
   registerIpc({ repos, paths, getWindow: () => mainWindow });
-  createWindow();
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+  installMenu({
+    getWindow: () => mainWindow,
+    devices: config.DEVICE_PRESETS,
+    themes: config.THEMES,
+  });
+
+  const settings = repos.settings.get();
+  applyNativeTheme(settings.theme);
+  createWindow(settings);
+
+  // Following the OS theme means reacting to it changing while we run.
+  nativeTheme.on('updated', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('caos:system-theme', nativeTheme.shouldUseDarkColors ? 'dark' : 'light');
+    }
+  });
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow(repos.settings.get());
+  });
 });
+
+// Keep Electron's own surfaces (native dialogs, scrollbars) in step with the
+// app's theme choice.
+function applyNativeTheme(theme) {
+  nativeTheme.themeSource = theme === 'light' || theme === 'dark' ? theme : 'system';
+}
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
