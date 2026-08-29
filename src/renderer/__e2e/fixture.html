@@ -10,10 +10,28 @@
     #cta { padding: 12px 20px; font-size: 16px; }
     #email { padding: 8px; font-size: 14px; width: 240px; margin-top: 16px; display: block; }
     #log { margin-top: 16px; font-family: monospace; color: #333; }
+    /* A horizontal row of inline-block chips in plain block flow — the case a
+       display-based axis guess gets wrong. */
+    #chips { padding: 10px 24px; }
+    #chips .chip { display: inline-block; padding: 6px 14px; margin-right: 8px; background: #eef; border: 1px solid #99c; }
+    :root { --brand: #2f6df6; --brand-ink: #ffffff; }
+    #login-card { padding: 16px; border: 1px solid #dde; border-radius: 12px; width: 220px; margin: 12px 24px; }
+    #login-card .avatar { width: 24px; height: 24px; vertical-align: middle; }
+    #login-btn {
+      background: var(--brand); color: var(--brand-ink); border: 0; border-radius: 8px;
+      padding: 10px 18px; font: 600 14px sans-serif; cursor: pointer;
+    }
+    #login-btn:hover { background: #1d4fd0; }
+    @media (max-width: 400px) { #login-btn { width: 100%; } }
   </style>
 </head>
 <body>
   <header id="hero">Big Promo Banner</header>
+  <nav id="chips">
+    <span class="chip" id="c1">One</span>
+    <span class="chip" id="c2">Two</span>
+    <span class="chip" id="c3">Three</span>
+  </nav>
   <main>
     <button id="cta">Click me</button>
     <input id="email" placeholder="you@example.com" />
@@ -22,6 +40,23 @@
     <div id="tall" style="height:1600px; background:linear-gradient(#fafafa,#e8e8f0);"></div>
     <footer id="foot">bottom</footer>
   </main>
+  <!-- Deep nesting: #middlebtn sits inside the tree's depth budget, #deepbtn
+       past it — the Sections panel has to cope with both. -->
+  <div id="deep"><div><div><div><div><div>
+    <button id="middlebtn">Middle button</button>
+    <div><div><div><div><div><div><div><div>
+      <button id="deepbtn">Deep button</button>
+    </div></div></div></div></div></div></div></div>
+  </div></div></div></div></div></div>
+  <!-- A small component to export: custom property, hover rule, media query, image. -->
+  <div id="login-card">
+    <span class="avatar" aria-hidden="true" style="display:inline-block;background:#ccd"></span>
+    <button id="login-btn">Log in</button>
+  </div>
+  <div id="stack" style="position:relative;height:60px;margin:12px 24px">
+    <div id="s1" style="position:absolute;left:0;top:0;width:90px;height:44px;background:#fcc"></div>
+    <div id="s2" style="position:absolute;left:24px;top:10px;width:90px;height:44px;background:#ccf"></div>
+  </div>
   <script>
     // Record interactions so replay can be observed.
     let n = 0;

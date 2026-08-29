@@ -42,7 +42,8 @@
       transition: border-color 0.15s, transform 0.15s;
     }
     .step:hover { border-color: var(--line2); transform: translateY(-1px); }
-    .step:last-child { grid-column: 1 / -1; }
+    .steps .step:nth-child(1) { grid-column: 1 / -1; }
+    .n { font-size: 14px; }
     .n {
       flex: 0 0 28px; height: 28px; border-radius: 9px;
       background: rgba(91,140,255,0.16); color: var(--accent);
@@ -50,6 +51,7 @@
       border: 1px solid rgba(91,140,255,0.4);
     }
     .step b { display: block; margin-bottom: 4px; font-size: 13.5px; }
+    .step span strong { font-weight: 700; color: var(--text); }
     .step span { color: var(--dim); font-size: 12.8px; line-height: 1.5; }
     .step code {
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
@@ -74,15 +76,18 @@
       </div>
     </div>
 
-    <h1>Review any web project,<br /><span class="accent">click to capture, ship to AI.</span></h1>
-    <p class="sub">Open a local project or any URL, point at the elements that need work, leave notes, and export a clean review doc or a ready-to-run prompt for your coding agent.</p>
+    <h1>Review any web project,<br /><span class="accent">edit it live, ship it to AI.</span></h1>
+    <p class="sub">Open a local project or any URL. Point at what needs work and leave notes, restyle and rewrite it in place, rearrange the layout — then export the whole thing as a review doc, an agent prompt, or the component itself.</p>
 
     <div class="steps">
-      <div class="step"><div class="n">1</div><div><b>Open a project</b><span>Hit <b>File</b> or <b>Folder</b> to load your project’s <code>index.html</code>, or type any URL in the bar.</span></div></div>
-      <div class="step"><div class="n">2</div><div><b>Inspect &amp; click</b><span>Toggle <b>⌖ Inspect</b>, hover to highlight any element, then click — its selector, classes &amp; text are captured automatically.</span></div></div>
-      <div class="step"><div class="n">3</div><div><b>Or draw a region</b><span>Toggle <b>✎ Draw</b> to circle an area freehand and attach a note to that region.</span></div></div>
-      <div class="step"><div class="n">4</div><div><b>Leave a note</b><span>Pick an action — remove / change / fix / add / question — and describe it. Notes land in the right panel, pinned on the page.</span></div></div>
-      <div class="step"><div class="n">5</div><div><b>Record, replay &amp; export</b><span>Record a user journey to replay later, then export to <b>Markdown</b> for review or <b>Prompt</b> to hand the whole set straight to an AI coding agent.</span></div></div>
+      <div class="step"><div class="n">1</div><div><b>Open anything</b><span>Hit <strong>File</strong> or <strong>Folder</strong> for a local project, or type any URL. Tabs, history and bookmarks all work.</span></div></div>
+      <div class="step"><div class="n">⌖</div><div><b>Inspect <code>⌘1</code></b><span>Hover to highlight, click to capture an element — selector, classes, text and styles — and write a note against it.</span></div></div>
+      <div class="step"><div class="n">✎</div><div><b>Draw <code>⌘2</code></b><span>Circle any area freehand and attach a note to the region, for the things a selector cannot express.</span></div></div>
+      <div class="step"><div class="n">✐</div><div><b>Edit <code>⌘3</code></b><span>Type straight into the page, and change font, size, colour, spacing and opacity in the <strong>Style</strong> panel. Every change becomes a note with the exact CSS.</span></div></div>
+      <div class="step"><div class="n">✥</div><div><b>Rearrange <code>⌘4</code></b><span>Drag elements to move them into any container, pull the handles to resize, or re-lay-out a container as a row, column or grid.</span></div></div>
+      <div class="step"><div class="n">☰</div><div><b>Sections &amp; Layers</b><span>The left panel is the page: a named tree of its sections, and the stacking order of whatever you have selected. Click to jump, drag to reorder, the eye hides.</span></div></div>
+      <div class="step"><div class="n">↻</div><div><b>Record &amp; replay</b><span>Capture a real journey and play it back — smoothly, as it happened. Export it as a video, a PDF, or a written step-by-step for a bug report.</span></div></div>
+      <div class="step"><div class="n">→</div><div><b>Hand it over</b><span>Export the session as <strong>Markdown</strong>, a ready-to-run <strong>agent prompt</strong>, or <strong>JSON</strong> — or lift a single component off the page as a standalone file. Press <code>?</code> any time for the shortcuts.</span></div></div>
     </div>
 
     <div class="tags">

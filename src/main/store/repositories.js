@@ -79,6 +79,12 @@ function sanitizeSettingsPatch(patch, current) {
   if (Array.isArray(patch.openTabs)) {
     clean.openTabs = patch.openTabs.filter((url) => typeof url === 'string' && url.length <= 4096).slice(0, 30);
   }
+  if (typeof patch.sideTab === 'string') {
+    clean.sideTab = patch.sideTab === 'layers' ? 'layers' : 'sections';
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'libraryOpen')) {
+    clean.libraryOpen = !!patch.libraryOpen;
+  }
   if (Object.prototype.hasOwnProperty.call(patch, 'activeTabIndex')) {
     clean.activeTabIndex = Math.max(0, Number.parseInt(patch.activeTabIndex, 10) || 0);
   }

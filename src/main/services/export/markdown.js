@@ -149,6 +149,17 @@ function toMarkdown(session, annotations, consoleLog) {
           );
           out.push('');
         }
+        if (a.edit.type === 'text' && d.after != null) {
+          out.push('- **Copy:** replace `' + String(d.before || '').trim() + '` with `' + String(d.after).trim() + '`');
+          out.push('');
+        }
+        if (a.edit.type === 'reparent' && d.parentSelector != null) {
+          out.push(
+            `- **Move:** take it out of \`${d.fromParentSelector}\` (index ${d.fromIndex}) and ` +
+              `re-parent it into \`${d.parentSelector}\` at index ${d.toIndex} (0-based DOM order)`
+          );
+          out.push('');
+        }
       }
 
       // The note itself.

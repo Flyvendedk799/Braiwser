@@ -10,13 +10,14 @@
 
 const { ipcRenderer } = require('electron');
 const anchor = require('./anchor');
+const elementExport = require('./element-export');
 const recorder = require('./recorder');
 const replay = require('./replay');
 
 (function () {
   'use strict';
 
-  let mode = 'off'; // 'off' | 'inspect' | 'draw' | 'assert' | 'arrange'
+  let mode = 'off'; // 'off' | 'inspect' | 'draw' | 'edit' | 'assert' | 'arrange'
   let hovered = null; // element under cursor (inspect mode)
   let root, highlight, tooltip, canvas, ctx, popup, drawBar, pinLayer;
   let drawing = false;
@@ -30,6 +31,19 @@ const replay = require('./replay');
   let arrangeSel = null; // the selected live element
   let arrangeUI = null; // { box, barEl, label, undoBtn, handles: {...} }
   let arrangeDrag = null; // active drag descriptor (move or resize)
+  let dropZoneEl = null; // outline of the container a drag would land in
+  let panelHover = false; // the highlight box is being driven from a side panel
+  let composeBubble = null; // the "+" bubble an Inspect click drops on an element
+  let composeTarget = null; // …and the element it belongs to
+
+  // ---- edit-mode state ---------------------------------------------------------
+  let editSel = null; // the element being styled / typed into
+  let editBox = null; // its outline
+  let editingText = null; // { el, before } while contenteditable is on
+  let styleSession = null; // { el, annId, restore, props } — one note per element
+  let redoStack = []; // undone edits, waiting to be re-applied
+  let insertLineEl = null; // the "it lands here" bar at the placeholder's edge
+  let savedUserSelect = null; // page's own user-select, restored when tools go off
   const editStack = []; // applied edits: { type, annId, undo }
 
   const ACTIONS = [
@@ -157,12 +171,31 @@ const replay = require('./replay');
     }
   }
 
+  // Trying to change something IS the request to edit it: a double-click in
+  // Inspect hands the element to Edit mode with the caret already in its text.
+  function onDoubleClick(e) {
+    if (mode !== 'inspect' && mode !== 'edit') return;
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    if (!el || isOwnUI(el)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (mode === 'inspect') {
+      closePopup();
+      setMode('edit');
+      ipcRenderer.sendToHost('caos:mode-changed', { mode: 'edit' });
+    }
+    editSelect(el);
+    startTextEdit(el, { x: e.clientX, y: e.clientY });
+  }
+
   // ---- inspect mode ---------------------------------------------------------
   function onMove(e) {
-    if (mode !== 'inspect' && mode !== 'assert' && mode !== 'arrange') return;
+    clearPanelHover(); // the pointer is back on the page — drop the panel's outline
+    if (mode !== 'inspect' && mode !== 'assert' && mode !== 'arrange' && mode !== 'edit') return;
     if (mode === 'arrange' && arrangeDrag) return; // no hover flicker mid-drag
-    const el = document.elementFromPoint(e.clientX, e.clientY);
-    if (mode === 'arrange' && el === arrangeSel) {
+    if (editingText) return; // typing — do not paint over the text you are editing
+    let el = document.elementFromPoint(e.clientX, e.clientY);
+    if (mode === 'arrange' && arrangeSel && (el === arrangeSel || arrangeSel.contains(el))) {
       // the selection box already outlines it — skip the hover overlay
       highlight.style.display = tooltip.style.display = 'none';
       return;
@@ -172,6 +205,9 @@ const replay = require('./replay');
       hovered = null;
       return;
     }
+    // In arrange mode, preview what a press would actually grab — not the
+    // inner text node the cursor happens to be over.
+    if (mode === 'arrange') el = grabTarget(el);
     hovered = el;
     const r = el.getBoundingClientRect();
     highlight.style.display = 'block';
@@ -187,14 +223,26 @@ const replay = require('./replay');
   }
 
   function onClick(e) {
-    if (mode !== 'inspect' && mode !== 'assert' && mode !== 'arrange') return;
+    if (mode !== 'inspect' && mode !== 'assert' && mode !== 'arrange' && mode !== 'edit') return;
+    // A click with no point on the page — a keyboard-activated button, or one
+    // fired from script — must not pick whatever happens to sit at (0, 0).
+    if (!e.detail && !e.clientX && !e.clientY) return;
+    if (isOwnUI(e.target)) return; // our own chrome handles its own clicks
     const el = document.elementFromPoint(e.clientX, e.clientY);
     if (isOwnUI(el)) return; // let popup / arrange-bar interactions through
     e.preventDefault();
     e.stopPropagation();
     if (!el) return;
     if (mode === 'arrange') {
-      arrangeSelect(el);
+      // Normally the pointerdown handler has already selected this (and swallowed
+      // the click); this is the fallback for anything that reaches us as a click.
+      arrangeSelect(grabTarget(el));
+      return;
+    }
+    if (mode === 'edit') {
+      // A second click on the selected text starts typing in it.
+      if (el === editSel && isTextEditable(el)) startTextEdit(el, { x: e.clientX, y: e.clientY });
+      else editSelect(el);
       return;
     }
     if (mode === 'assert') {
@@ -207,10 +255,11 @@ const replay = require('./replay');
       }
       return;
     }
-    // Inspect mode does both: update the Inspector tab's layout/hierarchy
-    // view for this element, and open the note popup to capture a comment.
+    // Inspect mode: update the panels for this element and drop a comment
+    // bubble on its corner. The editor opens when you click the bubble — being
+    // thrown a text box every time you point at something is exhausting.
     pickLayout(el);
-    openElementNote(el);
+    showComposeBubble(el);
   }
 
   // ---- draw mode ------------------------------------------------------------
@@ -303,14 +352,41 @@ const replay = require('./replay');
       tag: el.nodeName.toLowerCase(),
       id: el.id || null,
       classes: Array.prototype.slice.call(el.classList || []),
+      ...namingHints(el),
     };
   }
 
+  // Everything the panels need to call an element what a person would call it.
+  function namingHints(el) {
+    const out = { heading: '', label: '', text: '', hidden: false, childCount: 0 };
+    try {
+      out.label = (el.getAttribute('aria-label') || '').trim().slice(0, 60);
+      const hd = el.querySelector('h1,h2,h3,h4,h5,h6');
+      if (hd) out.heading = (hd.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 60);
+      out.text = Array.prototype.filter
+        .call(el.childNodes, (n) => n.nodeType === 3)
+        .map((n) => n.textContent)
+        .join(' ')
+        .trim()
+        .replace(/\s+/g, ' ')
+        .slice(0, 60);
+      const cs = getComputedStyle(el);
+      out.hidden = cs.display === 'none' || cs.visibility === 'hidden' || el.style.display === 'none';
+      out.childCount = elChildren(el).length;
+    } catch (_e) {
+      /* ignore */
+    }
+    return out;
+  }
+
+  // Deep enough to always reach the top of the document: the Sections panel
+  // matches its selection against this chain, and a chain that stops 12 levels
+  // down never overlaps the tree on a deeply nested page.
   function ancestorChain(el) {
     const chain = [];
     let node = el;
     let depth = 0;
-    while (node && node.nodeType === 1 && depth < 12) {
+    while (node && node.nodeType === 1 && depth < 40) {
       if (!isOwnUI(node)) chain.unshift(nodeBrief(node));
       if (node === document.body) break;
       node = node.parentElement;
@@ -361,6 +437,7 @@ const replay = require('./replay');
         zIndex: kcs.zIndex,
         overlapping,
         isTarget: k === targetEl,
+        ...namingHints(k),
       };
     });
   }
@@ -382,6 +459,7 @@ const replay = require('./replay');
         kind: k.kind,
         detail: k.detail,
         childCount: siblings.length,
+        ...namingHints(parent),
       };
     }
     return {
@@ -396,6 +474,7 @@ const replay = require('./replay');
   function pickLayout(el) {
     try {
       lastPickedEl = el;
+      pushStyle(el); // the Style panel follows every pick, not just Edit-mode ones
       anchor.highlight(el, { duration: 700, color: '#3ddc97' });
       const info = describeLayout(el);
       if (info) ipcRenderer.sendToHost('caos:layout-picked', info);
@@ -434,7 +513,7 @@ const replay = require('./replay');
     box.setAttribute('data-caos-arrange', 'box');
     box.style.cssText =
       'position:fixed;display:none;border:2px dashed ' + ARRANGE_COLOR + ';border-radius:3px;' +
-      'background:rgba(61,220,151,.07);pointer-events:auto;cursor:move;z-index:2147483644;touch-action:none;';
+      'background:rgba(61,220,151,.07);pointer-events:auto;cursor:grab;z-index:2147483644;touch-action:none;';
 
     const mkHandle = (kind, cursor) => {
       const hd = document.createElement('div');
@@ -453,9 +532,9 @@ const replay = require('./replay');
     bar.setAttribute('data-caos', '');
     bar.setAttribute('data-caos-arrange', 'bar');
     bar.style.cssText =
-      'position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:2147483647;display:none;' +
+      'position:fixed;bottom:14px;left:50%;transform:translateX(-50%);z-index:2147483647;display:none;' +
       'align-items:center;gap:6px;background:#11131a;border:1px solid #2a2e3a;border-radius:10px;padding:7px 10px;' +
-      'box-shadow:0 8px 30px rgba(0,0,0,.45);color:#9aa2b1;font:12px sans-serif;pointer-events:auto;flex-wrap:wrap;max-width:92vw;';
+      'box-shadow:0 8px 30px rgba(0,0,0,.45);color:#9aa2b1;font:12px sans-serif;pointer-events:none;flex-wrap:wrap;max-width:92vw;';
 
     const label = document.createElement('span');
     label.style.cssText =
@@ -469,7 +548,7 @@ const replay = require('./replay');
       b.setAttribute('data-caos-arrange', 'btn-' + slug);
       b.style.cssText =
         'cursor:pointer;border:1px solid #2a2e3a;border-radius:7px;padding:4px 9px;background:#171a22;' +
-        'color:#cdd6f4;font:600 11px sans-serif;white-space:nowrap;';
+        'color:#cdd6f4;font:600 11px sans-serif;white-space:nowrap;pointer-events:auto;';
       b.addEventListener('click', (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
@@ -484,6 +563,7 @@ const replay = require('./replay');
       bar.appendChild(s);
     };
 
+    mkBtn('parent', '⤴', 'Select the parent container', () => selectParent());
     mkBtn('up', '↑', 'Move earlier among its siblings', () => nudgeOrder(-1));
     mkBtn('down', '↓', 'Move later among its siblings', () => nudgeOrder(1));
     mkSep();
@@ -498,11 +578,11 @@ const replay = require('./replay');
     mkBtn('reset', 'Reset', 'Undo ALL layout edits made in this session', () => resetEdits());
 
     const hint = document.createElement('span');
-    hint.textContent = 'drag = reorder · Alt-drag = free move · handles = resize · Esc = done';
+    hint.textContent = 'drag anything to move it · click again to go deeper · ⤴ = parent · Alt-drag = free · Esc = cancel';
     hint.style.cssText = 'color:#6b7280;font:11px sans-serif;';
     bar.appendChild(hint);
 
-    box.addEventListener('pointerdown', startMove);
+    box.addEventListener('pointerdown', (e) => startMove(e, true));
     root.appendChild(box);
     root.appendChild(bar);
 
@@ -528,6 +608,28 @@ const replay = require('./replay');
     arrangeUI.undoBtn.style.opacity = editStack.length ? '1' : '.45';
   }
 
+  // What a press on this element should actually grab: the nearest ancestor
+  // that has siblings to reorder among. Pressing the lone <span> inside a card
+  // means "move the card" far more often than it means "move the span" — and a
+  // lone child has nowhere to go anyway. Click again to step back down.
+  function grabTarget(el) {
+    let n = el;
+    let best = el;
+    for (let i = 0; i < 8; i++) {
+      const p = n.parentElement;
+      if (!p || isOwnUI(n) || n === document.body || n === document.documentElement) break;
+      best = n;
+      if (elChildren(p).length >= 2) return n;
+      n = p;
+    }
+    return best;
+  }
+
+  function selectParent() {
+    const p = arrangeSel && arrangeSel.parentElement;
+    if (p && !isOwnUI(p) && p !== document.body && p !== document.documentElement) arrangeSelect(p);
+  }
+
   function arrangeLabel(el) {
     let s = el.nodeName.toLowerCase();
     if (el.id) s += '#' + el.id;
@@ -550,8 +652,8 @@ const replay = require('./replay');
   }
 
   function arrangeDeselect() {
+    cancelDrag(); // a drag in flight owns window listeners and a ghost
     arrangeSel = null;
-    arrangeDrag = null;
     if (!arrangeUI) return;
     arrangeUI.box.style.display = 'none';
     for (const k in arrangeUI.handles) arrangeUI.handles[k].style.display = 'none';
@@ -588,30 +690,104 @@ const replay = require('./replay');
   // annotation to the host, and refreshes the overlay.
   function commitEdit(el, entry) {
     const annId = uid();
-    editStack.push({ type: entry.type, annId, undo: entry.undo });
-    send({
+    const ann = {
       id: annId,
       kind: 'edit',
       action: entry.action || 'change',
       note: entry.note,
       target: anchor.describe(el),
       edit: { type: entry.type, css: entry.css || '', details: entry.details || {} },
-    });
+    };
+    // The change is already applied, so "where the element is right now" IS the
+    // redo — one generic snapshot covers moves, styles, text and hiding alike.
+    const stackEntry = { type: entry.type, annId, undo: entry.undo, redo: entry.redo || restorePoint(el), ann, el };
+    editStack.push(stackEntry);
+    redoStack = []; // a fresh edit forks the history
+    send(ann);
     updateArrangeBar();
     syncArrange();
+    pushTree();
+    pushStacks();
+    return stackEntry;
+  }
+
+  // Everything an element needs to be put back exactly as it is at this moment:
+  // where it sits, what inline style it carries, and (for a text leaf) its copy.
+  function restorePoint(el) {
+    const parent = el.parentElement;
+    const next = el.nextElementSibling;
+    const style = el.getAttribute('style');
+    const text = el.children.length === 0 ? el.textContent : null;
+    return () => {
+      try {
+        if (parent && document.documentElement.contains(parent) && (el.parentElement !== parent || el.nextElementSibling !== next)) {
+          parent.insertBefore(el, next && next.parentElement === parent ? next : null);
+        }
+        if (style == null) el.removeAttribute('style');
+        else el.setAttribute('style', style);
+        if (text != null && el.children.length === 0 && el.textContent !== text) el.textContent = text;
+      } catch (_e) {
+        /* the element may be gone */
+      }
+    };
+  }
+
+  function pushStacks() {
+    ipcRenderer.sendToHost('caos:edit-stacks', { undo: editStack.length, redo: redoStack.length });
   }
 
   function undoLastEdit() {
     const entry = editStack.pop();
     if (!entry) return;
+    if (styleSession && styleSession.annId === entry.annId) endStyleSession();
     try {
       entry.undo();
     } catch (_e) {
       /* element may be gone — nothing to revert */
     }
+    redoStack.push(entry);
+    ipcRenderer.sendToHost('caos:edit-undo', { id: entry.annId });
+    afterHistoryChange();
+  }
+
+  function redoLastEdit() {
+    const entry = redoStack.pop();
+    if (!entry) return;
+    try {
+      entry.redo();
+    } catch (_e) {
+      /* element may be gone */
+    }
+    editStack.push(entry);
+    send(entry.ann); // same id: the note comes back exactly as it was
+    afterHistoryChange();
+  }
+
+  function afterHistoryChange() {
+    updateArrangeBar();
+    syncArrange();
+    syncEditBox();
+    pushTree();
+    pushStacks();
+    if (editSel) pushStyle(editSel);
+  }
+
+  // Undo one specific edit (not just the newest) and retract its note.
+  function retractEdit(entry) {
+    const i = editStack.indexOf(entry);
+    if (i < 0) return false;
+    editStack.splice(i, 1);
+    pushStacks();
+    try {
+      entry.undo();
+    } catch (_e) {
+      /* element may be gone */
+    }
     ipcRenderer.sendToHost('caos:edit-undo', { id: entry.annId });
     updateArrangeBar();
     syncArrange();
+    pushTree();
+    return true;
   }
 
   function resetEdits() {
@@ -632,7 +808,39 @@ const replay = require('./replay');
   }
 
   // ---- move / reorder drag ------------------------------------------------------
-  function startMove(e) {
+  // A reorder drag is WYSIWYG: a scaled ghost of the element rides the cursor,
+  // the element itself stays in the flow — dimmed — and hops to the live
+  // insertion point as the pointer passes it, and the container it would land
+  // in is outlined. Dragging clear of the current parent drops it INTO another
+  // container. Escape (or a cancelled pointer) puts everything back.
+  const GHOST_MAX_NODES = 200; // deep style-copy budget; bigger subtrees get a flat ghost
+  const GHOST_MAX_W = 360;
+  const GHOST_MAX_H = 260;
+  const EDGE_SCROLL = 64; // px from a viewport edge where auto-scroll starts
+  const EDGE_SPEED = 26; // px per frame at the very edge
+  const REORDER_STEP = 4; // px of pointer/scroll travel before re-testing the slot
+  const REPARENT_MARGIN = 24; // px the pointer must clear the parent by to leave it
+
+  // Tags that are never a sensible drop container.
+  const NOT_A_CONTAINER =
+    /^(input|textarea|select|option|optgroup|img|picture|svg|canvas|video|audio|iframe|embed|object|br|hr|script|style|link|meta|title)$/;
+
+  // Arrange mode's primary gesture: press ANY element and drag. No pre-select
+  // step, and no chance for the press to start a text selection instead.
+  function onArrangePointerDown(e) {
+    if (mode !== 'arrange' || arrangeDrag) return;
+    if (e.button != null && e.button !== 0) return;
+    const raw = document.elementFromPoint(e.clientX, e.clientY);
+    // Own UI presses belong to the thing pressed — the selection box starts its
+    // own drag (and drills down on a click), the bar's buttons want their click.
+    if (!raw || isOwnUI(raw)) return;
+    const el = grabTarget(raw);
+    if (!el || el === document.body || el === document.documentElement) return;
+    if (el !== arrangeSel) arrangeSelect(el);
+    if (arrangeSel === el) startMove(e, false);
+  }
+
+  function startMove(e, fromBox) {
     if (!arrangeSel || (e.button != null && e.button !== 0)) return;
     e.preventDefault();
     e.stopPropagation();
@@ -641,28 +849,51 @@ const replay = require('./replay');
     const cs = getComputedStyle(el);
     const free = e.altKey || cs.position === 'absolute' || cs.position === 'fixed' || !parent || isOwnUI(parent);
     const surface = arrangeUI.box;
-    try { surface.setPointerCapture(e.pointerId); } catch (_e) { /* ignore */ }
-    arrangeDrag = {
+    const r = el.getBoundingClientRect();
+    clearTextSelection(); // any leftover blue highlight would smear under the drag
+    const d = {
       kind: free ? 'free' : 'reorder',
+      fromBox: !!fromBox,
       el,
       parent,
       startX: e.clientX,
       startY: e.clientY,
+      x: e.clientX,
+      y: e.clientY,
+      // Keep the grabbed point under the cursor, ghost scaling included.
+      grabDX: e.clientX - r.left,
+      grabDY: e.clientY - r.top,
       moved: false,
       startIndex: parent ? indexIn(parent, el) : -1,
+      // The selector as the SOURCE still spells it: after the move a structural
+      // path would describe the new position, not the code the agent must edit.
+      selBefore: anchor.cssPath(el),
       restoreStyle: styleSnapshot(el),
       baseTransform: el.style.transform || '',
+      startOpacity: el.style.opacity || '',
       surface,
+      ghost: null,
+      raf: 0,
+      frame: 0,
+      lastApply: null,
     };
-    // Listen on window (capture is only belt-and-braces): the selection box
-    // lags behind the cursor while the element reflows, so element-scoped
+    // Grabbing feedback for the whole gesture — the captured pointer keeps the
+    // surface's cursor, so set it there as well as on the page.
+    surface.style.cursor = 'grabbing';
+    document.documentElement.style.cursor = 'grabbing';
+    arrangeDrag = d;
+    // Listen on window (pointer capture is only belt-and-braces): the selection
+    // box lags behind the cursor while the element reflows, so element-scoped
     // listeners would drop moves the moment the pointer escapes it.
     const onMoveEv = (ev) => dragMove(ev);
     const onUpEv = (ev) => {
+      if (ev.type === 'pointercancel') cancelDrag();
+      else dragEnd(ev);
+    };
+    d.cleanup = () => {
       window.removeEventListener('pointermove', onMoveEv, true);
       window.removeEventListener('pointerup', onUpEv, true);
       window.removeEventListener('pointercancel', onUpEv, true);
-      dragEnd(ev);
     };
     window.addEventListener('pointermove', onMoveEv, true);
     window.addEventListener('pointerup', onUpEv, true);
@@ -672,25 +903,62 @@ const replay = require('./replay');
   function dragMove(e) {
     const d = arrangeDrag;
     if (!d) return;
-    const dx = e.clientX - d.startX;
-    const dy = e.clientY - d.startY;
-    if (!d.moved && Math.abs(dx) < DRAG_CLICK_MAX && Math.abs(dy) < DRAG_CLICK_MAX) return;
-    d.moved = true;
-    d.el.style.opacity = '0.65';
+    d.x = e.clientX;
+    d.y = e.clientY;
+    if (!d.moved) {
+      if (Math.abs(d.x - d.startX) < DRAG_CLICK_MAX && Math.abs(d.y - d.startY) < DRAG_CLICK_MAX) return;
+      d.moved = true;
+      d.el.style.opacity = '0.4';
+      if (d.kind === 'reorder') {
+        d.ghost = makeGhost(d.el);
+        startEdgeScroll(d);
+      }
+    }
+    // The ghost is a single transform write, so it tracks the pointer with no
+    // throttling. Everything that reads layout (and may reflow the page) is
+    // coalesced to one frame — a pointermove stream can outrun the renderer.
+    moveGhost(d);
+    queueDragFrame(d);
+  }
+
+  function queueDragFrame(d) {
+    if (d.frame) return;
+    d.frame = requestAnimationFrame(() => {
+      d.frame = 0;
+      if (arrangeDrag === d) applyDrag(d);
+    });
+  }
+
+  // One frame of the drag: ghost to the cursor, element to its live slot.
+  function applyDrag(d) {
     if (d.kind === 'free') {
-      d.dx = dx;
-      d.dy = dy;
-      d.el.style.transform = (d.baseTransform ? d.baseTransform + ' ' : '') + 'translate(' + dx + 'px,' + dy + 'px)';
-    } else {
-      // Live reorder: actually move the node when the pointer crosses a
-      // sibling midpoint — the page shows the real result the whole time.
-      const ref = insertionRef(d.parent, d.el, e.clientX, e.clientY);
-      if (ref !== d.el && ref !== d.el.nextElementSibling) {
-        try {
-          d.parent.insertBefore(d.el, ref);
-        } catch (_e) {
-          /* ignore */
+      d.dx = d.x - d.startX;
+      d.dy = d.y - d.startY;
+      d.el.style.transform = (d.baseTransform ? d.baseTransform + ' ' : '') + 'translate(' + d.dx + 'px,' + d.dy + 'px)';
+      syncArrange();
+      return;
+    }
+    moveGhost(d);
+    // Only re-test the slot once the pointer (or the page) has actually moved a
+    // little — stops a pixel of jitter from ping-ponging the node.
+    const last = d.lastApply;
+    const travel = last
+      ? Math.abs(d.x - last.x) + Math.abs(d.y - last.y) + Math.abs(window.scrollX - last.sx) + Math.abs(window.scrollY - last.sy)
+      : Infinity;
+    if (travel >= REORDER_STEP) {
+      d.lastApply = { x: d.x, y: d.y, sx: window.scrollX, sy: window.scrollY };
+      const drop = dropSlot(d);
+      if (drop) {
+        showDropZone(drop.parent);
+        const sameParent = drop.parent === d.el.parentElement;
+        if (!sameParent || (drop.ref !== d.el && drop.ref !== d.el.nextElementSibling)) {
+          try {
+            drop.parent.insertBefore(d.el, drop.ref === d.el ? d.el.nextElementSibling : drop.ref);
+          } catch (_e) {
+            /* ignore — e.g. a ref that just left the DOM */
+          }
         }
+        showInsertLine(d.el, drop.horiz);
       }
     }
     syncArrange();
@@ -700,16 +968,34 @@ const replay = require('./replay');
     const d = arrangeDrag;
     arrangeDrag = null;
     if (!d) return;
-    try { d.surface.releasePointerCapture(e.pointerId); } catch (_e) { /* ignore */ }
-    d.el.style.opacity = '';
+    if (d.moved && e) {
+      // The pointer may have travelled past the last frame we rendered.
+      d.x = e.clientX;
+      d.y = e.clientY;
+      d.lastApply = null;
+      applyDrag(d);
+    }
+    endDrag(d, e);
     if (!d.moved) {
-      // Effectively a click on the selection — drill through to whatever is
-      // under the pointer (lets you select a child inside the selected box).
+      // A press on the page already selected what it grabbed; only a click on
+      // the selection ITSELF means "go deeper" — and then by exactly one level,
+      // so repeated clicks walk down the tree predictably.
+      if (!d.fromBox) {
+        syncArrange();
+        return;
+      }
       arrangeUI.box.style.display = 'none';
       const under = document.elementFromPoint(e.clientX, e.clientY);
       arrangeUI.box.style.display = 'block';
-      if (under && !isOwnUI(under)) arrangeSelect(under);
-      else syncArrange();
+      if (!under || isOwnUI(under)) {
+        syncArrange();
+        return;
+      }
+      let next = under;
+      if (arrangeSel && arrangeSel !== under && arrangeSel.contains(under)) {
+        while (next.parentElement && next.parentElement !== arrangeSel) next = next.parentElement;
+      }
+      arrangeSelect(next);
       return;
     }
     if (d.kind === 'free') {
@@ -723,66 +1009,327 @@ const replay = require('./replay');
       const css = 'transform: ' + d.el.style.transform + ';';
       commitEdit(d.el, {
         type: 'move',
-        note: 'Reposition `' + anchor.cssPath(d.el) + '` by ' + dx + 'px horizontally, ' + dy + 'px vertically (freehand drag).',
+        note: 'Reposition `' + d.selBefore + '` by ' + dx + 'px horizontally, ' + dy + 'px vertically (freehand drag).',
         css,
         details: { dx, dy },
         undo: d.restoreStyle,
       });
+      return;
+    }
+    commitReorder(d);
+  }
+
+  // Turn a finished reorder drag into an edit annotation — either a reorder
+  // among siblings or a move into a different container.
+  function commitReorder(d) {
+    const el = d.el;
+    const origParent = d.parent;
+    const parentNow = el.parentElement;
+    const startIndex = d.startIndex;
+    const endIndex = parentNow ? indexIn(parentNow, el) : -1;
+    const reparented = !!parentNow && parentNow !== origParent;
+    if (!parentNow || startIndex < 0 || endIndex < 0 || (!reparented && endIndex === startIndex)) {
+      syncArrange(); // dropped back where it started — nothing to record
+      return;
+    }
+    const toSel = anchor.cssPath(parentNow);
+    const n = elChildren(parentNow).length;
+    const undo = () => {
+      const kids = elChildren(origParent, el);
+      origParent.insertBefore(el, kids[startIndex] || null);
+    };
+    if (reparented) {
+      const fromSel = anchor.cssPath(origParent);
+      commitEdit(el, {
+        type: 'reparent',
+        note:
+          'Move `' + d.selBefore + '` out of `' + fromSel + '` and into `' + toSel + '` at position ' +
+          (endIndex + 1) + ' of ' + n + '.',
+        details: { fromParentSelector: fromSel, parentSelector: toSel, fromIndex: startIndex, toIndex: endIndex },
+        undo,
+      });
     } else {
-      const endIndex = indexIn(d.parent, d.el);
-      if (endIndex === d.startIndex || d.startIndex < 0 || endIndex < 0) {
-        syncArrange();
-        return;
-      }
-      const parentSel = anchor.cssPath(d.parent);
-      const n = elChildren(d.parent).length;
-      const el = d.el;
-      const parent = d.parent;
-      const startIndex = d.startIndex;
       commitEdit(el, {
         type: 'reorder',
         note:
-          'Move `' + anchor.cssPath(el) + '` from position ' + (d.startIndex + 1) + ' to position ' + (endIndex + 1) +
-          ' (of ' + n + ') inside `' + parentSel + '`.',
-        details: { parentSelector: parentSel, fromIndex: d.startIndex, toIndex: endIndex },
-        undo: () => {
-          const kids = elChildren(parent, el);
-          parent.insertBefore(el, kids[startIndex] || null);
-        },
+          'Move `' + d.selBefore + '` from position ' + (startIndex + 1) + ' to position ' + (endIndex + 1) +
+          ' (of ' + n + ') inside `' + toSel + '`.',
+        details: { parentSelector: toSel, fromIndex: startIndex, toIndex: endIndex },
+        undo,
       });
     }
+    pickLayout(el); // the hierarchy panel is showing the old order otherwise
+  }
+
+  // Escape / a stolen pointer: put the page back exactly as it was.
+  function cancelDrag() {
+    const d = arrangeDrag;
+    if (!d) return;
+    arrangeDrag = null;
+    endDrag(d, null);
+    try {
+      if (d.moved && d.kind === 'reorder' && d.parent && d.startIndex >= 0) {
+        const kids = elChildren(d.parent, d.el);
+        d.parent.insertBefore(d.el, kids[d.startIndex] || null);
+      }
+      d.restoreStyle();
+    } catch (_e) {
+      /* element may be gone */
+    }
+    syncArrange();
+  }
+
+  // Tear down everything a live drag put on screen.
+  function endDrag(d, e) {
+    if (d.cleanup) d.cleanup();
+    if (d.raf) cancelAnimationFrame(d.raf);
+    if (d.frame) cancelAnimationFrame(d.frame);
+    d.raf = d.frame = 0;
+    d.surface.style.cursor = 'grab';
+    document.documentElement.style.cursor = '';
+    if (d.ghost) {
+      try { d.ghost.node.remove(); } catch (_e) { /* ignore */ }
+      d.ghost = null;
+    }
+    hideDropZone();
+    d.el.style.opacity = d.startOpacity;
+  }
+
+  // ---- drag visuals -----------------------------------------------------------
+  function copyComputedStyle(src, dst) {
+    const cs = getComputedStyle(src);
+    let css = '';
+    for (let i = 0; i < cs.length; i++) {
+      const p = cs[i];
+      css += p + ':' + cs.getPropertyValue(p) + ';';
+    }
+    dst.style.cssText = css;
+  }
+
+  // A floating copy of the element that rides the cursor. Computed styles are
+  // baked in because the clone lives outside its stylesheet context (child,
+  // descendant and :nth-child rules stop matching once it leaves its parent),
+  // and ids are stripped so the live page keeps unique ones while it exists.
+  function makeGhost(el) {
+    const r = el.getBoundingClientRect();
+    let node;
+    try {
+      node = el.cloneNode(true);
+      const src = [el].concat(Array.prototype.slice.call(el.querySelectorAll('*')));
+      const dst = [node].concat(Array.prototype.slice.call(node.querySelectorAll('*')));
+      const deep = src.length <= GHOST_MAX_NODES && src.length === dst.length;
+      for (let i = 0; i < (deep ? src.length : 1); i++) copyComputedStyle(src[i], dst[i]);
+      dst.forEach((n) => {
+        try {
+          n.removeAttribute('id');
+          n.removeAttribute('name');
+        } catch (_e) {
+          /* ignore */
+        }
+      });
+    } catch (_e) {
+      node = document.createElement('div');
+      node.textContent = arrangeLabel(el);
+      node.style.cssText = 'background:#11131a;color:#cdd6f4;font:600 12px sans-serif;padding:6px 10px;border-radius:6px;';
+    }
+    const scale = Math.max(
+      0.25,
+      Math.min(1, GHOST_MAX_W / Math.max(1, r.width), GHOST_MAX_H / Math.max(1, r.height))
+    );
+    node.setAttribute('data-caos', '');
+    node.setAttribute('data-caos-arrange', 'ghost');
+    const set = (k, v) => node.style.setProperty(k, v, 'important');
+    // An inline element ignores width/height — give the ghost a box.
+    const disp = getComputedStyle(el).display;
+    if (disp === 'inline' || disp === 'contents') set('display', 'inline-block');
+    set('position', 'fixed');
+    set('left', '0');
+    set('top', '0');
+    set('right', 'auto');
+    set('bottom', 'auto');
+    set('float', 'none');
+    set('margin', '0');
+    set('width', Math.max(1, r.width) + 'px');
+    set('height', Math.max(1, r.height) + 'px');
+    set('max-width', 'none');
+    set('max-height', 'none');
+    set('box-sizing', 'border-box');
+    set('pointer-events', 'none');
+    set('opacity', '.85');
+    set('z-index', '2147483643');
+    set('transform-origin', 'top left');
+    set('transition', 'none');
+    set('animation', 'none');
+    set('box-shadow', '0 12px 34px rgba(0,0,0,.45)');
+    set('outline', '2px solid ' + ARRANGE_COLOR);
+    document.documentElement.appendChild(node);
+    return { node, scale };
+  }
+
+  function moveGhost(d) {
+    if (!d.ghost) return;
+    const s = d.ghost.scale;
+    const x = Math.round(d.x - d.grabDX * s);
+    const y = Math.round(d.y - d.grabDY * s);
+    d.ghost.node.style.setProperty(
+      'transform',
+      'translate3d(' + x + 'px,' + y + 'px,0) scale(' + s + ')',
+      'important'
+    );
+  }
+
+  function ensureDropZone() {
+    if (dropZoneEl && root && root.contains(dropZoneEl)) return dropZoneEl;
+    dropZoneEl = document.createElement('div');
+    dropZoneEl.setAttribute('data-caos', '');
+    dropZoneEl.setAttribute('data-caos-arrange', 'dropzone');
+    dropZoneEl.style.cssText =
+      'position:fixed;display:none;pointer-events:none;border:2px solid rgba(61,220,151,.5);border-radius:4px;' +
+      'background:rgba(61,220,151,.05);z-index:2147483642;';
+    root.appendChild(dropZoneEl);
+    return dropZoneEl;
+  }
+
+  function showDropZone(parent) {
+    if (!parent || !parent.getBoundingClientRect) return;
+    const z = ensureDropZone();
+    const r = parent.getBoundingClientRect();
+    z.style.display = 'block';
+    z.style.left = r.left + 'px';
+    z.style.top = r.top + 'px';
+    z.style.width = Math.max(0, r.width) + 'px';
+    z.style.height = Math.max(0, r.height) + 'px';
+  }
+
+  function hideDropZone() {
+    if (dropZoneEl) dropZoneEl.style.display = 'none';
+    if (insertLineEl) insertLineEl.style.display = 'none';
+  }
+
+  // A solid bar on the leading edge of the placeholder: the one cue that reads
+  // as "it lands HERE" at a glance, whichever way the container flows.
+  function ensureInsertLine() {
+    if (insertLineEl && root && root.contains(insertLineEl)) return insertLineEl;
+    insertLineEl = document.createElement('div');
+    insertLineEl.setAttribute('data-caos', '');
+    insertLineEl.setAttribute('data-caos-arrange', 'insert-line');
+    insertLineEl.style.cssText =
+      'position:fixed;display:none;pointer-events:none;border-radius:3px;background:' + ARRANGE_COLOR + ';' +
+      'box-shadow:0 0 10px rgba(61,220,151,.8);z-index:2147483644;';
+    root.appendChild(insertLineEl);
+    return insertLineEl;
+  }
+
+  function showInsertLine(el, horiz) {
+    const r = el.getBoundingClientRect();
+    const L = ensureInsertLine();
+    L.style.display = 'block';
+    L.style.left = (horiz ? r.left - 5 : r.left) + 'px';
+    L.style.top = (horiz ? r.top : r.top - 5) + 'px';
+    L.style.width = (horiz ? 4 : Math.max(4, r.width)) + 'px';
+    L.style.height = (horiz ? Math.max(4, r.height) : 4) + 'px';
+  }
+
+  // ---- where the drag would land -----------------------------------------------
+  // The container to drop into, plus the child to insert before. Staying inside
+  // the current parent is the common case; clearing its bounds by a margin is
+  // what asks for a different container.
+  function dropSlot(d) {
+    let parent = d.el.parentElement || d.parent;
+    if (!parent || isOwnUI(parent)) return null;
+    const pr = parent.getBoundingClientRect();
+    const out =
+      d.x < pr.left - REPARENT_MARGIN ||
+      d.x > pr.right + REPARENT_MARGIN ||
+      d.y < pr.top - REPARENT_MARGIN ||
+      d.y > pr.bottom + REPARENT_MARGIN;
+    if (out) {
+      const alt = containerUnder(d.el, d.x, d.y);
+      if (alt) parent = alt;
+    }
+    const slot = insertionRef(parent, d.el, d.x, d.y);
+    return { parent, ref: slot.ref, horiz: slot.horiz };
+  }
+
+  // The deepest element under the pointer that can actually hold children.
+  function containerUnder(dragged, x, y) {
+    let stack;
+    try {
+      stack = document.elementsFromPoint(x, y) || [];
+    } catch (_e) {
+      return null;
+    }
+    for (const n of stack) {
+      if (!n || n.nodeType !== 1) continue;
+      if (isOwnUI(n) || n === document.documentElement) continue;
+      if (n === dragged || dragged.contains(n)) continue;
+      if (NOT_A_CONTAINER.test(n.nodeName.toLowerCase())) continue;
+      if (!elChildren(n, dragged).length) continue;
+      return n;
+    }
+    return null;
   }
 
   // Where would the dragged element land if dropped at (x, y)?
-  // Returns the child to insert BEFORE (null = append at the end).
+  // Returns { ref, horiz }: the child to insert BEFORE (null = append at the
+  // end) and whether that slot's container flows across or down.
+  // The flow direction is read off the CHILDREN's geometry, never the
+  // container's `display`: a row of inline-blocks in plain block flow is still
+  // a row, and a wrapped flex line or a grid needs a per-item answer anyway.
   function insertionRef(parent, el, x, y) {
     const kids = elChildren(parent, el);
-    if (!kids.length) return null;
-    const kind = containerKind(getComputedStyle(parent)).kind;
-    if (kind === 'grid') {
-      let best = null;
-      let bestD = Infinity;
-      for (const k of kids) {
-        const r = k.getBoundingClientRect();
-        const cx = r.left + r.width / 2;
-        const cy = r.top + r.height / 2;
-        const dd = (x - cx) * (x - cx) + (y - cy) * (y - cy);
-        if (dd < bestD) {
-          bestD = dd;
-          best = { k, r, cx, cy };
-        }
+    if (!kids.length) return { ref: null, horiz: false };
+    const rects = kids.map((k) => k.getBoundingClientRect());
+    let best = 0;
+    let bestD = Infinity;
+    for (let i = 0; i < kids.length; i++) {
+      const dist = rectDistance(rects[i], x, y);
+      if (dist < bestD) {
+        bestD = dist;
+        best = i;
       }
-      if (!best) return null;
-      const after = y > best.cy + best.r.height / 2 || (Math.abs(y - best.cy) <= best.r.height / 2 && x > best.cx);
-      return after ? best.k.nextElementSibling : best.k;
     }
-    const horiz = kind === 'row';
-    for (const k of kids) {
-      const r = k.getBoundingClientRect();
-      const c = horiz ? r.left + r.width / 2 : r.top + r.height / 2;
-      if ((horiz ? x : y) < c) return k;
-    }
-    return null;
+    const r = rects[best];
+    const horiz = sharesRow(r, rects[best - 1]) || sharesRow(r, rects[best + 1]);
+    const after = horiz ? x > r.left + r.width / 2 : y > r.top + r.height / 2;
+    return { ref: after ? kids[best].nextElementSibling : kids[best], horiz };
+  }
+
+  // Squared distance from a point to a rect — 0 when the point is inside it.
+  function rectDistance(r, x, y) {
+    const dx = x < r.left ? r.left - x : x > r.right ? x - r.right : 0;
+    const dy = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0;
+    return dx * dx + dy * dy;
+  }
+
+  // Do two boxes sit side by side on the same line?
+  function sharesRow(a, b) {
+    if (!a || !b) return false;
+    const overlap = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+    return overlap > Math.min(a.height, b.height) * 0.5;
+  }
+
+  // ---- edge auto-scroll ---------------------------------------------------------
+  // Without this you could only ever reorder within one screenful.
+  function startEdgeScroll(d) {
+    const tick = () => {
+      if (arrangeDrag !== d) return;
+      d.raf = requestAnimationFrame(tick);
+      const vx = edgeVelocity(d.x, window.innerWidth);
+      const vy = edgeVelocity(d.y, window.innerHeight);
+      if (!vx && !vy) return;
+      const sx = window.scrollX;
+      const sy = window.scrollY;
+      window.scrollBy(vx, vy);
+      if (window.scrollX !== sx || window.scrollY !== sy) applyDrag(d);
+    };
+    d.raf = requestAnimationFrame(tick);
+  }
+
+  function edgeVelocity(pos, size) {
+    if (pos < EDGE_SCROLL) return -Math.round(EDGE_SPEED * (1 - Math.max(0, pos) / EDGE_SCROLL));
+    if (pos > size - EDGE_SCROLL) return Math.round(EDGE_SPEED * (1 - Math.max(0, size - pos) / EDGE_SCROLL));
+    return 0;
   }
 
   // Keyboard-precise reorder from the action bar (↑ / ↓).
@@ -817,7 +1364,6 @@ const replay = require('./replay');
     e.stopPropagation();
     const el = arrangeSel;
     const r = el.getBoundingClientRect();
-    try { handleEl.setPointerCapture(e.pointerId); } catch (_e) { /* ignore */ }
     const restoreStyle = styleSnapshot(el);
     const startX = e.clientX;
     const startY = e.clientY;
@@ -836,7 +1382,6 @@ const replay = require('./replay');
       window.removeEventListener('pointermove', onMoveEv, true);
       window.removeEventListener('pointerup', onUpEv, true);
       window.removeEventListener('pointercancel', onUpEv, true);
-      try { handleEl.releasePointerCapture(ev.pointerId); } catch (_e) { /* ignore */ }
       if (!moved) return;
       const r2 = el.getBoundingClientRect();
       const parts = [];
@@ -904,9 +1449,9 @@ const replay = require('./replay');
     return Math.max(4, Math.round(gaps[Math.floor(gaps.length / 2)]));
   }
 
-  function smartLayout(kindWanted) {
-    const container = smartTarget();
-    if (!container) return;
+  function smartLayout(kindWanted, containerEl) {
+    const container = containerEl || smartTarget();
+    if (!container || isOwnUI(container)) return;
     const kids = elChildren(container);
     if (kids.length < 2 && kindWanted !== 'tidy') return;
     const cs = getComputedStyle(container);
@@ -956,16 +1501,55 @@ const replay = require('./replay');
       details: { layout: kindWanted, gap },
       undo: restore,
     });
-    arrangeSelect(container);
+    if (mode === 'arrange') arrangeSelect(container);
+    else pickLayout(container); // keep the panel's view of this container fresh
+  }
+
+  // Bring a layer to the front / send it to the back of its siblings. z-index
+  // only bites on a positioned element, so a static one gets position:relative
+  // — and the note says so, because that is a real change to the source.
+  function setZOrder(el, dir) {
+    const parent = el.parentElement;
+    if (!parent || isOwnUI(el)) return;
+    let max = 0;
+    let min = 0;
+    for (const k of elChildren(parent, el)) {
+      const z = parseInt(getComputedStyle(k).zIndex, 10);
+      if (isFinite(z)) {
+        max = Math.max(max, z);
+        min = Math.min(min, z);
+      }
+    }
+    const restore = styleSnapshot(el);
+    const cs = getComputedStyle(el);
+    const needsPos = cs.position === 'static';
+    const z = dir === 'front' ? max + 1 : min - 1;
+    if (needsPos) el.style.position = 'relative';
+    el.style.zIndex = String(z);
+    const css = (needsPos ? 'position: relative; ' : '') + 'z-index: ' + z + ';';
+    commitEdit(el, {
+      type: 'zorder',
+      note:
+        (dir === 'front' ? 'Bring ' : 'Send ') + '`' + anchor.cssPath(el) + '` ' +
+        (dir === 'front' ? 'to the front' : 'to the back') + ' of its siblings. Apply: ' + css,
+      css,
+      details: { zIndex: z, direction: dir },
+      undo: restore,
+    });
+    pickLayout(el);
   }
 
   // ---- note popup -----------------------------------------------------------
-  function openElementNote(el) {
+  function openElementNote(el, opts) {
     const meta = anchor.describe(el);
     const r = el.getBoundingClientRect();
-    showPopup({ kind: 'element', target: meta, anchor: r }, (note, action) => {
-      send({ id: uid(), kind: 'element', action, note, target: meta });
-    });
+    showPopup(
+      { kind: 'element', target: meta, anchor: r, existing: (opts && opts.existing) || 0 },
+      (note, action) => {
+        send({ id: uid(), kind: 'element', action, note, target: meta });
+        clearComposeBubble(); // the saved note's own bubble takes over
+      }
+    );
   }
 
   function openRegionNote() {
@@ -1010,6 +1594,14 @@ const replay = require('./replay');
   }
 
   let popupCancel = null; // cancel path of the OPEN popup, for the global Escape
+  // The tag you picked last is almost always the tag you want next — triaging a
+  // page means five "fix" notes in a row, not one of each.
+  let lastAction = 'comment';
+  const MOD_KEY = navigator.platform.toLowerCase().indexOf('mac') !== -1 ? '⌘' : 'Ctrl';
+
+  function escHtml(v) {
+    return String(v == null ? '' : v).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  }
 
   function showPopup(ctxObj, onSave, onCancel) {
     closePopup();
@@ -1021,43 +1613,59 @@ const replay = require('./replay');
     popup.setAttribute('data-caos', '');
     popup.style.cssText =
       'position:fixed;z-index:2147483647;width:320px;background:#11131a;border:1px solid #2a2e3a;border-radius:12px;' +
-      'padding:14px;box-shadow:0 16px 50px rgba(0,0,0,.55);font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;color:#e6e9f0;';
+      'padding:14px;box-shadow:0 16px 50px rgba(0,0,0,.55);font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;color:#e6e9f0;' +
+      // Tool modes lock text selection page-wide; our own note editor is the
+      // one place that still needs it.
+      'user-select:text;';
 
-    const head =
-      ctxObj.kind === 'element'
-        ? '&lt;' +
-          ctxObj.target.tag +
-          '&gt;' +
-          (ctxObj.target.id ? ' #' + ctxObj.target.id : '')
-        : 'Drawn region';
+    const isEl = ctxObj.kind === 'element';
+    const head = isEl
+      ? '&lt;' + escHtml(ctxObj.target.tag) + '&gt;' + (ctxObj.target.id ? ' #' + escHtml(ctxObj.target.id) : '')
+      : 'Drawn region';
+    // The text inside says which button/heading this is far better than the tag.
+    const snippet = isEl && ctxObj.target.text ? escHtml(String(ctxObj.target.text).slice(0, 46)) : '';
+    const already = ctxObj.existing
+      ? '<span style="margin-left:auto;flex:0 0 auto;font:600 11px sans-serif;color:#7f8694">' +
+        ctxObj.existing +
+        (ctxObj.existing === 1 ? ' note here' : ' notes here') +
+        '</span>'
+      : '';
     popup.innerHTML =
-      '<div style="font:12px ui-monospace,monospace;color:#7f8694;margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' +
-      head +
+      '<div style="display:flex;align-items:baseline;gap:7px;margin-bottom:9px;min-width:0">' +
+      '<span style="font:600 12px ui-monospace,monospace;color:#9aa2b1;flex:0 0 auto">' + head + '</span>' +
+      (snippet
+        ? '<span style="font:12px sans-serif;color:#5f6673;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">“' + snippet + '”</span>'
+        : '') +
+      already +
       '</div>' +
       '<div data-chips style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px"></div>' +
-      '<textarea placeholder="Describe the change… e.g. \'remove this banner\'" style="width:100%;box-sizing:border-box;min-height:70px;resize:vertical;background:#0c0e14;border:1px solid #2a2e3a;border-radius:8px;color:#e6e9f0;padding:9px;font:13px/1.45 sans-serif;outline:none"></textarea>' +
-      '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px">' +
+      '<textarea placeholder="Describe the change… e.g. \'remove this banner\'" style="width:100%;box-sizing:border-box;min-height:74px;resize:vertical;background:#0c0e14;border:1px solid #2a2e3a;border-radius:8px;color:#e6e9f0;padding:9px;font:13px/1.45 sans-serif;outline:none"></textarea>' +
+      '<div data-hint style="margin-top:8px;font:11px sans-serif;color:#5f6673">' + MOD_KEY + '↵ to save · Esc to cancel</div>' +
+      '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px">' +
       '<button data-cancel style="cursor:pointer;border:0;border-radius:8px;padding:7px 13px;background:#22262f;color:#cdd6f4;font:600 12px sans-serif">Cancel</button>' +
       '<button data-save style="cursor:pointer;border:0;border-radius:8px;padding:7px 13px;background:#5b8cff;color:#fff;font:600 12px sans-serif">Save note</button>' +
       '</div>';
 
-    let action = 'comment';
+    let action = ACTIONS.some((a) => a.id === lastAction) ? lastAction : 'comment';
     const chips = popup.querySelector('[data-chips]');
+    const chipStyle = (b, a, on) => {
+      if (on) b.setAttribute('data-on', '1');
+      else b.removeAttribute('data-on');
+      b.style.cssText =
+        'cursor:pointer;border:1px solid ' + a.color + (on ? 'cc' : '44') + ';border-radius:999px;' +
+        'padding:4px 10px;background:' + (on ? a.color + '2e' : 'transparent') + ';color:' + a.color + ';' +
+        'font:' + (on ? '700' : '600') + ' 11px sans-serif;box-shadow:' + (on ? '0 0 0 1px ' + a.color + '33' : 'none');
+    };
     ACTIONS.forEach((a) => {
       const b = document.createElement('button');
       b.textContent = a.label;
-      b.style.cssText =
-        'cursor:pointer;border:1px solid ' +
-        a.color +
-        '44;border-radius:999px;padding:4px 10px;background:transparent;color:' +
-        a.color +
-        ';font:600 11px sans-serif';
+      b.title = a.label + ' note';
+      chipStyle(b, a, a.id === action);
       b.addEventListener('click', () => {
         action = a.id;
-        chips.querySelectorAll('button').forEach((x) => (x.style.background = 'transparent'));
-        b.style.background = a.color + '22';
+        lastAction = a.id;
+        ACTIONS.forEach((other, i) => chipStyle(chips.children[i], other, other.id === action));
       });
-      if (a.id === 'comment') b.style.background = a.color + '22';
       chips.appendChild(b);
     });
 
@@ -1077,24 +1685,33 @@ const replay = require('./replay');
     popup.querySelector('[data-cancel]').addEventListener('click', () => {
       closePopup();
       if (onCancel) onCancel();
-      else ipcRenderer.sendToHost('caos:escape');
     });
+    const hint = popup.querySelector('[data-hint]');
     popup.querySelector('[data-save]').addEventListener('click', () => {
       const note = ta.value.trim();
       if (!note) {
+        // Say what is missing instead of just turning the box red.
         ta.focus();
         ta.style.borderColor = '#ff6b6b';
+        hint.textContent = 'Describe the change first — a tag on its own is not a request.';
+        hint.style.color = '#ff8f8f';
         return;
       }
       onSave(note, action);
       closePopup();
+    });
+    ta.addEventListener('input', () => {
+      if (ta.style.borderColor === 'rgb(255, 107, 107)' && ta.value.trim()) {
+        ta.style.borderColor = '#2a2e3a';
+        hint.textContent = MOD_KEY + '↵ to save · Esc to cancel';
+        hint.style.color = '#5f6673';
+      }
     });
     ta.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) popup.querySelector('[data-save]').click();
       if (e.key === 'Escape') {
         closePopup();
         if (onCancel) onCancel();
-        else ipcRenderer.sendToHost('caos:escape');
       }
     });
   }
@@ -1107,7 +1724,15 @@ const replay = require('./replay');
     popupCancel = null;
   }
 
-  // ---- restored annotation pins ---------------------------------------------
+  // ---- comment bubbles --------------------------------------------------------
+  // One bubble per annotated element, parked on its top-right corner: it carries
+  // the number of notes on that element and stays put whether or not the element
+  // is selected. Clicking a bubble opens the note editor for that element.
+  //
+  // Clicking an element in Inspect does NOT throw the editor at you — it drops a
+  // fresh bubble on the corner, and you open it when you are ready to write.
+  const BUBBLE_TAIL = 'border-radius:11px 11px 11px 2px;';
+
   function clearPins() {
     for (const p of pins) {
       try {
@@ -1119,67 +1744,220 @@ const replay = require('./replay');
     pins = [];
   }
 
+  // A bubble is a marker, not a control, once you are rearranging: one parked
+  // over an element used to swallow the press that was aimed at the element,
+  // which reads as "the drag just doesn't work here".
+  function syncPinInteractivity() {
+    const clickable = mode !== 'arrange';
+    for (const p of pins) {
+      try {
+        p.badge.style.pointerEvents = clickable ? 'auto' : 'none';
+      } catch (_e) {
+        /* ignore */
+      }
+    }
+    if (composeBubble) composeBubble.style.pointerEvents = clickable ? 'auto' : 'none';
+  }
+
+  function makeBubble(text, color, title) {
+    const b = document.createElement('div');
+    b.setAttribute('data-caos', '');
+    b.setAttribute('data-caos-bubble', '');
+    b.textContent = text;
+    if (title) b.title = title;
+    b.style.cssText =
+      'position:fixed;min-width:22px;height:22px;padding:0 6px;' +
+      BUBBLE_TAIL +
+      'display:flex;align-items:center;justify-content:center;box-sizing:border-box;' +
+      'font:700 12px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#fff;background:' +
+      color +
+      ';border:2px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.45);cursor:pointer;pointer-events:auto;' +
+      'z-index:2147483641;transform:translate(-40%,-55%);transition:transform .1s ease-out;';
+    b.addEventListener('mouseenter', () => {
+      b.style.transform = 'translate(-40%,-55%) scale(1.12)';
+    });
+    b.addEventListener('mouseleave', () => {
+      b.style.transform = 'translate(-40%,-55%)';
+    });
+    return b;
+  }
+
+  // Group the session's notes by the thing they are attached to, so an element
+  // with four notes wears one bubble that says 4 — not four overlapping pins.
+  function groupAnnotations(annotations) {
+    const groups = [];
+    const byKey = new Map();
+    for (const ann of annotations) {
+      const target = ann && ann.target;
+      let el = null;
+      if (target && !isRegionTarget(target)) el = anchor.resolve(target);
+      const key = el || 'region:' + JSON.stringify((target && target.box) || {});
+      let g = byKey.get(key);
+      if (!g) {
+        g = { el, target, anns: [] };
+        byKey.set(key, g);
+        groups.push(g);
+      }
+      g.anns.push(ann);
+    }
+    return groups;
+  }
+
   function restoreAnnotations(annotations) {
     ensureUI();
     clearPins();
     if (!Array.isArray(annotations)) return;
-    annotations.forEach((ann, i) => {
+    for (const g of groupAnnotations(annotations)) {
       try {
-        const target = ann && ann.target;
-        const color = ACTION_COLOR[ann && ann.action] || '#9aa2b1';
-        let el = null;
-        if (target) el = anchor.resolve(target);
-        const badge = document.createElement('div');
-        badge.setAttribute('data-caos', '');
-        badge.textContent = String(ann && ann.pinNum != null ? ann.pinNum : i + 1);
-        badge.title = (ann && ann.action ? ann.action + ': ' : '') + (ann && ann.note ? ann.note : '');
-        badge.style.cssText =
-          'position:fixed;width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;' +
-          'font:700 12px sans-serif;color:#fff;background:' +
-          color +
-          ';border:2px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.5);cursor:pointer;pointer-events:auto;' +
-          'z-index:2147483641;transform:translate(-50%,-50%);';
-        badge.addEventListener('click', () => {
-          const live = el || (target ? anchor.resolve(target) : null);
-          if (live) anchor.highlight(live, { duration: 1200, color });
-          else if (target && target.box) anchor.highlight(null, { duration: 1200, color, box: viewportBox(target.box) });
+        const first = g.anns[0];
+        const color = ACTION_COLOR[first && first.action] || '#9aa2b1';
+        const title = g.anns
+          .map((a) => (a.action ? a.action + ': ' : '') + (a.note || ''))
+          .join('\n');
+        const badge = makeBubble(String(g.anns.length), color, title);
+        badge.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (isRegionTarget(g.target)) {
+            anchor.highlight(null, { duration: 1200, color, box: viewportBox(g.target) });
+            return;
+          }
+          const live = g.el && document.documentElement.contains(g.el) ? g.el : anchor.resolve(g.target);
+          if (!live) return;
+          anchor.highlight(live, { duration: 700, color });
+          openElementNote(live, { existing: g.anns.length });
         });
         pinLayer.appendChild(badge);
-        pins.push({ el, target, badge, action: ann && ann.action });
+        pins.push({ el: g.el, target: g.target, badge, action: first && first.action, count: g.anns.length });
       } catch (_e) {
-        /* skip bad annotation */
+        /* skip a bad annotation */
       }
-    });
+    }
+    // A fresh bubble is only needed while the element has nothing on it yet.
+    if (composeTarget && pins.some((p) => p.el === composeTarget)) clearComposeBubble();
+    syncPinInteractivity();
     syncPins();
   }
 
-  // convert a stored (viewport-at-capture) box to current viewport coords.
-  // Stored boxes from describe() are viewport coords at capture time; pins are
-  // re-anchored to the live element when possible, otherwise we just place at
-  // the stored coordinates as a best effort.
-  function viewportBox(box) {
-    return { x: box.x, y: box.y, w: box.w, h: box.h };
+  // ---- the bubble you get from an Inspect click ---------------------------------
+  function clearComposeBubble() {
+    if (composeBubble) {
+      try {
+        composeBubble.remove();
+      } catch (_e) {
+        /* ignore */
+      }
+    }
+    composeBubble = null;
+    composeTarget = null;
+  }
+
+  function showComposeBubble(el) {
+    if (!el || isOwnUI(el)) return;
+    // Already wearing a bubble? Draw attention to it instead of stacking another.
+    const existing = pins.find((p) => p.el === el);
+    if (existing) {
+      clearComposeBubble();
+      pulse(existing.badge);
+      return;
+    }
+    if (composeTarget === el) {
+      pulse(composeBubble);
+      return;
+    }
+    clearComposeBubble();
+    composeTarget = el;
+    composeBubble = makeBubble('+', '#5b8cff', 'Write a note about this element');
+    composeBubble.setAttribute('data-caos-bubble', 'new');
+    composeBubble.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openElementNote(el);
+    });
+    pinLayer.appendChild(composeBubble);
+    syncPinInteractivity();
+    syncPins();
+    pulse(composeBubble);
+  }
+
+  function pulse(node) {
+    if (!node) return;
+    node.style.transform = 'translate(-40%,-55%) scale(1.35)';
+    setTimeout(() => {
+      try {
+        node.style.transform = 'translate(-40%,-55%)';
+      } catch (_e) {
+        /* ignore */
+      }
+    }, 190);
+  }
+
+  // A drawn region carries nothing but a box — no selector, no tag (see
+  // openRegionNote). It must never be re-resolved to an element: the mark is
+  // the target, and elementFromPoint would shrink it to whatever child node
+  // happens to sit under its centre.
+  function isRegionTarget(t) {
+    return !!(t && t.box && !t.selector && !t.tag);
+  }
+
+  // Convert a stored box to current viewport coords. Region boxes are PAGE
+  // coords (strokes are captured as clientX + scrollX), so they have to be
+  // un-scrolled; an element's box is viewport coords at capture time and is
+  // only ever a best-effort fallback for when the element can't be re-resolved.
+  function viewportBox(target) {
+    const b = (target && target.box) || { x: 0, y: 0, w: 0, h: 0 };
+    if (!isRegionTarget(target)) return { x: b.x, y: b.y, w: b.w, h: b.h };
+    return { x: b.x - window.scrollX, y: b.y - window.scrollY, w: b.w, h: b.h };
+  }
+
+  // Bring an off-screen region into view before flashing it. Instant, not
+  // smooth: the flash is position:fixed, so it would be left behind mid-scroll.
+  function scrollRegionIntoView(target) {
+    const b = viewportBox(target);
+    const offY = b.y + b.h <= 0 || b.y >= window.innerHeight;
+    const offX = b.x + b.w <= 0 || b.x >= window.innerWidth;
+    if (!offY && !offX) return;
+    const y = offY ? Math.max(0, b.y + window.scrollY - Math.round(window.innerHeight / 3)) : window.scrollY;
+    const x = offX ? Math.max(0, b.x + window.scrollX - Math.round(window.innerWidth / 3)) : window.scrollX;
+    try { window.scrollTo(x, y); } catch (_e) { /* ignore */ }
+  }
+
+  // Top-right corner, slightly outside the box — the spot every commenting tool
+  // uses, and the one least likely to cover the thing you are talking about.
+  function cornerOf(r) {
+    return { x: r.right - 2, y: r.top + 2, visible: r.bottom > 0 && r.top < window.innerHeight };
   }
 
   function pinPosition(pin) {
+    if (isRegionTarget(pin.target)) {
+      const b = viewportBox(pin.target);
+      return cornerOf({ right: b.x + b.w, top: b.y, bottom: b.y + b.h });
+    }
     let el = pin.el;
     if (!el || !document.documentElement.contains(el)) {
       el = pin.target ? anchor.resolve(pin.target) : null;
       pin.el = el;
     }
-    if (el) {
-      const r = el.getBoundingClientRect();
-      return { x: r.left + 4, y: r.top + 4, visible: r.bottom > 0 && r.top < window.innerHeight };
-    }
+    if (el) return cornerOf(el.getBoundingClientRect());
     if (pin.target && pin.target.box) {
       const b = pin.target.box;
-      return { x: b.x + 4, y: b.y + 4, visible: true };
+      return cornerOf({ right: b.x + b.w, top: b.y, bottom: b.y + b.h });
     }
     return null;
   }
 
   function syncPins() {
     pinSyncQueued = false;
+    if (composeBubble) {
+      if (composeTarget && document.documentElement.contains(composeTarget)) {
+        const pos = cornerOf(composeTarget.getBoundingClientRect());
+        composeBubble.style.display = pos.visible ? 'flex' : 'none';
+        composeBubble.style.left = pos.x + 'px';
+        composeBubble.style.top = pos.y + 'px';
+      } else {
+        clearComposeBubble();
+      }
+    }
     for (const pin of pins) {
       const pos = pinPosition(pin);
       if (!pos) {
@@ -1192,6 +1970,7 @@ const replay = require('./replay');
     }
     redraw(); // batch the draw-mode stroke repaint into the same rAF frame
     syncArrange(); // keep the rearrange selection glued to its element too
+    syncEditBox(); // …and the edit selection
   }
 
   function queuePinSync() {
@@ -1201,35 +1980,33 @@ const replay = require('./replay');
   }
 
   // ---- DOM tree serializer --------------------------------------------------
+  const TREE_MAX_DEPTH = 12; // deep enough to reach what people actually click
+  const TREE_MAX_NODES = 2500; // …without shipping a 40k-node page over IPC
+
   function serializeTree(rootEl, maxDepth) {
+    let budget = TREE_MAX_NODES;
     function walk(el, depth) {
       if (!el || el.nodeType !== 1) return null;
       const tag = el.nodeName ? el.nodeName.toLowerCase() : '';
       if (tag === 'script' || tag === 'style' || tag === 'noscript') return null;
       if (isOwnUI(el)) return null;
-      let text = '';
-      try {
-        // only own direct text, kept short
-        text = Array.prototype.filter
-          .call(el.childNodes, (n) => n.nodeType === 3)
-          .map((n) => n.textContent)
-          .join(' ')
-          .trim()
-          .replace(/\s+/g, ' ')
-          .slice(0, 60);
-      } catch (_e) {
-        text = '';
-      }
       const node = {
         tag,
         id: el.id || null,
         classes: Array.prototype.slice.call(el.classList || []),
-        text,
         selector: anchor.cssPath(el),
+        // heading / label / text / hidden / childCount — everything the panels
+        // need to call this row "Hero" instead of "div.x7".
+        ...namingHints(el),
         children: [],
       };
-      if (depth < maxDepth) {
+      if (depth < maxDepth && budget > 0) {
         for (let i = 0; i < el.children.length; i++) {
+          if (budget <= 0) {
+            node.truncated = true;
+            break;
+          }
+          budget--;
           const child = walk(el.children[i], depth + 1);
           if (child) node.children.push(child);
         }
@@ -1243,9 +2020,353 @@ const replay = require('./replay');
     }
   }
 
+  // ---- edit mode --------------------------------------------------------------
+  // The visual editor: click any element to select it, type straight into its
+  // text, and drive type / colour / spacing / size from the Style panel. Every
+  // change is an inline style (or a text change) on the live page AND an edit
+  // note carrying the exact CSS, so it exports to an agent like everything else.
+  const EDIT_COLOR = '#c792ea';
+  const INLINE_TAGS = /^(a|b|i|em|strong|span|small|u|s|code|mark|sup|sub|br|abbr|time|label)$/;
+  const NOT_TEXT = /^(input|textarea|select|option|img|picture|svg|canvas|video|audio|iframe|embed|object|br|hr|table|thead|tbody|tr|ul|ol)$/;
+
+  function ensureEditUI() {
+    if (editBox && root && root.contains(editBox)) return editBox;
+    editBox = document.createElement('div');
+    editBox.setAttribute('data-caos', '');
+    editBox.setAttribute('data-caos-edit', 'box');
+    editBox.style.cssText =
+      'position:fixed;display:none;pointer-events:none;border:2px solid ' + EDIT_COLOR + ';border-radius:3px;' +
+      'box-shadow:0 0 0 1px rgba(199,146,234,.25);z-index:2147483644;';
+    root.appendChild(editBox);
+    return editBox;
+  }
+
+  function syncEditBox() {
+    if (!editSel || mode !== 'edit') {
+      if (editBox) editBox.style.display = 'none';
+      return;
+    }
+    if (!document.documentElement.contains(editSel)) {
+      editSel = null;
+      if (editBox) editBox.style.display = 'none';
+      return;
+    }
+    const b = ensureEditUI();
+    const r = editSel.getBoundingClientRect();
+    b.style.display = 'block';
+    b.style.left = r.left - 1 + 'px';
+    b.style.top = r.top - 1 + 'px';
+    b.style.width = Math.max(0, r.width) + 'px';
+    b.style.height = Math.max(0, r.height) + 'px';
+  }
+
+  // Text you can actually type into: it owns its words, and no block-level
+  // child would be destroyed by editing them.
+  function isTextEditable(el) {
+    if (!el || el.nodeType !== 1 || isOwnUI(el)) return false;
+    const tag = el.nodeName.toLowerCase();
+    if (NOT_TEXT.test(tag)) return false;
+    if (!(el.textContent || '').trim()) return false;
+    return Array.prototype.every.call(el.children, (c) => INLINE_TAGS.test(c.nodeName.toLowerCase()));
+  }
+
+  function editSelect(el, opts) {
+    if (!el || el.nodeType !== 1 || isOwnUI(el)) return;
+    if (el === document.documentElement) return;
+    if (editSel !== el) endStyleSession(); // one note per element you work on
+    finishTextEdit();
+    editSel = el;
+    syncEditBox();
+    pushStyle(el);
+    if (opts && opts.text) startTextEdit(el);
+  }
+
+  function editDeselect() {
+    finishTextEdit();
+    endStyleSession();
+    editSel = null;
+    if (editBox) editBox.style.display = 'none';
+  }
+
+  // ---- typing straight into the page -------------------------------------------
+  function startTextEdit(el, point) {
+    if (!isTextEditable(el)) return false;
+    finishTextEdit();
+    editingText = { el, before: el.textContent };
+    try {
+      el.setAttribute('contenteditable', 'plaintext-only');
+      el.style.setProperty('outline', '2px solid ' + EDIT_COLOR);
+      el.style.setProperty('outline-offset', '1px');
+      el.style.setProperty('user-select', 'text'); // the page-wide lock stops here
+      el.focus();
+      // Put the caret where the pointer was, not at the start of the line.
+      if (point && document.caretRangeFromPoint) {
+        const range = document.caretRangeFromPoint(point.x, point.y);
+        if (range) {
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
+      }
+    } catch (_e) {
+      /* ignore */
+    }
+    el.addEventListener('blur', finishTextEdit);
+    el.addEventListener('keydown', onTextKey, true);
+    ipcRenderer.sendToHost('caos:text-editing', { editing: true, selector: anchor.cssPath(el) });
+    return true;
+  }
+
+  function onTextKey(e) {
+    if (!editingText) return;
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      e.preventDefault();
+      const { el, before } = editingText;
+      editingText = null;
+      cleanupTextEdit(el);
+      el.textContent = before;
+      pushStyle(el);
+      return;
+    }
+    // Single-line-ish elements finish on Enter; a paragraph keeps its newlines.
+    const multiline = /^(p|div|section|article|li|blockquote|pre|td)$/.test(editingText.el.nodeName.toLowerCase());
+    if (e.key === 'Enter' && (!multiline || e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      e.stopPropagation();
+      finishTextEdit();
+    }
+  }
+
+  function cleanupTextEdit(el) {
+    try {
+      el.removeAttribute('contenteditable');
+      el.style.removeProperty('outline');
+      el.style.removeProperty('outline-offset');
+      el.style.removeProperty('user-select');
+      if (!el.getAttribute('style')) el.removeAttribute('style');
+      el.removeEventListener('blur', finishTextEdit);
+      el.removeEventListener('keydown', onTextKey, true);
+    } catch (_e) {
+      /* ignore */
+    }
+    ipcRenderer.sendToHost('caos:text-editing', { editing: false });
+  }
+
+  function finishTextEdit() {
+    const t = editingText;
+    if (!t) return;
+    editingText = null;
+    const el = t.el;
+    const after = el.textContent;
+    cleanupTextEdit(el);
+    if (after === t.before) return;
+    const before = t.before;
+    commitEdit(el, {
+      type: 'text',
+      action: 'change',
+      note:
+        'Change the copy of `' + anchor.cssPath(el) + '` from “' + trim60(before) + '” to “' + trim60(after) + '”.',
+      details: { before: before, after: after },
+      undo: () => {
+        el.textContent = before;
+      },
+    });
+    pushStyle(el);
+  }
+
+  function trim60(v) {
+    const s = String(v == null ? '' : v).replace(/\s+/g, ' ').trim();
+    return s.length > 60 ? s.slice(0, 60) + '…' : s;
+  }
+
+  // ---- style edits ---------------------------------------------------------------
+  // One note per element per visit: changing five properties on a heading is one
+  // request ("restyle the heading"), not five.
+  function startStyleSession(el) {
+    styleSession = { el, annId: null, restore: styleSnapshot(el), props: {} };
+  }
+
+  function endStyleSession() {
+    styleSession = null;
+  }
+
+  function applyStyle(el, props, commit) {
+    if (!el || isOwnUI(el)) return;
+    if (!styleSession || styleSession.el !== el) {
+      finishTextEdit();
+      startStyleSession(el);
+    }
+    for (const prop in props) {
+      const value = props[prop];
+      if (value == null || value === '') {
+        el.style.removeProperty(prop);
+        delete styleSession.props[prop];
+      } else {
+        el.style.setProperty(prop, value);
+        styleSession.props[prop] = value;
+      }
+    }
+    if (commit) commitStyleSession();
+    syncEditBox();
+    syncArrange();
+    pushStyle(el);
+  }
+
+  function commitStyleSession() {
+    const s = styleSession;
+    if (!s || !Object.keys(s.props).length) return;
+    const css = Object.keys(s.props)
+      .map((k) => k + ': ' + s.props[k] + ';')
+      .join(' ');
+    const note = 'Restyle `' + anchor.cssPath(s.el) + '` — apply: ' + css;
+    const details = { props: JSON.parse(JSON.stringify(s.props)) };
+    if (!s.annId) {
+      const entry = commitEdit(s.el, {
+        type: 'style',
+        note,
+        css,
+        details,
+        undo: s.restore,
+      });
+      s.annId = entry && entry.annId;
+      return;
+    }
+    // Same element, same visit — grow the note instead of filing another one.
+    const entry = editStack.filter((x) => x.annId === s.annId)[0];
+    if (entry) {
+      entry.ann.note = note;
+      entry.ann.edit = { type: 'style', css, details };
+      entry.redo = restorePoint(s.el);
+    }
+    ipcRenderer.sendToHost('caos:annotation-update', {
+      id: s.annId,
+      patch: { note, edit: { type: 'style', css, details } },
+    });
+  }
+
+  // What the Style panel renders: what the element is now, plus the handful of
+  // font stacks the page itself uses.
+  function pushStyle(el) {
+    try {
+      if (!el || !document.documentElement.contains(el)) {
+        ipcRenderer.sendToHost('caos:style-picked', null);
+        return;
+      }
+      const cs = getComputedStyle(el);
+      const r = el.getBoundingClientRect();
+      const inline = {};
+      for (let i = 0; i < el.style.length; i++) inline[el.style[i]] = el.style.getPropertyValue(el.style[i]);
+      ipcRenderer.sendToHost('caos:style-picked', {
+        selector: anchor.cssPath(el),
+        brief: nodeBrief(el),
+        editableText: isTextEditable(el),
+        text: isTextEditable(el) ? el.textContent : '',
+        box: { w: Math.round(r.width), h: Math.round(r.height) },
+        inline,
+        pageFonts: pageFonts(),
+        pageColors: pageColors(),
+        computed: {
+          'font-family': cs.fontFamily,
+          'font-size': cs.fontSize,
+          'font-weight': cs.fontWeight,
+          'font-style': cs.fontStyle,
+          'line-height': cs.lineHeight,
+          'letter-spacing': cs.letterSpacing === 'normal' ? '0px' : cs.letterSpacing,
+          'text-align': cs.textAlign,
+          'text-transform': cs.textTransform,
+          'text-decoration-line': cs.textDecorationLine,
+          color: cs.color,
+          'background-color': cs.backgroundColor,
+          opacity: cs.opacity,
+          'border-radius': cs.borderTopLeftRadius,
+          'border-width': cs.borderTopWidth,
+          'border-color': cs.borderTopColor,
+          'border-style': cs.borderTopStyle,
+          'padding-top': cs.paddingTop,
+          'padding-right': cs.paddingRight,
+          'padding-bottom': cs.paddingBottom,
+          'padding-left': cs.paddingLeft,
+          'margin-top': cs.marginTop,
+          'margin-right': cs.marginRight,
+          'margin-bottom': cs.marginBottom,
+          'margin-left': cs.marginLeft,
+          width: cs.width,
+          height: cs.height,
+          display: cs.display,
+        },
+      });
+    } catch (_e) {
+      /* ignore */
+    }
+  }
+
+  let _colorsCache = null;
+  function pageColors() {
+    if (_colorsCache) return _colorsCache;
+    const counts = {};
+    try {
+      const all = document.querySelectorAll('body *');
+      const step = Math.max(1, Math.floor(all.length / 400));
+      for (let i = 0; i < all.length; i += step) {
+        const el = all[i];
+        if (isOwnUI(el)) continue;
+        const cs = getComputedStyle(el);
+        for (const v of [cs.color, cs.backgroundColor, cs.borderTopColor]) {
+          const h = rgbToHex(v);
+          if (h) counts[h] = (counts[h] || 0) + 1;
+        }
+      }
+    } catch (_e) {
+      /* ignore */
+    }
+    _colorsCache = Object.keys(counts)
+      .sort((a, b) => counts[b] - counts[a])
+      .slice(0, 10);
+    return _colorsCache;
+  }
+
+  function rgbToHex(v) {
+    const m = /rgba?\(([^)]+)\)/i.exec(String(v || ''));
+    if (!m) return null;
+    const p = m[1].split(',').map((x) => parseFloat(x));
+    if (p.length < 3 || p.some(isNaN)) return null;
+    if (p.length > 3 && p[3] < 0.1) return null; // effectively transparent
+    return (
+      '#' +
+      p
+        .slice(0, 3)
+        .map((x) => Math.max(0, Math.min(255, Math.round(x))).toString(16).padStart(2, '0'))
+        .join('')
+    );
+  }
+
+  let _fontsCache = null;
+  function pageFonts() {
+    if (_fontsCache) return _fontsCache;
+    const seen = [];
+    try {
+      const all = document.querySelectorAll('body *');
+      const step = Math.max(1, Math.floor(all.length / 300));
+      for (let i = 0; i < all.length; i += step) {
+        const el = all[i];
+        if (isOwnUI(el)) continue;
+        const f = getComputedStyle(el).fontFamily;
+        if (f && seen.indexOf(f) === -1) seen.push(f);
+        if (seen.length >= 8) break;
+      }
+    } catch (_e) {
+      /* ignore */
+    }
+    _fontsCache = seen;
+    return seen;
+  }
+
   // ---- mode plumbing --------------------------------------------------------
   function setMode(next) {
     ensureUI();
+    if (next === mode) return; // re-entering a mode must not drop the selection
+    if (mode === 'edit' && next !== 'edit') editDeselect();
     mode = next;
     closePopup();
     highlight.style.display = tooltip.style.display = 'none';
@@ -1254,6 +2375,7 @@ const replay = require('./replay');
     canvas.style.pointerEvents = drawOn ? 'auto' : 'none';
     drawBar.style.display = drawOn ? 'block' : 'none';
     const arrangeOn = next === 'arrange';
+    syncPinInteractivity();
     if (arrangeOn) {
       ensureArrangeUI();
       arrangeUI.barEl.style.display = 'flex';
@@ -1262,7 +2384,41 @@ const replay = require('./replay');
       arrangeDeselect();
       if (arrangeUI) arrangeUI.barEl.style.display = 'none';
     }
-    if (document.body) document.body.style.cursor = next === 'inspect' || next === 'assert' || arrangeOn ? 'crosshair' : '';
+    if (next !== 'inspect') clearComposeBubble();
+    const editOn = next === 'edit';
+    if (!editOn) {
+      editDeselect();
+    } else {
+      ensureEditUI();
+      syncEditBox();
+    }
+    if (document.body) document.body.style.cursor = arrangeOn ? 'grab' : next === 'inspect' || next === 'assert' ? 'crosshair' : editOn ? 'default' : '';
+    // Every tool mode is a pointer tool: a press is a pick or a grab, never the
+    // start of a text selection. Leaving the page selectable made drags smear a
+    // blue highlight across everything they crossed.
+    const toolOn = next !== 'off';
+    if (toolOn && savedUserSelect == null) savedUserSelect = document.documentElement.style.userSelect || '';
+    document.documentElement.style.userSelect = toolOn ? 'none' : savedUserSelect || '';
+    if (!toolOn) savedUserSelect = null;
+    if (toolOn) clearTextSelection();
+  }
+
+  // A panel hover owns the highlight box until the pointer comes back to the
+  // page (or the panel says so), since nothing else would take it down.
+  function clearPanelHover() {
+    if (!panelHover) return;
+    panelHover = false;
+    if (highlight) highlight.style.display = 'none';
+    if (tooltip) tooltip.style.display = 'none';
+  }
+
+  function clearTextSelection() {
+    try {
+      const sel = window.getSelection();
+      if (sel && !sel.isCollapsed) sel.removeAllRanges();
+    } catch (_e) {
+      /* ignore */
+    }
   }
 
   function send(annotation) {
@@ -1277,6 +2433,25 @@ const replay = require('./replay');
     ensureUI();
     document.addEventListener('mousemove', onMove, true);
     document.addEventListener('click', onClick, true);
+    document.addEventListener('dblclick', onDoubleClick, true);
+    document.addEventListener('pointerdown', onArrangePointerDown, true);
+    // Belt and braces on top of the user-select lock: pages that force
+    // user-select:text on their own content would still start a selection
+    // under a drag. Our own note editor is the one place selection is allowed.
+    document.addEventListener(
+      'selectstart',
+      (e) => {
+        if (mode === 'off') return;
+        const t = e.target && e.target.nodeType === 3 ? e.target.parentElement : e.target;
+        // …except the text you are actually typing into.
+        if (editingText && editingText.el && (t === editingText.el || editingText.el.contains(t))) return;
+        if (!isOwnUI(t)) e.preventDefault();
+      },
+      true
+    );
+    // Images and links start a NATIVE html5 drag on mousedown, which eats the
+    // pointer stream our own drag runs on. Not while a tool mode is on.
+    document.addEventListener('dragstart', (e) => { if (mode !== 'off') e.preventDefault(); }, true);
     // Draw-mode dragging is handled by canvas/window listeners bound in
     // ensureUI() — the canvas only accepts pointer events while draw mode is
     // on, so it never needs to compete with these document-level pick handlers.
@@ -1284,7 +2459,16 @@ const replay = require('./replay');
       'keydown',
       (e) => {
         if (e.key === 'Escape') {
-          // First Escape only cancels an open note popup (its cancel path may
+          // A live rearrange drag is the first thing Escape gets to abort —
+          // otherwise leaving arrange mode would strand a half-finished,
+          // unrecorded DOM move on the page.
+          if (arrangeDrag) {
+            e.stopPropagation();
+            e.preventDefault();
+            cancelDrag();
+            return;
+          }
+          // Then an open note popup (its cancel path may
           // keep the current mode alive, e.g. draw mode after a region note).
           // Only with no popup open does Escape exit the mode host-side.
           if (popupCancel) {
@@ -1342,12 +2526,77 @@ const replay = require('./replay');
     }
   });
 
+  ipcRenderer.on('caos:hover-target', (_e, payload) => {
+    try {
+      ensureUI();
+      const el = payload && payload.selector && document.querySelector(payload.selector);
+      if (!el || isOwnUI(el)) return;
+      const r = el.getBoundingClientRect();
+      panelHover = true;
+      highlight.style.display = 'block';
+      highlight.style.left = r.left + 'px';
+      highlight.style.top = r.top + 'px';
+      highlight.style.width = r.width + 'px';
+      highlight.style.height = r.height + 'px';
+      tooltip.style.display = 'block';
+      tooltip.textContent = label(el);
+      tooltip.style.left = Math.max(4, r.left) + 'px';
+      tooltip.style.top = (r.top > 28 ? r.top - 26 : r.bottom + 6) + 'px';
+    } catch (_err) {
+      /* ignore */
+    }
+  });
+
+  ipcRenderer.on('caos:hover-clear', () => clearPanelHover());
+
+  // Re-layout a container straight from the Layers panel — same smart layout the
+  // arrange bar applies, same edit note.
+  ipcRenderer.on('caos:smart-layout', (_e, payload) => {
+    try {
+      const el = payload && payload.selector && document.querySelector(payload.selector);
+      if (el && payload.kind) smartLayout(payload.kind, el);
+    } catch (_err) {
+      /* ignore */
+    }
+  });
+
+  // Stacking order for overlapping layers.
+  ipcRenderer.on('caos:set-z-order', (_e, payload) => {
+    try {
+      const el = payload && payload.selector && document.querySelector(payload.selector);
+      if (el && payload.dir) setZOrder(el, payload.dir);
+    } catch (_err) {
+      /* ignore */
+    }
+  });
+
   ipcRenderer.on('caos:highlight-target', (_e, target) => {
     let ok = false;
     try {
+      if (isRegionTarget(target)) {
+        // Flash the marked area itself. (This only ever looked right while draw
+        // mode was on, because its canvas swallowed the elementFromPoint hit.)
+        scrollRegionIntoView(target);
+        anchor.highlight(null, { duration: 1400, box: viewportBox(target) });
+        ipcRenderer.sendToHost('caos:highlight-ack', { ok: true });
+        return;
+      }
       const el = anchor.resolve(target);
-      if (el) { anchor.highlight(el, { duration: 1400 }); ok = true; }
-      else if (target && target.box) { anchor.highlight(null, { duration: 1400, box: target.box }); ok = true; }
+      if (el) {
+        // Same courtesy the region path gets: a flash you cannot see is not a
+        // located element. Instant, since the flash is position:fixed.
+        try {
+          const r = el.getBoundingClientRect();
+          if (r.bottom <= 0 || r.top >= window.innerHeight) {
+            window.scrollTo(window.scrollX, Math.max(0, r.top + window.scrollY - Math.round(window.innerHeight / 3)));
+          }
+        } catch (_e2) {
+          /* ignore */
+        }
+        anchor.highlight(el, { duration: 1400 });
+        ok = true;
+      }
+      else if (target && target.box) { anchor.highlight(null, { duration: 1400, box: viewportBox(target) }); ok = true; }
     } catch (_err) {
       /* ignore */
     }
@@ -1360,7 +2609,14 @@ const replay = require('./replay');
     try {
       let el = target && target.selector ? document.querySelector(target.selector) : null;
       if (!el && target) el = anchor.resolve(target);
-      if (el) pickLayout(el);
+      if (el) {
+        clearPanelHover();
+        const r = el.getBoundingClientRect();
+        if (r.bottom <= 0 || r.top >= window.innerHeight) {
+          window.scrollTo(window.scrollX, Math.max(0, r.top + window.scrollY - Math.round(window.innerHeight / 3)));
+        }
+        pickLayout(el);
+      }
     } catch (_e) {
       /* ignore */
     }
@@ -1379,7 +2635,20 @@ const replay = require('./replay');
       if (from == null || to == null || from < 0 || from >= kids.length || to < 0 || to >= kids.length || from === to) return;
       const node = kids[from];
       const ref = kids[to > from ? to + 1 : to] || null;
+      const selBefore = anchor.cssPath(node);
       parent.insertBefore(node, ref);
+      commitEdit(node, {
+        type: 'reorder',
+        note:
+          'Move `' + selBefore + '` from position ' + (from + 1) + ' to position ' + (to + 1) +
+          ' (of ' + kids.length + ') inside `' + (p.parentSelector || anchor.cssPath(parent)) + '`.',
+        details: { parentSelector: p.parentSelector || anchor.cssPath(parent), fromIndex: from, toIndex: to },
+        undo: () => {
+          const k2 = elChildren(parent, node);
+          parent.insertBefore(node, k2[from] || null);
+        },
+      });
+      pushTree();
       // Refocus on whatever was selected before the move (usually — but not
       // always — the moved node itself) using the LIVE reference, not a
       // re-derived selector: reordering can shift nth-of-type-based selectors
@@ -1387,6 +2656,149 @@ const replay = require('./replay');
       const targetEl = lastPickedEl && document.documentElement.contains(lastPickedEl) ? lastPickedEl : node;
       pickLayout(targetEl);
     } catch (_e) {
+      /* ignore */
+    }
+  });
+
+  // A Sections drag that crossed into another container.
+  ipcRenderer.on('caos:move-into', (_e, payload) => {
+    try {
+      const p = payload || {};
+      const el = p.selector && document.querySelector(p.selector);
+      const parent = p.parentSelector && document.querySelector(p.parentSelector);
+      if (!el || !parent || isOwnUI(el) || isOwnUI(parent) || el === parent || el.contains(parent)) return;
+      const origParent = el.parentElement;
+      if (!origParent) return;
+      const startIndex = indexIn(origParent, el);
+      const selBefore = anchor.cssPath(el);
+      const fromSel = anchor.cssPath(origParent);
+      const kids = elChildren(parent, el);
+      parent.insertBefore(el, kids[p.index] || null);
+      const endIndex = indexIn(parent, el);
+      if (parent === origParent) {
+        if (endIndex === startIndex) return;
+        commitEdit(el, {
+          type: 'reorder',
+          note:
+            'Move `' + selBefore + '` from position ' + (startIndex + 1) + ' to position ' + (endIndex + 1) +
+            ' inside `' + fromSel + '`.',
+          details: { parentSelector: fromSel, fromIndex: startIndex, toIndex: endIndex },
+          undo: () => {
+            const k2 = elChildren(origParent, el);
+            origParent.insertBefore(el, k2[startIndex] || null);
+          },
+        });
+      } else {
+        const toSel = anchor.cssPath(parent);
+        commitEdit(el, {
+          type: 'reparent',
+          note:
+            'Move `' + selBefore + '` out of `' + fromSel + '` and into `' + toSel + '` at position ' +
+            (endIndex + 1) + ' of ' + elChildren(parent).length + '.',
+          details: { fromParentSelector: fromSel, parentSelector: toSel, fromIndex: startIndex, toIndex: endIndex },
+          undo: () => {
+            const k2 = elChildren(origParent, el);
+            origParent.insertBefore(el, k2[startIndex] || null);
+          },
+        });
+      }
+      pickLayout(el);
+    } catch (_err) {
+      /* ignore */
+    }
+  });
+
+  ipcRenderer.on('caos:undo-edit', () => undoLastEdit());
+  ipcRenderer.on('caos:redo-edit', () => redoLastEdit());
+  ipcRenderer.on('caos:request-stacks', () => pushStacks());
+
+  ipcRenderer.on('caos:edit-select', (_e, payload) => {
+    try {
+      const el = payload && payload.selector && document.querySelector(payload.selector);
+      if (el) editSelect(el, { text: !!(payload && payload.text) });
+    } catch (_err) {
+      /* ignore */
+    }
+  });
+
+  ipcRenderer.on('caos:edit-select-parent', () => {
+    try {
+      const p = editSel && editSel.parentElement;
+      if (p && !isOwnUI(p) && p !== document.documentElement) editSelect(p);
+    } catch (_err) {
+      /* ignore */
+    }
+  });
+
+  // Lift the selected element off the page: markup, the CSS that applies to it,
+  // and the assets it needs. The host turns that into a file or a zip.
+  ipcRenderer.on('caos:collect-element', (_e, payload) => {
+    let bundle = null;
+    try {
+      const p = payload || {};
+      const el = p.selector ? document.querySelector(p.selector) : editSel || lastPickedEl;
+      if (el && !isOwnUI(el)) bundle = elementExport.collect(el, { selector: p.selector || anchor.cssPath(el) });
+    } catch (err) {
+      bundle = null;
+    }
+    ipcRenderer.sendToHost('caos:element-collected', bundle);
+  });
+
+  ipcRenderer.on('caos:request-style', (_e, payload) => {
+    try {
+      const el = payload && payload.selector ? document.querySelector(payload.selector) : editSel;
+      pushStyle(el);
+    } catch (_err) {
+      /* ignore */
+    }
+  });
+
+  // The Style panel drives this: props applied live, committed on change-end.
+  ipcRenderer.on('caos:apply-style', (_e, payload) => {
+    try {
+      const p = payload || {};
+      const el = p.selector ? document.querySelector(p.selector) : editSel;
+      if (el) applyStyle(el, p.props || {}, !!p.commit);
+    } catch (_err) {
+      /* ignore */
+    }
+  });
+
+  // "Reset element": undo everything this visit did to it, note included.
+  ipcRenderer.on('caos:reset-element', (_e, payload) => {
+    try {
+      const el = payload && payload.selector ? document.querySelector(payload.selector) : editSel;
+      if (!el || !styleSession || styleSession.el !== el) return;
+      const entry = styleSession.annId ? editStack.filter((x) => x.annId === styleSession.annId)[0] : null;
+      if (entry) retractEdit(entry); // its undo IS the session's restore point
+      else styleSession.restore();
+      endStyleSession();
+      syncEditBox();
+      pushStyle(el);
+    } catch (_err) {
+      /* ignore */
+    }
+  });
+
+  ipcRenderer.on('caos:set-text', (_e, payload) => {
+    try {
+      const p = payload || {};
+      const el = p.selector ? document.querySelector(p.selector) : editSel;
+      if (!el || typeof p.text !== 'string' || !isTextEditable(el)) return;
+      const before = el.textContent;
+      if (before === p.text) return;
+      el.textContent = p.text;
+      commitEdit(el, {
+        type: 'text',
+        action: 'change',
+        note: 'Change the copy of `' + anchor.cssPath(el) + '` from “' + trim60(before) + '” to “' + trim60(p.text) + '”.',
+        details: { before, after: p.text },
+        undo: () => {
+          el.textContent = before;
+        },
+      });
+      pushStyle(el);
+    } catch (_err) {
       /* ignore */
     }
   });
@@ -1410,9 +2822,57 @@ const replay = require('./replay');
     ipcRenderer.sendToHost('caos:replay-ack', { index: p.index, ok: !!r.ok, error: r.error, actual: r.actual });
   });
 
-  ipcRenderer.on('caos:request-dom-tree', () => {
-    const tree = serializeTree(document.body, 6);
-    ipcRenderer.sendToHost('caos:dom-tree', tree);
+  ipcRenderer.on('caos:request-dom-tree', () => pushTree());
+
+  // The Sections panel mirrors the live DOM, so anything that restructures the
+  // page has to re-publish it or the panel goes stale.
+  function pushTree() {
+    try {
+      ipcRenderer.sendToHost('caos:dom-tree', serializeTree(document.body, TREE_MAX_DEPTH));
+    } catch (_e) {
+      /* ignore */
+    }
+  }
+
+  // Hide / show an element from the Sections list. Hiding records a removal
+  // note exactly like the arrange bar's Hide; showing retracts that note again
+  // rather than piling a second edit on top of the first.
+  ipcRenderer.on('caos:toggle-hidden', (_e, payload) => {
+    try {
+      const sel = payload && payload.selector;
+      const el = sel && document.querySelector(sel);
+      if (!el || isOwnUI(el)) return;
+      if (el.style.display === 'none') {
+        const entry = editStack.slice().reverse().find((x) => x.type === 'hide' && x.el === el);
+        if (entry) retractEdit(entry);
+        else {
+          // Hidden by the page itself (or by an edit we no longer hold) —
+          // showing it is its own change to record.
+          const restore = styleSnapshot(el);
+          el.style.removeProperty('display');
+          commitEdit(el, {
+            type: 'show',
+            action: 'change',
+            note: 'Show `' + anchor.cssPath(el) + '` again (it was hidden on the page).',
+            css: 'display: revert;',
+            undo: restore,
+          });
+        }
+      } else {
+        const restore = styleSnapshot(el);
+        el.style.display = 'none';
+        commitEdit(el, {
+          type: 'hide',
+          action: 'remove',
+          note: 'Remove `' + anchor.cssPath(el) + '` from the page (hidden in preview with display:none).',
+          css: 'display: none;',
+          undo: restore,
+        });
+      }
+      pushTree();
+    } catch (_err) {
+      /* ignore */
+    }
   });
 
   // Resolve each annotation to a live PAGE-coordinate box for full-page
@@ -1421,7 +2881,9 @@ const replay = require('./replay');
   ipcRenderer.on('caos:request-page-boxes', (_e, annotations) => {
     const boxes = (annotations || []).map((a) => {
       try {
-        const el = a && a.target ? anchor.resolve(a.target) : null;
+        const target = a && a.target;
+        if (isRegionTarget(target) || (a && a.kind === 'region' && target && target.box)) return target.box;
+        const el = target ? anchor.resolve(target) : null;
         if (el) {
           const r = el.getBoundingClientRect();
           return { x: r.left + window.scrollX, y: r.top + window.scrollY, w: r.width, h: r.height };

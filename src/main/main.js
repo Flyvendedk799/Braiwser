@@ -8,6 +8,7 @@ const { createRepositories } = require('./store/repositories');
 const registerIpc = require('./ipc');
 
 let mainWindow = null;
+let videoSourceId = null; // the webContents the renderer may film
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -35,6 +36,19 @@ function createWindow() {
       mainWindow.webContents.on('console-message', (_e, level, message) => {
         console.log(`[renderer:${levels[level] || level}] ${message}`);
       });
+      // A crash mid-suite should still report how far it got.
+      mainWindow.webContents.on('render-process-gone', (_e, details) => {
+        console.log(`[render-process-gone] ${JSON.stringify(details)}`);
+        try {
+          const ipc = require('./ipc');
+          const partial = ipc.e2ePartial ? ipc.e2ePartial() : [];
+          const passed = partial.filter((c) => c.pass).length;
+          console.log('CAOS_E2E_REPORT ' + JSON.stringify({ ok: false, crashed: true, passed, total: partial.length, checks: partial }));
+        } catch (_err) {
+          /* ignore */
+        }
+        setTimeout(() => app.quit(), 150);
+      });
     }
   }
   if (process.argv.includes('--dev')) {
@@ -49,8 +63,49 @@ function createWindow() {
     });
     mainWindow.webContents.on('render-process-gone', (_e, details) => {
       console.log(`[render-process-gone] ${JSON.stringify(details)}`);
+      // Print whatever the self-test had reached, then leave — a crash used to
+      // swallow the whole run and tell you nothing about where it got to.
+      try {
+        const ipc = require('./ipc');
+        const partial = ipc.e2ePartial ? ipc.e2ePartial() : [];
+        const passed = partial.filter((c) => c.pass).length;
+        console.log('CAOS_E2E_REPORT ' + JSON.stringify({ ok: false, crashed: true, passed, total: partial.length, checks: partial }));
+      } catch (_err) {
+        /* ignore */
+      }
+      setTimeout(() => app.quit(), 150);
     });
   }
+  // Screen capture for "export as video": the renderer asks to record, and we
+  // hand it the guest page's own web contents — so the film is the page itself,
+  // with none of our chrome in the frame and no cropping guesswork.
+  try {
+    const { session: electronSession, ipcMain: ipc } = require('electron');
+    ipc.removeHandler && ipc.removeHandler('caos:video.source');
+    ipc.handle('caos:video.source', (_e, id) => {
+      videoSourceId = typeof id === 'number' ? id : null;
+      return true;
+    });
+    electronSession.defaultSession.setDisplayMediaRequestHandler(
+      (request, callback) => {
+        // Only ever our own window, only when the renderer asked for it, never a
+        // picker and never the desktop. desktopCapturer does not list the calling
+        // app's own windows here, so hand back the window's own media-source id
+        // directly — which is exactly what getMediaSourceId() is for.
+        if (videoSourceId == null || !mainWindow || mainWindow.isDestroyed()) { callback({}); return; }
+        try {
+          callback({ video: { id: mainWindow.getMediaSourceId(), name: mainWindow.getTitle() } });
+        } catch (err) {
+          console.log('[video] ' + ((err && err.message) || err));
+          callback({});
+        }
+      },
+      { useSystemPicker: false }
+    );
+  } catch (err) {
+    console.log('[video] capture handler unavailable: ' + ((err && err.message) || err));
+  }
+
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 

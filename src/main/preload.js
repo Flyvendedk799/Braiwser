@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('caos', {
   // End-to-end self-test hooks (only meaningful when CAOS_E2E=1 is set).
   e2e: process.env.CAOS_E2E === '1',
   e2eDone: (payload) => invoke('caos:e2e-done', payload),
+  e2eCheck: (check) => invoke('caos:e2e-check', check),
 
   config: () => invoke('caos:config'),
 
@@ -95,5 +96,11 @@ contextBridge.exposeInMainWorld('caos', {
 
   export: {
     build: (format, sessionId, extras) => invoke('caos:export.build', format, sessionId, extras),
+    buildElement: (payload, format) => invoke('caos:element.build', payload, format),
+    recordingReport: (id, format) => invoke('caos:recording.report', id, format),
+    recordingPdf: (id) => invoke('caos:recording.pdf', id),
+    saveBinary: (payload) => invoke('caos:save-binary', payload),
+    videoSource: (webContentsId) => invoke('caos:video.source', webContentsId),
+    saveElement: (payload) => invoke('caos:element.save', payload),
   },
 });

@@ -193,6 +193,7 @@ function highlight(el, opts) {
 
     const box = document.createElement('div');
     box.setAttribute('data-caos', '');
+    box.setAttribute('data-caos-flash', ''); // transient — lets tests/cleanup single these out
     box.style.cssText =
       'position:fixed;pointer-events:none;border:2px solid ' +
       color +

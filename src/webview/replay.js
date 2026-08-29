@@ -10,15 +10,63 @@ function wait(ms) {
   return new Promise((res) => setTimeout(res, ms));
 }
 
+// Replay is meant to look like the journey being taken again, and a person
+// does not teleport down a page. Scrolls are animated at a human speed —
+// distance-based, eased, and capped so a long page does not crawl.
+const SCROLL_MIN_MS = 180;
+const SCROLL_MAX_MS = 1100;
+const SCROLL_PX_PER_MS = 2.4;
+
+function easeInOutCubic(t) {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+function scrollDuration(dx, dy) {
+  const distance = Math.hypot(dx, dy);
+  if (distance < 2) return 0;
+  return Math.max(SCROLL_MIN_MS, Math.min(SCROLL_MAX_MS, distance / SCROLL_PX_PER_MS));
+}
+
+function smoothScrollTo(x, y) {
+  return new Promise((resolve) => {
+    const startX = window.scrollX || window.pageXOffset || 0;
+    const startY = window.scrollY || window.pageYOffset || 0;
+    const dx = x - startX;
+    const dy = y - startY;
+    const ms = scrollDuration(dx, dy);
+    if (!ms) {
+      resolve();
+      return;
+    }
+    const t0 = performance.now();
+    const tick = () => {
+      const p = Math.min(1, (performance.now() - t0) / ms);
+      const e = easeInOutCubic(p);
+      window.scrollTo(Math.round(startX + dx * e), Math.round(startY + dy * e));
+      if (p < 1) requestAnimationFrame(tick);
+      else resolve();
+    };
+    requestAnimationFrame(tick);
+  });
+}
+
+// Bring an element into view the way a reader would: only if it is off screen,
+// and by gliding there rather than jumping.
 function scrollIntoView(el) {
   try {
-    el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    const r = el.getBoundingClientRect();
+    const margin = 80;
+    const onScreen = r.top >= margin && r.bottom <= window.innerHeight - margin;
+    if (onScreen) return Promise.resolve();
+    const targetY = (window.scrollY || 0) + r.top - Math.round((window.innerHeight - r.height) / 2);
+    return smoothScrollTo(window.scrollX || 0, Math.max(0, targetY));
   } catch (_e) {
     try {
       el.scrollIntoView();
     } catch (_e2) {
       /* ignore */
     }
+    return Promise.resolve();
   }
 }
 
@@ -114,7 +162,7 @@ async function executeStep(step) {
 
   if (step.type === 'scroll') {
     try {
-      window.scrollTo(step.x || 0, step.y || 0);
+      await smoothScrollTo(step.x || 0, step.y || 0);
       return { ok: true };
     } catch (e) {
       return { ok: false, error: String((e && e.message) || e) };
@@ -127,7 +175,7 @@ async function executeStep(step) {
   }
 
   try {
-    scrollIntoView(el);
+    await scrollIntoView(el);
     await wait(60);
     anchor.highlight(el, { duration: 700, color: '#3ddc97' });
 

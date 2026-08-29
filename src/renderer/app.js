@@ -6,7 +6,9 @@ import { h, clear, toast, confirmDialog, promptDialog, modal, menu, esc } from '
 import { createToolbar } from './components/toolbar.js';
 import { createSidebar } from './components/sidebar.js';
 import { createNotesPanel } from './components/notes-panel.js';
-import { createInspectorPanel } from './components/inspector-panel.js';
+import { createSectionsPanel } from './components/sections-panel.js';
+import { createStylePanel } from './components/style-panel.js';
+import { createLayersPanel } from './components/layers-panel.js';
 import { createAiPanel } from './components/ai-panel.js';
 import { openOnboardingModal, openSettingsModal } from './components/settings-modal.js';
 import { createTabStrip } from './components/tabs.js';
@@ -31,6 +33,10 @@ const state = {
   currentUrl: '',
   currentTitle: '',
   activeTab: 'notes',
+  sideTab: 'sections', // left sidebar: 'sections' | 'layers'
+  editStacks: { undo: 0, redo: 0 }, // page-edit history, reported by the guest
+  styleTarget: null, // selector the Style panel is showing
+  libraryOpen: false, // the projects/sessions/history drawer
   sessionCounts: {},
   // Browser tabs (each is its own <webview>); `wv` aliases the active one.
   tabs: [],
@@ -41,7 +47,8 @@ const state = {
 };
 
 let wv; // the ACTIVE tab's <webview>
-let toolbar, sidebar, notesPanel, inspectorPanel, aiPanel, tabStrip, webviewHost;
+let toolbar, sidebar, notesPanel, sectionsPanel, layersPanel, stylePanel, aiPanel, tabStrip, webviewHost;
+let statusLeft, statusRight;
 let tabButtons = {};
 let stageOverlay, overlayLabel, overlayFill, overlayCancelBtn;
 const replayWaiters = new Map(); // index -> {resolve}
@@ -55,6 +62,11 @@ async function boot() {
   state.config = await caos.config();
   state.settings = await caos.settings.get();
   state.providers = await caos.secrets.providers();
+  // The harness boots from a known sidebar, the same way it ignores saved tabs.
+  if (!caos.e2e) {
+    if (state.settings.sideTab === 'layers' || state.settings.sideTab === 'sections') state.sideTab = state.settings.sideTab;
+    state.libraryOpen = !!state.settings.libraryOpen;
+  }
   buildShell();
   setupShortcuts();
   await refreshProjects();
@@ -81,6 +93,7 @@ async function boot() {
       navigateTo, setMode, openSession, replaySelected, selectRecording,
       startRecording, refreshPins, refreshRecordings,
       createTab, setActiveTab, closeTab, refreshHistory, refreshBookmarks,
+      captureElement, exportSelectedElement, exportRecordingDoc,
     };
     import('./lib/e2e.js')
       .then((m) => m.run(internals))
@@ -99,6 +112,8 @@ function buildShell() {
     forward: () => wv && wv.canGoForward() && wv.goForward(),
     reload: () => { const t = activeTab(); if (!wv) return; try { if (t && t.loading) wv.stop(); else wv.reload(); } catch (_e) { /* ignore */ } },
     toggleMode: setMode,
+    undo: () => sendWv('caos:undo-edit'),
+    redo: () => sendWv('caos:redo-edit'),
     toggleRecord: toggleRecord,
     replay: () => replaySelected(),
     screenshot: onScreenshot,
@@ -109,7 +124,32 @@ function buildShell() {
     toggleBookmark: toggleBookmark,
   });
 
+  // Both side panels drive the page the same way: a quiet outline on hover, a
+  // select (which scrolls + flashes) on click, and edits that record notes.
+  const pageActions = {
+    hover: (node) => { if (node && node.selector) sendWv('caos:hover-target', { selector: node.selector }); },
+    hoverClear: () => sendWv('caos:hover-clear'),
+    selectLayout: (target) => { if (target && target.selector) sendWv('caos:request-layout', target); },
+    toggleHidden: (node) => { if (node && node.selector) sendWv('caos:toggle-hidden', { selector: node.selector }); },
+    reorder: (payload) => sendWv('caos:reorder-sibling', payload),
+  };
+
+  sectionsPanel = createSectionsPanel({
+    ...pageActions,
+    refresh: () => requestTree(true),
+    select: (node) => pageActions.selectLayout(node),
+    moveInto: (payload) => sendWv('caos:move-into', payload),
+  });
+
+  layersPanel = createLayersPanel({
+    ...pageActions,
+    smartLayout: (kind, selector) => sendWv('caos:smart-layout', { kind, selector }),
+    zOrder: (node, dir) => { if (node && node.selector) sendWv('caos:set-z-order', { selector: node.selector, dir }); },
+  });
+
   sidebar = createSidebar({
+    selectTab: setSideTab,
+    toggleLibrary: () => setLibraryOpen(!state.libraryOpen),
     newProject: createProject,
     openProject: openProject,
     renameProject: renameProject,
@@ -121,11 +161,12 @@ function buildShell() {
     selectRecording: selectRecording,
     replayRecording: (r) => { selectRecording(r); replaySelected(); },
     editRecording: editRecording,
+    exportRecording: exportRecording,
     deleteRecording: deleteRecording,
     openUrl: (url) => navigateTo(url),
     removeBookmark: async (b) => { await caos.bookmarks.remove(b.id); await refreshBookmarks(); updateBookmarkState(); },
     clearHistory: async () => { if (await confirmDialog({ title: 'Clear history', message: 'Remove all browsing history?', confirmLabel: 'Clear' })) { await caos.history.clear(); await refreshHistory(); } },
-  });
+  }, { sections: sectionsPanel.root, layers: layersPanel.root });
 
   // ---- Right panel ----
   notesPanel = createNotesPanel(state.config, {
@@ -136,15 +177,19 @@ function buildShell() {
     remove: removeAnnotation,
     copySelector: (a) => copyText(a.target && a.target.selector, 'Selector copied'),
     suggestFix: (a) => { switchTab('ai'); aiPanel.runExternal('suggest-fix', { annotations: [a], context: { annotation: a } }); },
-    onCount: (total) => { if (tabButtons.notes) tabButtons.notes.querySelector('.pill').textContent = String(total); },
+    onCount: (total) => {
+      if (tabButtons.notes) tabButtons.notes.querySelector('.pill').textContent = String(total);
+      syncStatus();
+    },
   });
 
-  inspectorPanel = createInspectorPanel({
-    requestTree: () => sendWv('caos:request-dom-tree'),
-    highlight: (target) => sendWv('caos:highlight-target', target),
-    copySelector: (sel) => copyText(sel, 'Selector copied'),
-    selectLayout: (target) => sendWv('caos:request-layout', target),
-    reorder: (payload) => sendWv('caos:reorder-sibling', payload),
+  stylePanel = createStylePanel({
+    apply: (props, commit) => sendWv('caos:apply-style', { props, commit: !!commit }),
+    setText: (text) => sendWv('caos:set-text', { text }),
+    reset: () => sendWv('caos:reset-element', {}),
+    copyCss: (css) => copyText(css, 'CSS copied'),
+    selectParent: () => sendWv('caos:edit-select-parent'),
+    exportElement: () => exportSelectedElement(),
   });
 
   aiPanel = createAiPanel(state.config, {
@@ -156,8 +201,8 @@ function buildShell() {
   syncProfileUi();
 
   const tabs = h('div', { class: 'tabs' });
-  ['notes', 'inspector', 'ai'].forEach((id) => {
-    const labels = { notes: 'Notes', inspector: 'Inspector', ai: 'AI' };
+  ['notes', 'style', 'ai'].forEach((id) => {
+    const labels = { notes: 'Notes', style: 'Style', ai: 'AI' };
     const showPill = id === 'notes';
     const btn = h('button', {
       class: `tab ${id === state.activeTab ? 'active' : ''}`,
@@ -169,14 +214,19 @@ function buildShell() {
   });
 
   const footer = h('div', { class: 'panel-footer' }, [
-    exportBtn('Markdown', 'markdown'),
-    exportBtn('Prompt', 'prompt'),
-    exportBtn('JSON', 'json'),
-    h('button', { class: 'btn btn-sm', text: 'Copy prompt', title: 'Copy the agent prompt to the clipboard', on: { click: () => copyExport('prompt') } }),
-    h('button', { class: 'btn btn-sm btn-primary', text: '→ Agent', title: 'Hand off this session to a coding agent', on: { click: handoffToAgent } }),
+    h('div', { class: 'pf-row' }, [
+      h('span', { class: 'pf-label', text: 'Export' }),
+      exportBtn('Markdown', 'markdown'),
+      exportBtn('Prompt', 'prompt'),
+      exportBtn('JSON', 'json'),
+    ]),
+    h('div', { class: 'pf-row' }, [
+      h('button', { class: 'btn btn-sm', text: 'Copy prompt', title: 'Copy the agent prompt to the clipboard', on: { click: () => copyExport('prompt') } }),
+      h('button', { class: 'btn btn-sm btn-primary', text: 'Hand off → Agent', title: 'Hand off this session to a coding agent', on: { click: handoffToAgent } }),
+    ]),
   ]);
 
-  const panel = h('aside', { class: 'panel' }, [tabs, notesPanel.root, inspectorPanel.root, aiPanel.root, footer]);
+  const panel = h('aside', { class: 'panel' }, [tabs, notesPanel.root, stylePanel.root, aiPanel.root, footer]);
 
   // ---- Stage (tab strip + webview host) ----
   tabStrip = createTabStrip({ newTab: () => createTab(state.config.welcomeUrl), selectTab: setActiveTab, closeTab: closeTab });
@@ -185,7 +235,10 @@ function buildShell() {
   overlayFill = h('div', { class: 'so-fill', style: { width: '0%' } });
   overlayCancelBtn = h('button', { class: 'btn btn-sm btn-ghost', text: 'Cancel', on: { click: cancelReplay } });
   stageOverlay = h('div', { class: 'stage-overlay' }, [overlayLabel, h('div', { class: 'so-bar' }, [overlayFill]), overlayCancelBtn]);
-  const stage = h('div', { class: 'stage' }, [tabStrip.root, webviewHost, stageOverlay]);
+  statusLeft = h('div', { class: 'status-left' });
+  statusRight = h('div', { class: 'status-right' });
+  const statusBar = h('div', { class: 'statusbar' }, [statusLeft, statusRight]);
+  const stage = h('div', { class: 'stage' }, [tabStrip.root, webviewHost, stageOverlay, statusBar]);
 
   const body = h('div', { class: 'body' }, [sidebar.root, stage, panel]);
   root.appendChild(toolbar.root);
@@ -193,7 +246,36 @@ function buildShell() {
 
   renderSidebar();
   switchTab(state.activeTab);
+  setSideTab(state.sideTab);
+  setLibraryOpen(state.libraryOpen);
 }
+
+// ---- left sidebar -----------------------------------------------------------
+function setSideTab(id) {
+  state.sideTab = id;
+  sidebar.setTab(id);
+  if (id === 'sections') requestTree();
+  if (!caos.e2e) caos.settings.set({ sideTab: id });
+}
+
+// persist=false when WE opened it for you (after saving a recording): a drawer
+// you did not ask for should not become the state you boot into.
+function setLibraryOpen(open, persist = true) {
+  state.libraryOpen = !!open;
+  sidebar.setLibraryOpen(state.libraryOpen);
+  if (persist && !caos.e2e) caos.settings.set({ libraryOpen: state.libraryOpen });
+}
+
+// Ask the guest for the page structure. Coalesced, because navigation, edits and
+// tab switches all want it and they often land together.
+let _treeTimer = null;
+function requestTree(now) {
+  clearTimeout(_treeTimer);
+  const go = () => { _treeTimer = null; sendWv('caos:request-dom-tree'); };
+  if (now) go();
+  else _treeTimer = setTimeout(go, 220);
+}
+
 
 function exportBtn(label, format) {
   return h('button', { class: 'btn btn-sm', text: label, on: { click: () => doExport(format) } });
@@ -202,8 +284,8 @@ function exportBtn(label, format) {
 function switchTab(id) {
   state.activeTab = id;
   Object.entries(tabButtons).forEach(([k, b]) => b.classList.toggle('active', k === id));
-  [notesPanel, inspectorPanel, aiPanel].forEach((p) => p.root.classList.remove('active'));
-  ({ notes: notesPanel, inspector: inspectorPanel, ai: aiPanel })[id].root.classList.add('active');
+  [notesPanel, stylePanel, aiPanel].forEach((p) => p.root.classList.remove('active'));
+  ({ notes: notesPanel, style: stylePanel, ai: aiPanel })[id].root.classList.add('active');
 }
 
 // ============================================================ SHORTCUTS
@@ -217,6 +299,20 @@ function setupShortcuts() {
     if (mod && k === 't') { e.preventDefault(); createTab(state.config.welcomeUrl); return; }
     if (mod && k === 'w') { e.preventDefault(); if (state.activeTabId) closeTab(state.activeTabId); return; }
     if (mod && k === 'r') { e.preventDefault(); const tab = activeTab(); if (wv) { try { tab && tab.loading ? wv.stop() : wv.reload(); } catch (_e) { /* ignore */ } } return; }
+    if (mod && (k === '1' || k === '2' || k === '3' || k === '4')) {
+      e.preventDefault();
+      setMode({ 1: 'inspect', 2: 'draw', 3: 'edit', 4: 'arrange' }[k]);
+      return;
+    }
+    if (!mod && !editable && (k === '?' || (k === '/' && e.shiftKey))) { e.preventDefault(); showShortcuts(); return; }
+    if (mod && k === '/') { e.preventDefault(); showShortcuts(); return; }
+    if (mod && k === 'z') {
+      e.preventDefault();
+      sendWv(e.shiftKey ? 'caos:redo-edit' : 'caos:undo-edit');
+      return;
+    }
+    if (mod && k === 'y') { e.preventDefault(); sendWv('caos:redo-edit'); return; }
+    if (mod && k === '0') { e.preventDefault(); setMode('off'); return; }
     if (!mod && k === 'escape' && !editable && state.mode !== 'off') { setMode('off'); }
   });
 }
@@ -256,6 +352,7 @@ function setActiveTab(id) {
   renderTabs();
   try { sendWv('caos:set-mode', state.mode); } catch (_e) { /* not ready */ }
   maybeRestoreAnnotations();
+  requestTree();
   persistOpenTabs();
 }
 
@@ -310,6 +407,7 @@ function setupTabWebview(tab) {
     if (isActive()) {
       if (pendingDomReady) { const r = pendingDomReady; pendingDomReady = null; r(); }
       maybeRestoreAnnotations();
+      requestTree();
     }
   });
 
@@ -347,6 +445,7 @@ function setupTabWebview(tab) {
     switch (e.channel) {
       case 'caos:ready':
         if (payload) { tab.title = payload.title || tab.title; if (isActive()) state.currentTitle = tab.title; }
+        if (isActive()) requestTree();
         break;
       case 'caos:annotation':
         if (isActive()) onAnnotation(payload);
@@ -367,11 +466,52 @@ function setupTabWebview(tab) {
         if (w) { replayWaiters.delete(payload.index); w.resolve(payload); }
         break;
       }
+      case 'caos:style-picked':
+        if (isActive()) {
+          state.styleTarget = payload && payload.selector;
+          stylePanel.setStyle(payload);
+        }
+        break;
+      case 'caos:element-collected':
+        if (isActive() && elementCapture) {
+          const done = elementCapture;
+          elementCapture = null;
+          done(payload);
+        }
+        break;
+      case 'caos:text-editing':
+        if (isActive()) stylePanel.setTextEditing(payload && payload.editing);
+        break;
+      case 'caos:edit-stacks':
+        if (isActive()) {
+          state.editStacks = payload || { undo: 0, redo: 0 };
+          syncToolbar();
+        }
+        break;
+      case 'caos:annotation-update':
+        // A style session grew — patch the note it already filed.
+        if (isActive() && payload && payload.id) patchAnnotation(payload.id, payload.patch);
+        break;
+      case 'caos:mode-changed':
+        // The guest walked itself into a mode (double-click in Inspect).
+        if (isActive() && payload && payload.mode && payload.mode !== state.mode) {
+          state.mode = payload.mode;
+          syncToolbar();
+          if (payload.mode === 'edit') switchTab('style');
+        }
+        break;
       case 'caos:dom-tree':
-        if (isActive()) inspectorPanel.setTree(payload);
+        if (isActive()) sectionsPanel.setTree(payload);
         break;
       case 'caos:layout-picked':
-        if (isActive()) inspectorPanel.setLayout(payload);
+        if (!isActive()) break;
+        layersPanel.setLayout(payload);
+        // Keep Sections in step with whatever the page says is selected —
+        // clicking an element in Inspect mode lands here too.
+        {
+          const chain = ((payload && payload.breadcrumb) || []).map((n) => n && n.selector).filter(Boolean);
+          if (chain.length) sectionsPanel.setActive(chain);
+        }
         break;
       case 'caos:assert-pick':
         if (isActive()) onAssertPick(payload);
@@ -466,13 +606,118 @@ function syncToolbar() {
     canGoBack: wv && wv.canGoBack ? safe(() => wv.canGoBack()) : false,
     canGoForward: wv && wv.canGoForward ? safe(() => wv.canGoForward()) : false,
     hasRecording: !!state.selectedRecording,
+    recordingName: state.selectedRecording ? state.selectedRecording.name : '',
+    recordingSteps: state.selectedRecording && state.selectedRecording.steps ? state.selectedRecording.steps.length : 0,
     replaying: state.replaying,
     bookmarked: state.bookmarked,
     loading: !!(activeTab() && activeTab().loading),
     aiProvider,
     providerReady: !!(aiProvider && state.providers && state.providers[aiProvider]),
     profileName: state.settings && state.settings.profile && state.settings.profile.displayName,
+    undoCount: state.editStacks.undo,
+    redoCount: state.editStacks.redo,
   });
+  syncStatus();
+}
+
+const MOD = navigator.platform.toLowerCase().includes('mac') ? '⌘' : 'Ctrl';
+const TOOL_HINTS = {
+  off: {
+    dot: 'off',
+    text: 'No tool active — pick one above, or press ' + MOD + '1 Inspect · ' + MOD + '2 Draw · ' + MOD + '3 Edit · ' + MOD + '4 Rearrange',
+  },
+  inspect: {
+    dot: 'inspect',
+    text: 'Inspect — click any element to capture a note · double-click text to edit it · Esc to stop',
+  },
+  draw: {
+    dot: 'draw',
+    text: 'Draw — drag on the page to circle an area, release to write the note · Esc to stop',
+  },
+  edit: {
+    dot: 'edit',
+    text: 'Edit — click to select, click again to type · style it in the Style panel · Esc to stop',
+  },
+  arrange: {
+    dot: 'arrange',
+    text: 'Rearrange — drag any element to move it (into any container) · Alt-drag to free-move · handles to resize · Esc cancels',
+  },
+  assert: {
+    dot: 'assert',
+    text: 'Assert — click an element to add a check to the recording',
+  },
+};
+
+function syncStatus() {
+  if (!statusLeft) return;
+  let hint = TOOL_HINTS[state.mode] || TOOL_HINTS.off;
+  if (state.recordingBuffer) {
+    hint = { dot: 'rec', text: 'Recording — every click, input and scroll is captured · press Stop when you are done' };
+  } else if (state.replaying) {
+    hint = { dot: 'rec', text: 'Replaying the journey — Cancel stops it' };
+  }
+  clear(statusLeft);
+  statusLeft.appendChild(h('span', { class: 'status-dot dot-' + hint.dot }));
+  statusLeft.appendChild(h('span', { class: 'status-text', text: hint.text }));
+
+  clear(statusRight);
+  const notes = state.annotations.length;
+  const edits = state.editStacks.undo;
+  if (edits) {
+    statusRight.appendChild(h('span', { class: 'status-chip', text: edits + ' page edit' + (edits === 1 ? '' : 's') + ' · ' + MOD + 'Z to undo' }));
+  }
+  statusRight.appendChild(
+    h('span', { class: 'status-meta', text: notes + (notes === 1 ? ' note' : ' notes') + (state.currentSession ? ' · ' + state.currentSession.name : '') })
+  );
+  statusRight.appendChild(
+    h('button', { class: 'status-help', title: 'Keyboard shortcuts (?)', text: '?', on: { click: showShortcuts } })
+  );
+}
+
+// ---- the shortcut sheet -------------------------------------------------------
+const SHORTCUTS = [
+  ['Tools', [
+    [MOD + '1', 'Inspect — capture notes'],
+    [MOD + '2', 'Draw — circle a region'],
+    [MOD + '3', 'Edit — copy and style'],
+    [MOD + '4', 'Rearrange — move and resize'],
+    [MOD + '0 / Esc', 'Put the tools away'],
+  ]],
+  ['On the page', [
+    ['Click', 'Capture / select the element'],
+    ['Double-click', 'Edit the text right there'],
+    ['Drag', 'Move it (Rearrange) or circle it (Draw)'],
+    ['Alt-drag', 'Free-move, ignoring the layout'],
+    ['Esc', 'Cancel the drag or close the note'],
+  ]],
+  ['History', [
+    [MOD + 'Z', 'Undo the last page edit'],
+    [MOD + '⇧Z / ' + MOD + 'Y', 'Redo it'],
+  ]],
+  ['Notes & editor', [
+    [MOD + '↵', 'Save the note you are writing'],
+    ['Drag a label', 'Scrub a number in the Style panel'],
+  ]],
+  ['Browsing', [
+    [MOD + 'L', 'Focus the address bar'],
+    [MOD + 'T / ' + MOD + 'W', 'New tab / close tab'],
+    [MOD + 'R', 'Reload the page'],
+  ]],
+];
+
+function showShortcuts() {
+  const body = h('div', { class: 'shortcuts' }, SHORTCUTS.map(([group, rows]) =>
+    h('div', { class: 'sc-group' }, [
+      h('div', { class: 'sc-group-title', text: group }),
+      h('div', { class: 'sc-rows' }, rows.map(([keys, what]) =>
+        h('div', { class: 'sc-row' }, [
+          h('kbd', { class: 'sc-keys', text: keys }),
+          h('span', { class: 'sc-what', text: what }),
+        ])
+      )),
+    ])
+  ));
+  modal({ title: 'Keyboard shortcuts', width: 540, body, actions: [{ label: 'Close', kind: 'primary' }] });
 }
 
 function safe(fn) { try { return fn(); } catch (_e) { return false; } }
@@ -487,6 +732,11 @@ function sendWv(channel, ...args) {
 function setMode(mode) {
   state.mode = state.mode === mode ? 'off' : mode;
   if (wv) sendWv('caos:set-mode', state.mode);
+  // Edit mode has a panel: put the properties in front of you when it goes on.
+  if (state.mode === 'edit') {
+    switchTab('style');
+    sendWv('caos:request-style', {});
+  }
   syncToolbar();
 }
 
@@ -501,6 +751,54 @@ async function onAnnotation(raw) {
   bumpSessionCount(session.id, 1);
   toast(`Note captured — ${saved.action}`, 'success');
   refreshPins();
+}
+
+// ---- single-element export ---------------------------------------------------
+// Ask the guest for everything the selected element needs to stand on its own,
+// then let the main process fetch its assets and package it.
+let elementCapture = null;
+
+function captureElement(selector) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+    elementCapture = done;
+    sendWv('caos:collect-element', { selector: selector || '' });
+    setTimeout(() => { elementCapture = null; done(null); }, 8000);
+  });
+}
+
+async function exportSelectedElement() {
+  const selector = state.styleTarget;
+  if (!selector) { toast('Select an element first', 'warn'); return null; }
+  const busy = toast('Capturing element…', 'info', 10000);
+  let bundle;
+  try {
+    const payload = await captureElement(selector);
+    if (!payload) { busy(); toast('Could not capture that element', 'error'); return null; }
+    bundle = await caos.export.buildElement(payload, 'auto');
+  } catch (err) {
+    busy();
+    toast('Export failed: ' + ((err && err.message) || err), 'error', 5000);
+    return null;
+  }
+  busy();
+  const saved = await caos.export.saveElement({ name: bundle.name, base64: bundle.base64 });
+  if (!saved) return null;
+  const kb = Math.max(1, Math.round((bundle.meta.bytes || 0) / 1024));
+  const extra = bundle.meta.assets ? ` · ${bundle.meta.assets} asset${bundle.meta.assets === 1 ? '' : 's'}` : '';
+  toast(`Exported ${bundle.kind === 'zip' ? 'zip' : 'file'} — ${kb} KB${extra}`, 'success', 4000);
+  if (bundle.warnings && bundle.warnings.length) {
+    toast(bundle.warnings[0] + (bundle.warnings.length > 1 ? ` (+${bundle.warnings.length - 1} more)` : ''), 'warn', 5000);
+  }
+  return saved;
+}
+
+// Patch a note the guest already filed (a style session that keeps growing).
+async function patchAnnotation(id, patch) {
+  const a = state.annotations.find((x) => x.id === id);
+  if (!a || !patch) return;
+  await updateAnnotation(a, patch);
 }
 
 async function updateAnnotation(a, patch) {
@@ -797,14 +1095,22 @@ async function stopRecording() {
   }
   const name = await promptDialog({ title: 'Save recording', label: 'Recording name', value: 'Journey', placeholder: 'e.g. Checkout flow' });
   if (!name) { toast('Recording discarded'); return; }
-  await caos.recordings.create({
+  const saved = await caos.recordings.create({
     projectId: state.currentProject ? state.currentProject.id : null,
     name,
     startUrl: buffer.startUrl,
     steps: buffer.steps,
   });
   await refreshRecordings();
-  toast(`Saved “${name}” (${buffer.steps.length} steps)`, 'success');
+  // Recordings live in the Library drawer, which is folded away by default —
+  // saving one used to leave no visible trace at all. Select it (so Replay
+  // lights up), open the drawer, and point at the row.
+  if (saved) {
+    selectRecording(saved);
+    setLibraryOpen(true, false);
+    setTimeout(() => sidebar.revealRow(saved.id), 60);
+  }
+  toast(`Saved “${name}” (${buffer.steps.length} steps) — Library ▸ Recordings`, 'success', 4200);
 }
 
 async function refreshRecordings() {
@@ -832,6 +1138,112 @@ async function deleteRecording(r) {
 }
 
 // ============================================================ REPLAY
+// ---- exporting a journey ------------------------------------------------------
+// Three shapes, one journey: a film of it happening, or a written account of
+// every step for a bug report / an agent. The written ones describe the whole
+// run, including how the last replay went.
+function exportRecording(rec) {
+  if (!rec) return;
+  const pick = (fn) => () => { m.close(); fn(); return true; };
+  const m = modal({
+    title: 'Export “' + rec.name + '”',
+    width: 460,
+    body: h('div', { class: 'export-choices' }, [
+      h('div', { class: 'export-choice', on: { click: pick(() => exportRecordingVideo(rec)) } }, [
+        h('div', { class: 'ec-title', text: '🎬  Video (.webm)' }),
+        h('div', { class: 'ec-sub', text: 'Replays the journey now and films the page while it runs.' }),
+      ]),
+      h('div', { class: 'export-choice', on: { click: pick(() => exportRecordingDoc(rec, 'pdf')) } }, [
+        h('div', { class: 'ec-title', text: '📄  PDF report' }),
+        h('div', { class: 'ec-sub', text: 'Every step in order — targets, values, scrolls, assertions and the last replay’s results.' }),
+      ]),
+      h('div', { class: 'export-choice', on: { click: pick(() => exportRecordingDoc(rec, 'markdown')) } }, [
+        h('div', { class: 'ec-title', text: '📝  Markdown' }),
+        h('div', { class: 'ec-sub', text: 'The same account as text, for an issue or a coding agent.' }),
+      ]),
+    ]),
+    actions: [{ label: 'Cancel', kind: 'ghost' }],
+  });
+}
+
+async function exportRecordingDoc(rec, kind) {
+  try {
+    if (kind === 'pdf') {
+      const out = await caos.export.recordingPdf(rec.id);
+      const saved = await caos.export.saveBinary({
+        defaultName: out.name,
+        base64: out.base64,
+        filters: [{ name: 'PDF', extensions: ['pdf'] }],
+      });
+      if (saved) toast('Saved ' + out.name + ' (' + Math.max(1, Math.round(out.bytes / 1024)) + ' KB)', 'success');
+      return saved;
+    }
+    const out = await caos.export.recordingReport(rec.id, 'markdown');
+    const saved = await caos.fs.save({ defaultName: out.name, content: out.content });
+    if (saved) toast('Saved ' + out.name, 'success');
+    return saved;
+  } catch (err) {
+    toast('Export failed: ' + ((err && err.message) || err), 'error', 5000);
+    return null;
+  }
+}
+
+// Film the guest page while the journey replays. The main process hands us the
+// page's own web contents, so the frame is the page and nothing else.
+async function exportRecordingVideo(rec) {
+  if (state.replaying || state.recordingBuffer) { toast('Finish what is running first', 'warn'); return null; }
+  selectRecording(rec);
+  let stream = null;
+  let recorder = null;
+  const chunks = [];
+  try {
+    await caos.export.videoSource(wv.getWebContentsId());
+    stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: false });
+    const mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find(
+      (t) => window.MediaRecorder && MediaRecorder.isTypeSupported(t)
+    );
+    recorder = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 4_000_000 } : undefined);
+    recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+    recorder.start(250);
+  } catch (err) {
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    toast('Could not start recording the screen: ' + ((err && err.message) || err), 'error', 5000);
+    return null;
+  }
+
+  toast('Filming the replay…', 'info', 2000);
+  try {
+    await replaySelected();
+  } finally {
+    await new Promise((r) => setTimeout(r, 400)); // let the last frames land
+    try { recorder.stop(); } catch (_e) { /* ignore */ }
+    await new Promise((r) => { recorder.onstop = r; setTimeout(r, 1500); });
+    stream.getTracks().forEach((t) => t.stop());
+    await caos.export.videoSource(null);
+  }
+
+  const blob = new Blob(chunks, { type: 'video/webm' });
+  if (!blob.size) { toast('Nothing was captured', 'error'); return null; }
+  const base64 = await blobToBase64(blob);
+  const slug = (rec.name || 'journey').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'journey';
+  const saved = await caos.export.saveBinary({
+    defaultName: slug + '.webm',
+    base64,
+    filters: [{ name: 'WebM video', extensions: ['webm'] }],
+  });
+  if (saved) toast('Saved ' + slug + '.webm (' + Math.max(1, Math.round(blob.size / 1024)) + ' KB)', 'success', 4000);
+  return saved;
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result).split(',')[1] || '');
+    fr.onerror = reject;
+    fr.readAsDataURL(blob);
+  });
+}
+
 async function replaySelected() {
   const rec = state.selectedRecording;
   if (!rec || state.replaying || state.recordingBuffer) return;

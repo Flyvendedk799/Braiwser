@@ -44,6 +44,10 @@ const DEFAULT_SETTINGS = {
     openai: 'gpt-4o',
   },
   replayDelayMs: 600,
+  // Left sidebar: which page tab is showing, and whether the library drawer
+  // (projects / sessions / recordings / bookmarks / history) is expanded.
+  sideTab: 'sections',
+  libraryOpen: false,
   theme: 'dark',
   restoreAnnotationsOnLoad: true,
   // Optional shell command run on agent hand-off, in the project dir.

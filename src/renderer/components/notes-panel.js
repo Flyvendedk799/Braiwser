@@ -13,6 +13,7 @@ export function createNotesPanel(config, actions) {
   let editingId = null;
 
   const filters = h('div', { class: 'filters' });
+  const tally = h('span', { class: 'filter-tally' });
   const list = h('div', { class: 'notes-list' });
   const root = h('div', { class: 'tab-body', dataset: { tab: 'notes' } }, [filters, list]);
 
@@ -36,6 +37,7 @@ export function createNotesPanel(config, actions) {
       );
     });
     filters.appendChild(h('div', { class: 'filter-label', text: 'Status' }));
+    filters.appendChild(tally);
     [['all', 'All'], ['open', 'Open'], ['resolved', 'Resolved']].forEach(([id, label]) => {
       filters.appendChild(
         h('button', {
@@ -156,6 +158,11 @@ export function createNotesPanel(config, actions) {
     clear(list);
     const items = filtered();
     actions.onCount(annotations.length, items.length);
+    tally.textContent = annotations.length
+      ? items.length === annotations.length
+        ? annotations.length + (annotations.length === 1 ? ' note' : ' notes')
+        : items.length + ' of ' + annotations.length
+      : '';
     if (!annotations.length) {
       list.appendChild(placeholder('inspect', 'No notes yet', 'Toggle Inspect or Draw, then click an element on the page to capture it and leave a note.'));
       return;
@@ -186,6 +193,8 @@ export function createNotesPanel(config, actions) {
     editingId = null;
     render();
   }
+
+  render(); // an empty Notes tab still needs its filters and its empty state
 
   return { root, setAnnotations, render };
 }

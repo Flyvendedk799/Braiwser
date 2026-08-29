@@ -95,6 +95,14 @@ function toPrompt(session, annotations, consoleLog) {
       const d = a.edit.details;
       line += ` Reorder the element in the markup from index ${d.fromIndex} to index ${d.toIndex} (0-based) inside \`${d.parentSelector}\`.`;
     }
+    if (a.edit && a.edit.type === 'text' && a.edit.details && a.edit.details.after != null) {
+      const d = a.edit.details;
+      line += ' Replace the copy "' + String(d.before || '').trim() + '" with "' + String(d.after).trim() + '".';
+    }
+    if (a.edit && a.edit.type === 'reparent' && a.edit.details && a.edit.details.parentSelector != null) {
+      const d = a.edit.details;
+      line += ` Move the element in the markup out of \`${d.fromParentSelector}\` (index ${d.fromIndex}) and into \`${d.parentSelector}\` at index ${d.toIndex} (0-based).`;
+    }
 
     // Surface priority when it is above the baseline so the agent can order work.
     if (a.priority && a.priority !== 'normal') {

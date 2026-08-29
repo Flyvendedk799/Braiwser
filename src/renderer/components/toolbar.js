@@ -31,13 +31,23 @@ export function createToolbar(actions) {
       on: { click: cfg.onClick },
     });
 
+  const undoBtn = btn({ icon: 'undo', title: 'Undo the last page edit', onClick: actions.undo });
+  const redoBtn = btn({ icon: 'redo', title: 'Redo the last undone edit', onClick: actions.redo });
+
+  undoBtn.setAttribute('data-act', 'undo');
+  redoBtn.setAttribute('data-act', 'redo');
+
   const backBtn = btn({ icon: 'back', title: 'Back', onClick: actions.back });
   const fwdBtn = btn({ icon: 'forward', title: 'Forward', onClick: actions.forward });
   const reloadBtn = btn({ icon: 'reload', title: 'Reload', onClick: actions.reload });
 
-  const inspectBtn = btn({ icon: 'inspect', label: 'Inspect', title: 'Inspect element — capture a note and view its layout hierarchy (click an element)', onClick: () => actions.toggleMode('inspect') });
-  const drawBtn = btn({ icon: 'draw', label: 'Draw', title: 'Drag on the page to circle an area, then add a note', onClick: () => actions.toggleMode('draw') });
-  const arrangeBtn = btn({ icon: 'move', label: 'Rearrange', title: 'Rearrange the layout — click to select, drag to reorder, Alt-drag to free-move, handles to resize, plus smart re-layout. Every edit is captured as a note.', onClick: () => actions.toggleMode('arrange') });
+  // The three page tools are one segmented control: they are mutually
+  // exclusive, and which one is on has to be readable at a glance.
+  const MOD = navigator.platform.toLowerCase().includes('mac') ? '⌘' : 'Ctrl';
+  const inspectBtn = btn({ icon: 'inspect', label: 'Inspect', title: `Inspect element — capture a note and view its layout hierarchy (click an element) · ${MOD}1`, onClick: () => actions.toggleMode('inspect') });
+  const drawBtn = btn({ icon: 'draw', label: 'Draw', title: `Drag on the page to circle an area, then add a note · ${MOD}2`, onClick: () => actions.toggleMode('draw') });
+  const editBtn = btn({ icon: 'edit', label: 'Edit', title: `Edit content and style — click an element to change its copy, type, colour, spacing and size (double-click text in Inspect to jump straight here) · ${MOD}4`, onClick: () => actions.toggleMode('edit') });
+  const arrangeBtn = btn({ icon: 'move', label: 'Rearrange', title: `Rearrange the layout — drag any element to move it (into any container), click again to go deeper, Alt-drag to free-move, handles to resize, plus smart re-layout. Every edit is captured as a note. · ${MOD}3`, onClick: () => actions.toggleMode('arrange') });
   const assertBtn = btn({ icon: 'check', label: 'Assert', title: 'Add an assertion to the recording (click an element)', onClick: () => actions.toggleMode('assert') });
 
   const recBtn = btn({ icon: 'record', class: 'rec', label: 'Record', title: 'Record a user journey', onClick: actions.toggleRecord });
@@ -55,7 +65,9 @@ export function createToolbar(actions) {
     h('div', { class: 'address' }, [lock, addressInput, bookmarkBtn, suggestions]),
     h('div', { class: 'tb-group' }, [openFileBtn, openFolderBtn]),
     h('div', { class: 'tb-sep' }),
-    h('div', { class: 'tb-group' }, [inspectBtn, drawBtn, arrangeBtn]),
+    h('div', { class: 'tb-group' }, [undoBtn, redoBtn]),
+    h('div', { class: 'tb-sep' }),
+    h('div', { class: 'tb-group tb-seg' }, [inspectBtn, drawBtn, editBtn, arrangeBtn]),
     h('div', { class: 'tb-sep' }),
     h('div', { class: 'tb-group' }, [recBtn, replayBtn, assertBtn]),
     h('div', { class: 'tb-sep' }),
@@ -63,10 +75,19 @@ export function createToolbar(actions) {
   ]);
 
   function update(state) {
-    const { mode, recording, currentUrl, canGoBack, canGoForward, hasRecording, replaying, bookmarked, loading, aiProvider, providerReady, profileName } = state;
+    const { mode, recording, currentUrl, canGoBack, canGoForward, hasRecording, replaying, bookmarked, loading, aiProvider, providerReady, profileName, undoCount, redoCount, recordingName, recordingSteps } = state;
+    replayBtn.title = hasRecording
+      ? `Replay “${recordingName}”${recordingSteps ? ' (' + recordingSteps + ' steps)' : ''}`
+      : 'Record a journey first — then this replays it';
+    // Undo/redo cover every edit made to the page — rearrange, style, copy.
+    undoBtn.disabled = !undoCount;
+    redoBtn.disabled = !redoCount;
+    undoBtn.title = undoCount ? `Undo ${undoCount} page edit${undoCount === 1 ? '' : 's'} (${MOD}Z)` : 'Nothing to undo';
+    redoBtn.title = redoCount ? `Redo ${redoCount} undone edit${redoCount === 1 ? '' : 's'} (${MOD}\u21e7Z)` : 'Nothing to redo';
     bookmarkBtn.textContent = bookmarked ? '★' : '☆';
     bookmarkBtn.classList.toggle('on', !!bookmarked);
     inspectBtn.classList.toggle('active', mode === 'inspect');
+    editBtn.classList.toggle('active', mode === 'edit');
     drawBtn.classList.toggle('active', mode === 'draw');
     arrangeBtn.classList.toggle('active', mode === 'arrange');
     assertBtn.classList.toggle('active', mode === 'assert');

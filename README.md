@@ -15,13 +15,39 @@ to a coding agent.
 - 🌐 **Open anything** — a local project folder (auto-detects `index.html`), a single
   file, or any URL. Full back/forward/reload + address bar (with **autocomplete** from
   history/bookmarks), **multiple tabs**, and **history + bookmarks** (☆ in the address
-  bar; both in the sidebar).
+  bar; both in the sidebar's Library drawer).
 - ⌖ **Inspect mode** — DevTools-style hover highlight; click an element to capture its
-  CSS selector, id, classes, text, attributes, computed styles, and bounding box.
+  CSS selector, id, classes, text, attributes, computed styles, and bounding box. The
+  click drops a **comment bubble** on the element’s top-right corner — open it when you
+  are ready to write. Elements that already carry notes keep their bubble on the page
+  with the number of notes on them, whether or not anything is selected.
+  Clicking also lights the element up in the Sections tree; double-clicking hands it to
+  Edit mode. Tools switch with `Ctrl/⌘1`–`4`.
 - ✎ **Draw mode** — freehand-circle (or underline) a region and attach a note to it.
-- ✥ **Rearrange mode** — edit the layout live: click to select any element, drag to
-  reorder it among its siblings, Alt-drag to free-move, pull handles to resize, hide
-  elements, or apply a smart re-layout (row / column / grid / tidy) to a container.
+- ✎ **Edit mode** — the visual editor: click any element to select it, type straight
+  into its text, and drive font, size, weight, line height, letter spacing,
+  alignment, colour, opacity, background, radius, border, padding, margin and size
+  from the **Style** panel. Controls apply live as you drag them and fold into ONE
+  edit note per element carrying the exact CSS. Double-click text in Inspect mode to
+  land here with the caret already in it. Every property you touch is marked and
+  revertible on its own, numbers scrub by dragging their label, colours come with the
+  page's own palette, sizes take px / rem / em / %, and **Copy CSS** / **Reset** sit in
+  the panel header.
+- 📦 **Export a single element** — like a login button on some site? Click it and hit
+  **Export** in the Style panel. You get a standalone `.html` (assets inlined as data
+  URIs) — or a `.zip` (`index.html`, `styles.css`, `assets/`, `element.json`,
+  `README.md`) when it carries real files. The capture takes the page's own matching
+  CSS rules — hover states, media queries, custom properties, @font-face, keyframes —
+  plus the typography and surface it was sitting in, and falls back to baked computed
+  styles when the stylesheets are cross-origin (the manifest says which mode was used).
+- ↶ **Undo / redo** — in the header, across every kind of page edit (copy, style,
+  reorder, re-parent, resize, hide, re-layout). Undo also retracts the note it filed;
+  redo brings it back. `Ctrl/⌘Z` and `Ctrl/⌘⇧Z`.
+- ✥ **Rearrange mode** — edit the layout live: drag any element to move it (among its
+  siblings or into another container) with a ghost under the cursor and the drop slot
+  shown as you go, click the selection again to go a level deeper, Alt-drag to
+  free-move, pull handles to resize, hide elements, or apply a smart re-layout
+  (row / column / grid / tidy) to a container.
   Every change is previewed on the page AND captured as an `edit` note carrying the
   exact CSS / reorder details, so it exports straight to a coding agent. Undo/Reset
   revert the page and retract the notes.
@@ -33,7 +59,12 @@ to a coding agent.
   everything is persisted locally.
 - 🎬 **Record & replay** — capture a real user journey (clicks, inputs, keys, scrolls,
   navigations) and replay it step-by-step through the browser.
-- 🌳 **DOM tree inspector** — pull a live, collapsible DOM tree; hover to highlight.
+- 🧱 **Sections & Layers** — the left sidebar is the page: **Sections** lists it as a
+  Shopify-style tree named the way you'd name it (heading text, id, landmark), where a
+  click selects and jumps to the element, the eye hides it, and dragging a row reorders
+  it; **Layers** zooms in on the selected element's container and stacking order. Both
+  record their changes as `edit` notes. Projects, sessions, recordings, bookmarks and
+  history are folded away behind the **Library** button at the bottom.
 - 🤖 **AI assistant** — transcribe notes into a polished review, generate a coding-agent
   prompt, cluster by theme, or summarize. First-run onboarding and the always-available
   **Profile** control let you choose Claude or OpenAI, set each model, and add or replace
@@ -88,7 +119,7 @@ src/
   renderer/                   # the shell UI (contextIsolation on, no Node)
     index.html · app.js       # controller: state, webview wiring, all flows
     lib/dom.js                # h()/toast/modal/confirm helpers
-    components/               # toolbar, sidebar, notes-panel, inspector-panel, ai-panel, settings-modal
+    components/               # toolbar, sidebar, sections-panel, layers-panel, notes-panel, ai-panel, settings-modal
     styles/app.css            # dark theme
     welcome.html
   webview/                    # injected into the guest page (preload, Node require enabled)

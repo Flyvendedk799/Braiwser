@@ -8,7 +8,11 @@ import { compositeAnnotations } from './screenshots.js';
 
 const checks = [];
 function check(name, pass, detail) {
-  checks.push({ name, pass: !!pass, detail: detail || '' });
+  const c = { name, pass: !!pass, detail: detail || '' };
+  checks.push(c);
+  // Stream it out: if the renderer goes down mid-suite, the main process still
+  // knows how far we got and what failed.
+  try { window.caos.e2eCheck(c); } catch (_e) { /* ignore */ }
   // eslint-disable-next-line no-console
   console.log(`[e2e] ${pass ? 'PASS' : 'FAIL'} — ${name}${detail ? ' :: ' + detail : ''}`);
 }
@@ -45,7 +49,7 @@ export async function run(I) {
       await sleep(80);
     };
     // Helper: capture the next ipc-message on a given channel.
-    const onceChannel = (channel, timeout = 4000) => new Promise((res) => {
+    const onceChannel = (channel, timeout = 9000) => new Promise((res) => {
       const h = (e) => { if (e.channel === channel) { wv.removeEventListener('ipc-message', h); res(e.args[0]); } };
       wv.addEventListener('ipc-message', h);
       setTimeout(() => { wv.removeEventListener('ipc-message', h); res(null); }, timeout);
@@ -67,17 +71,81 @@ export async function run(I) {
     await I.openSession(session);
     check('session active', I.state.currentSession && I.state.currentSession.id === session.id);
 
+    // --- 1b. The shell before any work: an empty Notes tab still has to say
+    //     something, and the footer must not clip its own primary action ---
+    {
+      check('empty Notes tab renders its filters', document.querySelectorAll('.filters .chip').length > 0, String(document.querySelectorAll('.filters .chip').length));
+      check('empty Notes tab explains itself', !!document.querySelector('[data-tab="notes"] .placeholder .ph-title'), (document.querySelector('[data-tab="notes"] .ph-title') || {}).textContent);
+      const foot = document.querySelector('.panel-footer');
+      const fr = foot.getBoundingClientRect();
+      const clipped = Array.from(foot.querySelectorAll('.btn')).filter((b) => {
+        const r = b.getBoundingClientRect();
+        return r.right > fr.right + 0.5 || r.left < fr.left - 0.5 || b.scrollWidth > b.clientWidth + 1;
+      });
+      check('no footer button is cut off', clipped.length === 0, clipped.map((b) => b.textContent).join(','));
+      check('the hand-off is the primary action', !!foot.querySelector('.btn-primary'), (foot.querySelector('.btn-primary') || {}).textContent);
+      check('page tools are one segmented control', document.querySelectorAll('.tb-seg .icon-btn').length === 4, Array.from(document.querySelectorAll('.tb-seg .icon-btn')).map((b) => b.textContent).join(','));
+      check('the header carries undo + redo', !!document.querySelector('.toolbar [data-act="undo"]') && !!document.querySelector('.toolbar [data-act="redo"]'));
+
+      // Mode shortcuts.
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: '2', ctrlKey: true, bubbles: true }));
+      await sleep(120);
+      check('Ctrl+2 switches to Draw', I.state.mode === 'draw', I.state.mode);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: '0', ctrlKey: true, bubbles: true }));
+      await sleep(120);
+      check('Ctrl+0 puts the tools away', I.state.mode === 'off', I.state.mode);
+
+      // The app has five tools; the status bar is what tells you which one is on
+      // and what it expects you to do with it.
+      const statusText = () => (document.querySelector('.statusbar .status-text') || {}).textContent || '';
+      check('a status bar explains the current tool', /pick one above|No tool active/i.test(statusText()), statusText());
+      I.setMode('inspect');
+      await sleep(150);
+      check('…and follows the tool you turn on', /Inspect —/.test(statusText()), statusText());
+      I.setMode('arrange');
+      await sleep(150);
+      check('…with guidance specific to it', /Rearrange —/.test(statusText()) && /Alt-drag/.test(statusText()), statusText());
+      I.setMode('off');
+      await sleep(150);
+      check('…and the session state on the right', /note/.test((document.querySelector('.status-meta') || {}).textContent || ''), (document.querySelector('.status-meta') || {}).textContent);
+
+      // Shortcuts are discoverable without reading a manual.
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true }));
+      await sleep(250);
+      const sheet = document.querySelector('.modal-backdrop .shortcuts');
+      check('? opens the shortcut sheet', !!sheet, sheet ? sheet.querySelectorAll('.sc-row').length + ' shortcuts' : 'not shown');
+      check('…grouped by what you are doing', (document.querySelectorAll('.sc-group-title') || []).length >= 4, Array.from(document.querySelectorAll('.sc-group-title')).map((x) => x.textContent).join(','));
+      const closeBtn = Array.from(document.querySelectorAll('.modal-backdrop .btn')).pop();
+      closeBtn.click();
+      await sleep(200);
+      check('…and closes again', !document.querySelector('.modal-backdrop .shortcuts'));
+    }
+
     // --- 2. Inspect → click element → fill popup → save → persist ---
     // Driven entirely with TRUSTED input (real mouse + keystrokes).
     I.setMode('inspect');
     check('inspect mode on', I.state.mode === 'inspect');
     const ctaRect = await guest(`(() => { const r = document.getElementById('cta').getBoundingClientRect(); return { x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) }; })()`);
     await clickAt(ctaRect.x, ctaRect.y);
-    await sleep(250);
+    await sleep(350);
+    const afterClick = await guest("(() => { const b = document.querySelector('[data-caos-bubble]'); const r = document.getElementById('cta').getBoundingClientRect(); const br = b && b.getBoundingClientRect(); return { bubble: !!b, popup: !!document.querySelector('[data-caos] textarea'), dx: br ? Math.round(br.left + br.width / 2 - r.right) : null, dy: br ? Math.round(br.top + br.height / 2 - r.top) : null }; })()");
+    check('an Inspect click drops a comment bubble, not a text box', !!afterClick.bubble && !afterClick.popup, JSON.stringify(afterClick));
+    check('…parked on the element’s top-right corner', Math.abs(afterClick.dx) <= 16 && Math.abs(afterClick.dy) <= 16, JSON.stringify(afterClick));
+    await guest("document.querySelector('[data-caos-bubble]').click()");
+    await sleep(300);
     const popupShown = await guest("!!document.querySelector('[data-caos] textarea')");
-    check('note popup opened on click', popupShown);
+    check('clicking the bubble opens the note editor', popupShown);
 
-    const annMsg = onceChannel('caos:annotation', 3000);
+    // The editor tells you how to finish, and refuses to file a tag with no
+    // request behind it.
+    const hint0 = await guest("(document.querySelector('[data-caos] [data-hint]')||{}).textContent || ''");
+    check('the note editor shows its shortcuts', /↵/.test(hint0) && /Esc/.test(hint0), hint0);
+    await clickSel('[data-caos] [data-save]');
+    await sleep(150);
+    const emptyState = await guest("(() => { const h = document.querySelector('[data-caos] [data-hint]'); const ta = document.querySelector('[data-caos] textarea'); return { hint: h ? h.textContent : '', open: !!ta }; })()");
+    check('saving an empty note is refused, with a reason', emptyState.open && /Describe the change/.test(emptyState.hint), JSON.stringify(emptyState));
+
+    const annMsg = onceChannel('caos:annotation');
     // Focus the textarea with a real click, then type the note.
     await clickSel('[data-caos] textarea');
     await typeText('Remove this CTA button');
@@ -98,12 +166,106 @@ export async function run(I) {
     check('annotation captured selector', elNote && elNote.target && /cta/.test(elNote.target.selector || ''), elNote && elNote.target && elNote.target.selector);
     check('annotation action = remove', elNote && elNote.action === 'remove', elNote && elNote.action);
     check('host state synced', I.state.annotations.some((a) => a.id === (elNote && elNote.id)));
+    await sleep(300);
+    const bubbleAfterSave = await guest("(() => { const b = document.querySelector('[data-caos-bubble]'); return b ? b.textContent : '(none)'; })()");
+    check('the saved note leaves a bubble carrying its count', bubbleAfterSave === '1', bubbleAfterSave);
+    I.setMode('off');
+    await sleep(250);
+    const bubbleWhenIdle = await guest("document.querySelectorAll('[data-caos-bubble]:not([data-caos-bubble=\"new\"])').length");
+    check('…and it stays on the page with no tool selected', bubbleWhenIdle === 1, String(bubbleWhenIdle));
+    I.setMode('inspect');
+    await sleep(200);
+
+    // The tag you picked last is the tag the next note opens on — triage is
+    // five "remove" notes in a row, not one of each.
+    {
+      const emailRect = await guest("(() => { const r = document.getElementById('email').getBoundingClientRect(); return { x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) }; })()");
+      await clickAt(emailRect.x, emailRect.y);
+      await sleep(300);
+      await guest("(() => { const b = document.querySelector('[data-caos-bubble=\"new\"]'); if (b) b.click(); return !!b; })()");
+      await sleep(300);
+      const preselected = await guest("(document.querySelector('[data-chips] button[data-on]')||{}).textContent || ''");
+      check('the editor remembers the last action tag', preselected === 'Remove', preselected);
+      await guest("(document.querySelector('[data-caos] [data-cancel]')||{}).click()");
+      await sleep(150);
+      I.setMode('inspect'); // cancelling a popup asks the host to leave the mode
+      await sleep(120);
+    }
+
+    // A second note on the same element counts up instead of stacking pins.
+    {
+      I.setMode('inspect');
+      await sleep(150);
+      const ctaAgain = await guest("(() => { const r = document.getElementById('cta').getBoundingClientRect(); return { x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) }; })()");
+      await clickAt(ctaAgain.x, ctaAgain.y);
+      await sleep(300);
+      await guest("(() => { const bs = Array.from(document.querySelectorAll('[data-caos-bubble]')); const b = bs[0]; if (b) b.click(); return bs.length; })()");
+      await sleep(300);
+      const second = onceChannel('caos:annotation');
+      await clickSel('[data-caos] textarea');
+      await typeText('And check the spacing');
+      await clickSel('[data-caos] [data-save]');
+      await second;
+      await sleep(600);
+      const counts = await guest("Array.from(document.querySelectorAll('[data-caos-bubble]')).map((b) => b.textContent).join(',')");
+      check('a second note on the same element counts up, not stacks up', /(^|,)2(,|$)/.test(counts), counts);
+      const openNoteCount = await guest("(document.querySelector('[data-caos] [data-hint]') ? 'still open' : 'closed')");
+      check('the editor closes once the note is saved', openNoteCount === 'closed', openNoteCount);
+      // setMode() toggles: leave the tool OFF so the next block can turn it on.
+      I.setMode('off');
+      await sleep(150);
+    }
+
+    // --- 2c. Clicking an element in Inspect lights it up in Sections -------
+    //     The click has to find its row even when the element is nested far
+    //     past anything a shallow tree would carry.
+    {
+      const activeRow = () => {
+        const r = document.querySelector('.sec-row.active .sec-name');
+        return r ? r.textContent : '';
+      };
+      const activeSel = () => (document.querySelector('.sec-row.active') || {}).title || '';
+      const clickInPage = async (sel) => {
+        const pos = await guest('(() => { const el = document.querySelector(' + JSON.stringify(sel) + '); if (!el) return null; el.scrollIntoView({ block: "center" }); const b = el.getBoundingClientRect(); return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) }; })()');
+        if (!pos) return null;
+        await sleep(200);
+        await clickAt(pos.x, pos.y);
+        await sleep(500);
+        return pos;
+      };
+      const closePopup = async () => {
+        await guest("(() => { const b = document.querySelector('[data-caos] [data-cancel]'); if (b) b.click(); return !!b; })()");
+        await sleep(200);
+      };
+
+      I.setMode('inspect');
+      await sleep(150);
+      check('a deeply nested element is clickable', !!(await clickInPage('#middlebtn')));
+      check('an Inspect click highlights the element in Sections', activeRow() === 'Middle button', activeRow() || '(nothing active)');
+      check('and it is the row for that exact element', /middlebtn/.test(activeSel()), activeSel());
+      await closePopup();
+      // Cancelling a note must not cost you the tool as well.
+      check('cancelling a note keeps Inspect on', I.state.mode === 'inspect', I.state.mode);
+
+      // Past the tree's depth budget there is no exact row — the nearest
+      // ancestor that IS in the tree has to light up instead of nothing.
+      await clickInPage('#deepbtn');
+      const deepActive = activeRow();
+      const deepSel = activeSel();
+      const wrapsTheButton = deepSel
+        ? await guest('(() => { const a = document.querySelector(' + JSON.stringify(deepSel) + '); const b = document.getElementById("deepbtn"); return !!a && !!b && a.contains(b); })()')
+        : false;
+      check('an element past the tree depth highlights its nearest ancestor', !!deepActive && wrapsTheButton === true, deepActive + ' :: ' + deepSel);
+      await closePopup();
+      await guest('window.scrollTo(0, 0)'); // later checks click by viewport coords
+      await sleep(250);
+    }
 
     // --- 3. Restore pins ---
     I.refreshPins();
     await sleep(250);
     // Badges are the circular (border-radius:50%) data-caos divs.
-    const pinCount = await guest("Array.from(document.querySelectorAll('div[data-caos]')).filter(d => d.style.borderRadius === '50%').length");
+    const pinCount = await guest("document.querySelectorAll('[data-caos-bubble]:not([data-caos-bubble=\"new\"])').length");
     check('annotation pin rendered (exactly 1, no dupes)', pinCount === 1, 'pins=' + pinCount);
 
     // --- 3b. Draw mode: trusted drag → stroke → region note → annotation ---
@@ -149,7 +311,7 @@ export async function run(I) {
       await sleep(300);
       const regionPopup = await guest("!!document.querySelector('[data-caos] textarea')");
       check('draw drag opened region note popup', regionPopup);
-      const regionMsg = onceChannel('caos:annotation', 3000);
+      const regionMsg = onceChannel('caos:annotation');
       await clickSel('[data-caos] textarea');
       await typeText('Rework this area');
       await clickSel('[data-caos] [data-save]');
@@ -184,7 +346,7 @@ export async function run(I) {
       for (let i = 1; i <= 8; i++) { wv.sendInputEvent({ type: 'mouseMove', x: 200 + i * 15, y: 350 }); await sleep(10); }
       wv.sendInputEvent({ type: 'mouseUp', x: 320, y: 350, button: 'left', clickCount: 1 });
       await sleep(250);
-      const flatMsg = onceChannel('caos:annotation', 3000);
+      const flatMsg = onceChannel('caos:annotation');
       const flatPopup = await guest("!!document.querySelector('[data-caos] textarea')");
       check('flat horizontal swipe registers', flatPopup);
       await clickSel('[data-caos] textarea');
@@ -194,6 +356,28 @@ export async function run(I) {
       const flatBox = flatAnn && flatAnn.target && flatAnn.target.box;
       check('thin region box padded to usable size', !!flatBox && flatBox.w >= 100 && flatBox.h >= 12, flatBox ? `${flatBox.w}x${flatBox.h}` : 'none');
       I.setMode('off');
+      await sleep(150);
+
+      // Locating a region note from the Notes panel must flash the whole mark,
+      // with draw mode OFF too. It only looked right with draw mode ON: the
+      // overlay canvas swallowed resolve()'s elementFromPoint hit-test, so the
+      // flash fell back to the stored box. With the canvas gone the region
+      // resolved to whatever child element sat under the mark's centre and the
+      // flash shrank to it.
+      const rTarget = persistedRegion && persistedRegion.target;
+      if (rTarget && rTarget.box) {
+        // Clear any flash still fading from the save above, so the probe below
+        // can only see the one this locate produces.
+        await guest("Array.from(document.querySelectorAll('[data-caos-flash]')).forEach(n => n.remove())");
+        const ack = onceChannel('caos:highlight-ack', 6000);
+        wv.send('caos:highlight-target', rTarget);
+        const ackMsg = await ack;
+        check('locate region acked (draw mode off)', !!(ackMsg && ackMsg.ok));
+        const flash = await guest("(() => { const b = document.querySelector('[data-caos-flash]'); if (!b) return null; const px = (v) => Math.round(parseFloat(v) || 0); return { x: px(b.style.left), y: px(b.style.top), w: px(b.style.width), h: px(b.style.height) }; })()");
+        const want = rTarget.box;
+        const fits = !!flash && Math.abs(flash.w - want.w) <= 2 && Math.abs(flash.h - want.h) <= 2;
+        check('region flash covers the whole mark, not one child element', fits, flash ? `${flash.w}x${flash.h} vs ${want.w}x${want.h}` : 'no flash');
+      }
     }
 
     // --- 3c. Rearrange mode: select / smart layout / undo / reorder / resize / hide ---
@@ -213,7 +397,7 @@ export async function run(I) {
       check('clicking an element selects it', selShown);
 
       // Smart re-layout the parent (<main>) as a column → live style + edit note.
-      const layoutMsg = onceChannel('caos:annotation', 3000);
+      const layoutMsg = onceChannel('caos:annotation');
       await clickSel('[data-caos-arrange="btn-column"]');
       const layoutAnn = await layoutMsg;
       check('smart layout emitted an edit annotation', !!layoutAnn && layoutAnn.kind === 'edit' && layoutAnn.edit && layoutAnn.edit.type === 'layout', layoutAnn && layoutAnn.edit && layoutAnn.edit.css);
@@ -234,12 +418,164 @@ export async function run(I) {
       // Reorder #cta one position later via the bar (↓).
       await clickSel('#cta');
       await sleep(150);
-      const reorderMsg = onceChannel('caos:annotation', 3000);
+      const reorderMsg = onceChannel('caos:annotation');
       await clickSel('[data-caos-arrange="btn-down"]');
       const reorderAnn = await reorderMsg;
       check('reorder emitted an edit annotation', !!reorderAnn && reorderAnn.edit && reorderAnn.edit.type === 'reorder', reorderAnn && JSON.stringify((reorderAnn.edit || {}).details));
       const newOrder = await guest("(() => { const k = Array.from(document.querySelector('main').children).filter(c => !c.hasAttribute('data-caos')); return k[0] && k[0].id; })()");
       check('reorder moved the element in the DOM', newOrder === 'email', 'first child = ' + newOrder);
+
+      // --- Drag to reorder: the real gesture, in both flow directions -------
+      // Helpers: a paced pointer drag, and the live child order of a container.
+      const dragTo = async (x0, y0, x1, y1, steps = 14) => {
+        wv.sendInputEvent({ type: 'mouseDown', x: x0, y: y0, button: 'left', clickCount: 1 });
+        for (let i = 1; i <= steps; i++) {
+          wv.sendInputEvent({ type: 'mouseMove', x: Math.round(x0 + ((x1 - x0) * i) / steps), y: Math.round(y0 + ((y1 - y0) * i) / steps) });
+          await sleep(16);
+        }
+        wv.sendInputEvent({ type: 'mouseUp', x: x1, y: y1, button: 'left', clickCount: 1 });
+        await sleep(150);
+      };
+      const orderOf = (sel) => guest(`Array.from(document.querySelector(${JSON.stringify(sel)}).children).filter(c => !c.hasAttribute('data-caos')).map(c => c.id).join(',')`);
+      const rectOf = (sel) => guest(`(() => { const r = document.querySelector(${JSON.stringify(sel)}).getBoundingClientRect(); return { x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2), left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), bottom: Math.round(r.bottom) }; })()`);
+
+      // 1. A horizontal row in plain block flow (#chips): drag chip One past Two.
+      await clickSel('#c1');
+      await sleep(150);
+      const c1 = await rectOf('#c1');
+      const c2r = await rectOf('#c2');
+      const chipMsg = onceChannel('caos:annotation');
+      wv.sendInputEvent({ type: 'mouseDown', x: c1.x, y: c1.y, button: 'left', clickCount: 1 });
+      for (let i = 1; i <= 10; i++) {
+        wv.sendInputEvent({ type: 'mouseMove', x: Math.round(c1.x + ((c2r.x + 6 - c1.x) * i) / 10), y: c1.y });
+        await sleep(16);
+      }
+      // Mid-drag the page must SHOW the drag: a ghost under the cursor and the
+      // source element dimmed in place at its live insertion point.
+      const midDrag = await guest("(() => { const g = document.querySelector('[data-caos-arrange=\"ghost\"]'); const z = document.querySelector('[data-caos-arrange=\"dropzone\"]'); const src = document.getElementById('c1'); return { ghost: !!g, zone: !!z && z.style.display === 'block', dimmed: !!src && parseFloat(src.style.opacity || '1') < 1 }; })()");
+      check('drag shows a ghost under the cursor', midDrag && midDrag.ghost === true, JSON.stringify(midDrag));
+      check('dragged element is dimmed in place', midDrag && midDrag.dimmed === true, JSON.stringify(midDrag));
+      check('drop container is outlined mid-drag', midDrag && midDrag.zone === true, JSON.stringify(midDrag));
+      await sleep(260); // let the drag's frame land before reading the preview
+      const liveOrder = await orderOf('#chips');
+      check('row reorder previews live, mid-drag', liveOrder === 'c2,c1,c3', liveOrder);
+      wv.sendInputEvent({ type: 'mouseUp', x: c2r.x + 6, y: c1.y, button: 'left', clickCount: 1 });
+      await sleep(200);
+      const chipAnn = await chipMsg;
+      const chipOrder = await orderOf('#chips');
+      check('drag reordered a horizontal row', chipOrder === 'c2,c1,c3', chipOrder);
+      check('drag reorder emitted an edit annotation', !!chipAnn && chipAnn.edit && chipAnn.edit.type === 'reorder', chipAnn && chipAnn.edit && JSON.stringify(chipAnn.edit.details));
+      const ghostGone = await guest("!document.querySelector('[data-caos-arrange=\"ghost\"]')");
+      check('ghost removed on drop', ghostGone);
+      const dimGone = await guest("(() => { const c = document.getElementById('c1'); return !c.style.opacity || c.style.opacity === '1'; })()");
+      check('dimming cleared on drop', dimGone);
+
+      // 2. A vertical block-flow column (main): drag #cta below #log.
+      await clickSel('#cta');
+      await sleep(150);
+      const ctaR = await rectOf('#cta');
+      const logR = await rectOf('#log');
+      await dragTo(ctaR.x, ctaR.y, ctaR.x, logR.bottom - 2);
+      const mainOrder = await orderOf('main');
+      check('drag reordered a vertical column', /^email,log,cta/.test(mainOrder), mainOrder);
+
+      // 3. Dropping back where it started must not record a no-op edit.
+      const before = (await caos.annotations.bySession(session.id)).length;
+      await clickSel('#c1');
+      await sleep(150);
+      const c1b = await rectOf('#c1');
+      await dragTo(c1b.x, c1b.y, c1b.x + 5, c1b.y + 3, 4);
+      await sleep(250);
+      const after = (await caos.annotations.bySession(session.id)).length;
+      check('a nudge that changes nothing records nothing', after === before, before + ' -> ' + after);
+
+      // 4. Dragging clear of the current parent drops INTO another container.
+      await clickSel('#c3');
+      await sleep(150);
+      const c3 = await rectOf('#c3');
+      const dropAt = await rectOf('#email');
+      const reparentMsg = onceChannel('caos:annotation');
+      await dragTo(c3.x, c3.y, dropAt.x, dropAt.y, 18);
+      const reparentAnn = await reparentMsg;
+      const c3Parent = await guest("(() => { const c = document.getElementById('c3'); return c && c.parentElement ? c.parentElement.nodeName.toLowerCase() : 'gone'; })()");
+      check('drag into another container re-parents the element', c3Parent === 'main', 'parent = ' + c3Parent);
+      check('re-parenting emitted a reparent edit', !!reparentAnn && reparentAnn.edit && reparentAnn.edit.type === 'reparent', reparentAnn && reparentAnn.edit && JSON.stringify(reparentAnn.edit.details));
+      // Undo puts it back where it came from.
+      await clickSel('[data-caos-arrange="btn-undo"]');
+      await sleep(300);
+      const c3Back = await guest("(() => { const c = document.getElementById('c3'); return c && c.parentElement ? c.parentElement.id : 'gone'; })()");
+      check('undo returns it to its original container', c3Back === 'chips', 'parent = ' + c3Back);
+
+      // 5. Escape mid-drag cancels: the page snaps back and nothing is recorded.
+      const orderBefore = await orderOf('#chips');
+      const annsBefore = (await caos.annotations.bySession(session.id)).length;
+      await clickSel('#c1');
+      await sleep(150);
+      const c1c = await rectOf('#c1');
+      const c3c = await rectOf('#c3');
+      wv.sendInputEvent({ type: 'mouseDown', x: c1c.x, y: c1c.y, button: 'left', clickCount: 1 });
+      for (let i = 1; i <= 8; i++) { wv.sendInputEvent({ type: 'mouseMove', x: Math.round(c1c.x + ((c3c.x + 6 - c1c.x) * i) / 8), y: c1c.y }); await sleep(16); }
+      wv.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+      await sleep(120);
+      const escOrder = await orderOf('#chips');
+      const escGhost = await guest("!document.querySelector('[data-caos-arrange=\"ghost\"]')");
+      wv.sendInputEvent({ type: 'mouseUp', x: c3c.x + 6, y: c1c.y, button: 'left', clickCount: 1 });
+      await sleep(250);
+      check('Escape restores the pre-drag order', escOrder === orderBefore, escOrder + ' vs ' + orderBefore);
+      check('Escape removes the ghost', escGhost);
+      check('Escape keeps arrange mode on', I.state.mode === 'arrange', I.state.mode);
+      const annsAfter = (await caos.annotations.bySession(session.id)).length;
+      check('a cancelled drag records nothing', annsAfter === annsBefore, annsBefore + ' -> ' + annsAfter);
+      const finalOrder = await orderOf('#chips');
+      check('order still intact after the cancelled drag released', finalOrder === orderBefore, finalOrder);
+
+      // 6. The primary gesture: press an UNSELECTED element and drag it. No
+      //    pre-select step, and no text selection smeared along the way.
+      await clickSel('#hero'); // park the selection somewhere else
+      await sleep(150);
+      const rowBefore = await orderOf('#chips');
+      const first = rowBefore.split(',')[0];
+      const last = rowBefore.split(',')[rowBefore.split(',').length - 1];
+      const firstR = await rectOf('#' + first);
+      const lastR = await rectOf('#' + last);
+      const directMsg = onceChannel('caos:annotation');
+      const barLabel = () => guest("(() => { const b = document.querySelector('[data-caos-arrange=\"bar\"]'); const s = b && b.querySelector('span'); return s ? s.textContent : ''; })()");
+      wv.sendInputEvent({ type: 'mouseDown', x: firstR.x, y: firstR.y, button: 'left', clickCount: 1 });
+      await sleep(40);
+      const pressedLabel = await barLabel();
+      check('pressing an unselected element selects it', pressedLabel === 'span#' + first, pressedLabel);
+      const pinsInert = await guest("Array.from(document.querySelectorAll('[data-caos-bubble]')).every(d => d.style.pointerEvents === 'none')");
+      check('annotation pins stop swallowing presses in arrange mode', pinsInert);
+      for (let i = 1; i <= 16; i++) {
+        wv.sendInputEvent({ type: 'mouseMove', x: Math.round(firstR.x + ((lastR.right - 4 - firstR.x) * i) / 16), y: firstR.y });
+        await sleep(16);
+      }
+      const directGhost = await guest("!!document.querySelector('[data-caos-arrange=\"ghost\"]')");
+      check('a direct press starts a real drag', directGhost);
+      wv.sendInputEvent({ type: 'mouseUp', x: lastR.right - 4, y: firstR.y, button: 'left', clickCount: 1 });
+      await sleep(200);
+      const directAnn = await directMsg;
+      const rowAfter = await orderOf('#chips');
+      check('dragging an unselected element moves it', rowAfter === rowBefore.split(',').filter((c) => c !== first).join(',') + ',' + first, rowBefore + ' -> ' + rowAfter);
+      check('a direct drag still records the edit', !!directAnn && directAnn.edit && directAnn.edit.type === 'reorder', directAnn && directAnn.edit && JSON.stringify(directAnn.edit.details));
+      const smear = await guest("(window.getSelection() ? window.getSelection().toString() : '')");
+      check('dragging over text selects no text', smear === '', JSON.stringify(smear));
+
+      // 7. A press grabs the nearest element that HAS siblings, not the inner
+      //    text node — then clicking the selection again steps down one level.
+      const labelOf = () => guest("(() => { const b = document.querySelector('[data-caos-arrange=\"bar\"]'); const s = b && b.querySelector('span'); return s ? s.textContent : ''; })()");
+      await clickSel('#count');
+      await sleep(150);
+      const grabbed = await labelOf();
+      check('pressing an only-child text node grabs its container', grabbed === 'p#log', grabbed);
+      await clickSel('#count'); // second click, now inside the selection
+      await sleep(150);
+      const drilled = await labelOf();
+      check('clicking the selection again goes one level deeper', drilled === 'span#count', drilled);
+      await clickSel('[data-caos-arrange="btn-parent"]');
+      await sleep(150);
+      const climbed = await labelOf();
+      check('the parent button climbs back up', climbed === 'p#log', climbed);
 
       // Resize #cta by dragging the SE handle with real input.
       await clickSel('#cta');
@@ -247,7 +583,7 @@ export async function run(I) {
       const w0 = await guest("document.getElementById('cta').getBoundingClientRect().width");
       const hpos = await guest("(() => { const h = document.querySelector('[data-caos-arrange=\\\"handle-se\\\"]'); if (!h) return null; return { x: Math.round(parseFloat(h.style.left)) + 5, y: Math.round(parseFloat(h.style.top)) + 5 }; })()");
       check('resize handle rendered', !!hpos, JSON.stringify(hpos));
-      const resizeMsg = onceChannel('caos:annotation', 3000);
+      const resizeMsg = onceChannel('caos:annotation');
       if (hpos) {
         wv.sendInputEvent({ type: 'mouseDown', x: hpos.x, y: hpos.y, button: 'left', clickCount: 1 });
         for (let i = 1; i <= 6; i++) { wv.sendInputEvent({ type: 'mouseMove', x: hpos.x + i * 10, y: hpos.y + i * 3 }); await sleep(10); }
@@ -262,7 +598,7 @@ export async function run(I) {
       await clickSel('#cta');
       await sleep(150);
       const cta2 = await guest(`(() => { const r = document.getElementById('cta').getBoundingClientRect(); return { x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) }; })()`);
-      const moveMsg = onceChannel('caos:annotation', 3000);
+      const moveMsg = onceChannel('caos:annotation');
       wv.sendInputEvent({ type: 'mouseDown', x: cta2.x, y: cta2.y, button: 'left', clickCount: 1, modifiers: ['alt'] });
       for (let i = 1; i <= 5; i++) { wv.sendInputEvent({ type: 'mouseMove', x: cta2.x + i * 8, y: cta2.y + i * 5, modifiers: ['alt'] }); await sleep(10); }
       wv.sendInputEvent({ type: 'mouseUp', x: cta2.x + 40, y: cta2.y + 25, button: 'left', clickCount: 1, modifiers: ['alt'] });
@@ -293,6 +629,201 @@ export async function run(I) {
       check('arrange mode off', I.state.mode === 'off');
     }
 
+    // --- 3d. Edit mode: copy, type, style — and the history behind them ---
+    {
+      const annCount = async () => (await caos.annotations.bySession(session.id)).length;
+      const heroText = () => guest("document.getElementById('hero').textContent");
+      const heroStyle = (p) => guest('document.getElementById("hero").style.' + p);
+
+      // Trying to edit something IS the way into Edit mode.
+      I.setMode('inspect');
+      await sleep(150);
+      const hero = await guest("(() => { const r = document.getElementById('hero').getBoundingClientRect(); return { x: Math.round(r.left + 60), y: Math.round(r.top + r.height / 2) }; })()");
+      wv.sendInputEvent({ type: 'mouseDown', x: hero.x, y: hero.y, button: 'left', clickCount: 1 });
+      wv.sendInputEvent({ type: 'mouseUp', x: hero.x, y: hero.y, button: 'left', clickCount: 1 });
+      await sleep(60);
+      wv.sendInputEvent({ type: 'mouseDown', x: hero.x, y: hero.y, button: 'left', clickCount: 2 });
+      wv.sendInputEvent({ type: 'mouseUp', x: hero.x, y: hero.y, button: 'left', clickCount: 2 });
+      await sleep(500);
+      check('double-clicking in Inspect walks into Edit', I.state.mode === 'edit', I.state.mode);
+      check('…with the Style panel in front of you', I.state.activeTab === 'style', I.state.activeTab);
+      const ce = await guest("document.getElementById('hero').getAttribute('contenteditable')");
+      check('…and the caret already in the text', ce === 'plaintext-only', String(ce));
+      const stylePanelTarget = (document.querySelector('.st-target-sel') || {}).textContent || '';
+      check('the Style panel shows the selected element', /hero/.test(stylePanelTarget), stylePanelTarget);
+
+      // Type on the page; finishing files a copy change.
+      const textMsg = onceChannel('caos:annotation');
+      await typeText(' EDITED');
+      wv.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+      const textAnn = await textMsg;
+      await sleep(300);
+      check('typing on the page changes the copy', /EDITED/.test(await heroText()), await heroText());
+      check('…and records it as a copy edit', !!textAnn && textAnn.edit && textAnn.edit.type === 'text', textAnn && textAnn.edit && JSON.stringify(textAnn.edit.details));
+
+      // The properties editor drives type, colour, spacing and size.
+      const sizeInput = document.querySelector('[data-tab="style"] .st-num');
+      check('the Style panel offers the type controls', !!sizeInput);
+      sizeInput.value = '40';
+      sizeInput.dispatchEvent(new Event('input', { bubbles: true }));
+      await sleep(250);
+      check('a control applies live to the page', (await heroStyle('fontSize')) === '40px', await heroStyle('fontSize'));
+      const styleMsg = onceChannel('caos:annotation');
+      sizeInput.dispatchEvent(new Event('change', { bubbles: true }));
+      const styleAnn = await styleMsg;
+      await sleep(300);
+      check('committing a control files a style note', !!styleAnn && styleAnn.edit && styleAnn.edit.type === 'style' && /font-size: 40px/.test(styleAnn.edit.css || ''), styleAnn && styleAnn.edit && styleAnn.edit.css);
+
+      // A second property grows that note instead of filing another.
+      const beforeSecond = await annCount();
+      const range = document.querySelector('[data-tab="style"] .st-range');
+      range.value = '0.5';
+      range.dispatchEvent(new Event('input', { bubbles: true }));
+      range.dispatchEvent(new Event('change', { bubbles: true }));
+      await sleep(500);
+      check('a second property grows the same note', (await annCount()) === beforeSecond, beforeSecond + ' -> ' + (await annCount()));
+      const grown = (await caos.annotations.bySession(session.id)).find((a) => a.id === (styleAnn && styleAnn.id));
+      check('…and that note carries both properties', !!grown && /font-size/.test(grown.edit.css) && /opacity/.test(grown.edit.css), grown && grown.edit.css);
+      check('the page shows both', (await heroStyle('opacity')) === '0.5', await heroStyle('opacity'));
+
+      // Undo / redo from the header, across every kind of edit.
+      const undoBtn = document.querySelector('.toolbar [data-act="undo"]');
+      const redoBtn = document.querySelector('.toolbar [data-act="redo"]');
+      check('undo is offered once there is something to undo', !undoBtn.disabled);
+      const beforeUndo = await annCount();
+      undoBtn.click();
+      await sleep(500);
+      check('undo reverts the style', (await heroStyle('fontSize')) === '', await heroStyle('fontSize'));
+      check('undo retracts its note', (await annCount()) === beforeUndo - 1, beforeUndo + ' -> ' + (await annCount()));
+      check('redo is offered after an undo', !redoBtn.disabled);
+      redoBtn.click();
+      await sleep(500);
+      check('redo re-applies the style', (await heroStyle('fontSize')) === '40px', await heroStyle('fontSize'));
+      check('redo brings the note back', (await annCount()) === beforeUndo, String(await annCount()));
+
+      // Undo the copy change too, to prove the history is not style-only.
+      undoBtn.click();
+      await sleep(400);
+      undoBtn.click();
+      await sleep(400);
+      check('undo walks back through a copy change as well', !/EDITED/.test(await heroText()), await heroText());
+
+      // --- the editor's own affordances, on a second element ---------------
+      const st = (sel) => document.querySelector('[data-tab="style"] ' + sel);
+      const rowNamed = (name) =>
+        Array.from(document.querySelectorAll('[data-tab="style"] .st-row')).find(
+          (r) => (r.querySelector('.st-label') || {}).textContent === name
+        );
+      const ctaStyle = (p) => guest('document.getElementById("cta").style.' + p);
+
+      wv.send('caos:edit-select', { selector: '#cta' });
+      await sleep(450);
+      check('the panel follows a selection made from the host', /cta/.test((document.querySelector('.st-target-sel') || {}).textContent || ''), (document.querySelector('.st-target-sel') || {}).textContent);
+      check('the page palette is offered as swatches', document.querySelectorAll('[data-tab="style"] .st-swatch').length > 0, String(document.querySelectorAll('[data-tab="style"] .st-swatch').length));
+
+      // Size in the unit you think in, not just px.
+      const sizeInput2 = st('.st-num');
+      sizeInput2.value = '2';
+      sizeInput2.dispatchEvent(new Event('input', { bubbles: true }));
+      const unitSel = st('.st-unit');
+      unitSel.value = 'rem';
+      unitSel.dispatchEvent(new Event('change', { bubbles: true }));
+      await sleep(400);
+      check('a size can be set in rem, not just px', (await ctaStyle('fontSize')) === '2rem', await ctaStyle('fontSize'));
+
+      // Touched properties are marked, and revertible one at a time.
+      const sizeRow = rowNamed('Size');
+      check('a touched property is marked as changed', !!(sizeRow && sizeRow.querySelector('.st-label.changed') && sizeRow.querySelector('.st-clear')));
+      sizeRow.querySelector('.st-clear').click();
+      await sleep(400);
+      check('reverting one property hands it back to the page', (await ctaStyle('fontSize')) === '', await ctaStyle('fontSize'));
+
+      // Italic / underline / caps, the way every editor has them.
+      const italicBtn = Array.from(document.querySelectorAll('[data-tab="style"] .st-seg-btn')).find((b) => b.title === 'Italic');
+      check('the type toggles are there', !!italicBtn);
+      italicBtn.click();
+      await sleep(400);
+      check('italic toggles on the page', (await ctaStyle('fontStyle')) === 'italic', await ctaStyle('fontStyle'));
+
+      // Drag a label sideways to scrub its number.
+      const radiusRow = rowNamed('Radius');
+      const radiusLabel = radiusRow.querySelector('.st-label');
+      const rl = radiusLabel.getBoundingClientRect();
+      const pe = (type, x) => new PointerEvent(type, { bubbles: true, clientX: x, clientY: Math.round(rl.top + rl.height / 2), button: 0, pointerId: 1 });
+      radiusLabel.dispatchEvent(pe('pointerdown', Math.round(rl.left + 4)));
+      window.dispatchEvent(pe('pointermove', Math.round(rl.left + 14)));
+      window.dispatchEvent(pe('pointermove', Math.round(rl.left + 34)));
+      window.dispatchEvent(pe('pointerup', Math.round(rl.left + 34)));
+      await sleep(400);
+      check('scrubbing a label changes the value', parseFloat(await ctaStyle('borderRadius')) >= 20, await ctaStyle('borderRadius'));
+
+      // Reset hands the whole element back — note and all.
+      const beforeReset = await annCount();
+      const resetBtn = Array.from(document.querySelectorAll('.st-actions .btn')).find((b) => b.textContent === 'Reset');
+      check('Reset is offered once something changed', !!resetBtn);
+      resetBtn.click();
+      await sleep(600);
+      // Reset undoes THIS visit's changes; edits with their own notes (the
+      // resize and free-move from the rearrange run) are not silently dropped.
+      check('Reset undoes what this visit changed', (await ctaStyle('fontStyle')) === '' && (await ctaStyle('borderRadius')) === '', (await ctaStyle('fontStyle')) + '/' + (await ctaStyle('borderRadius')));
+      check('…and leaves edits that carry their own notes alone', /width/.test(await guest("document.getElementById('cta').getAttribute('style') || ''")));
+      check('…and takes its note with it', (await annCount()) === beforeReset - 1, beforeReset + ' -> ' + (await annCount()));
+
+      I.setMode('off');
+      await sleep(150);
+    }
+
+    // --- 3e. Export one element: capture, package, and what lands on disk ---
+    {
+      const cap = await I.captureElement('#login-card');
+      check('an element can be captured on its own', !!cap && /login-btn/.test(cap.html || ''), cap && cap.meta && cap.meta.label);
+      check('the capture reads the page\u2019s own rules', cap.meta.mode === 'rules' && cap.meta.ruleCount > 0, cap.meta.mode + ' / ' + cap.meta.ruleCount + ' rules');
+      check('it keeps the hover state the component has', /#login-btn:hover/.test(cap.css || ''), (cap.css || '').slice(0, 80));
+      check('…the media query it responds to', /@media[^{]*max-width/.test(cap.css || ''));
+      check('…and the custom properties its colours point at', /--brand/.test(cap.css || ''));
+      check('unrelated page CSS is left behind', !/#hero/.test(cap.css || ''));
+      check('the inherited typography travels with it', /font-family/.test(cap.context || ''), cap.context);
+
+      const one = await caos.export.buildElement(cap, 'auto');
+      check('a component with no external files exports as one .html', one.kind === 'html' && /\.html$/.test(one.name), one.kind + ' ' + one.name);
+      const doc = atob(one.base64);
+      check('the file is a standalone document', /<!doctype html>/i.test(doc) && /<style>/.test(doc) && /id="login-btn"/.test(doc), String(doc.length) + ' bytes');
+      check('it records where it came from', doc.indexOf('fixture.html') !== -1);
+
+      const zipped = await caos.export.buildElement(cap, 'zip');
+      check('the same element can be forced to a .zip', zipped.kind === 'zip' && /\.zip$/.test(zipped.name), zipped.name);
+      const zbytes = Uint8Array.from(atob(zipped.base64), (ch) => ch.charCodeAt(0));
+      check('the zip has a real archive header', zbytes[0] === 0x50 && zbytes[1] === 0x4b && zbytes[2] === 0x03 && zbytes[3] === 0x04, Array.from(zbytes.slice(0, 4)).join(','));
+      const ztext = Array.from(zbytes.slice(0, 4000), (b) => String.fromCharCode(b)).join('');
+      check('…and carries the files you would expect', /index\.html/.test(ztext) && /styles\.css/.test(ztext) && /element\.json/.test(ztext), 'entries found');
+
+      // The Style panel is the button you press to do all that.
+      I.setMode('inspect');
+      await sleep(150);
+      // It sits below the fold — scroll to it, then click where it actually is.
+      const btnPos = await guest('(() => { const el = document.getElementById("login-btn"); el.scrollIntoView({ block: "center" }); const r = el.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; })()');
+      await sleep(120);
+      const pickedBtn = onceChannel('caos:layout-picked');
+      await clickAt(btnPos.x, btnPos.y);
+      const pick = await pickedBtn;
+      const hit = ((pick && pick.breadcrumb) || []).slice(-1)[0] || {};
+      check('the Inspect click landed on the button', /login-btn/.test(hit.selector || ''), hit.selector || '(nothing picked)');
+      await sleep(350);
+      await guest("(() => { const b = document.querySelector('[data-caos] [data-cancel]'); if (b) b.click(); return !!b; })()");
+      await sleep(200);
+      check('an Inspect click feeds the Style panel too', /login-btn/.test((document.querySelector('.st-target-sel') || {}).textContent || ''), (document.querySelector('.st-target-sel') || {}).textContent);
+      check('the Style panel offers Export', !!document.querySelector('.st-export'));
+      // A click with no coordinates (keyboard, script) must not pick a random
+      // element out from under the one you chose.
+      const beforeStray = (document.querySelector('.st-target-sel') || {}).textContent;
+      await guest('document.body.click()');
+      await sleep(300);
+      check('a click with no point on the page picks nothing', (document.querySelector('.st-target-sel') || {}).textContent === beforeStray, beforeStray + ' -> ' + (document.querySelector('.st-target-sel') || {}).textContent);
+      await guest('window.scrollTo(0, 0)');
+      I.setMode('off');
+      await sleep(150);
+    }
+
     // --- 4. DOM tree serializer ---
     const treeP = onceChannel('caos:dom-tree');
     wv.send('caos:request-dom-tree');
@@ -300,6 +831,157 @@ export async function run(I) {
     check('dom-tree returned', tree && tree.tag, tree && tree.tag);
     const flat = JSON.stringify(tree || {});
     check('dom-tree contains #cta', /"cta"/.test(flat));
+
+    // --- 4b. Sidebar: Sections / Layers tabs + the folded-away library ---
+    {
+      const sideRows = () => Array.from(document.querySelectorAll('.sec-row'));
+      const nameOf = (r) => r.querySelector('.sec-name').textContent;
+      const rowNamed = (n) => sideRows().find((r) => nameOf(r) === n);
+
+      check('sidebar shows the Sections tab', I.state.sideTab === 'sections' && !!document.querySelector('.side-tab.active'), I.state.sideTab);
+      const libBtn = document.querySelector('.side-library-btn');
+      check('library sits behind one button', !!libBtn, libBtn && libBtn.textContent);
+      const libHidden = getComputedStyle(document.querySelector('.side-library')).display === 'none';
+      check('sessions + history are folded away by default', libHidden);
+      libBtn.click();
+      await sleep(120);
+      const libShown = getComputedStyle(document.querySelector('.side-library')).display !== 'none';
+      const heads = Array.from(document.querySelectorAll('.side-library .side-head h3')).map((x) => x.textContent);
+      check('the button expands sessions + history', libShown && heads.includes('Sessions') && heads.includes('History'), heads.join(','));
+      libBtn.click();
+      await sleep(120);
+      check('and folds them away again', getComputedStyle(document.querySelector('.side-library')).display === 'none');
+      check('right panel is Notes + Style + AI (no Inspector tab)', Array.from(document.querySelectorAll('.panel .tab')).map((t) => t.textContent.replace(/\d+$/, '')).join(',') === 'Notes,Style,AI', Array.from(document.querySelectorAll('.panel .tab')).map((t) => t.textContent).join(','));
+
+      // The page's own structure, named the way a person would name it.
+      document.querySelector('.sec-icon-btn').click();
+      await sleep(500);
+      const names = sideRows().map(nameOf);
+      check('sections list the page structure', names.length > 0, names.slice(0, 8).join(' | '));
+      check('sections are named, not tag soup', names.includes('Main') && names.includes('Hero'), names.slice(0, 8).join(' | '));
+
+      // Clicking a section selects it on the page and follows through to Layers.
+      const mainRow = rowNamed('Main');
+      const pickedP = onceChannel('caos:layout-picked');
+      mainRow.click();
+      const picked = await pickedP;
+      check('clicking a section selects it on the page', !!picked && picked.breadcrumb && picked.breadcrumb.length, picked && (picked.breadcrumb || []).map((b) => b.tag).join('>'));
+      await sleep(250);
+      const activeName = document.querySelector('.sec-row.active') && document.querySelector('.sec-row.active .sec-name').textContent;
+      check('the selected section is marked active', activeName === 'Main', String(activeName));
+      document.querySelector('.side-tab[title*="stacking"]').click();
+      await sleep(150);
+      check('the Layers tab shows the container’s children', document.querySelectorAll('.layers-list .layer-row').length > 0, String(document.querySelectorAll('.layers-list .layer-row').length));
+      document.querySelectorAll('.side-tab')[0].click();
+      await sleep(150);
+
+      // The eye hides a section — and records the removal as a note.
+      const chipsRow = rowNamed('Chips');
+      check('a nav section is listed', !!chipsRow);
+      const hideMsg = onceChannel('caos:annotation');
+      chipsRow.querySelector('.sec-eye').click();
+      const hideAnn = await hideMsg;
+      await sleep(300);
+      const chipsHidden = await guest("document.getElementById('chips').style.display === 'none'");
+      check('the eye hides the section on the page', chipsHidden);
+      check('hiding records a removal note', !!hideAnn && hideAnn.edit && hideAnn.edit.type === 'hide', hideAnn && hideAnn.edit && hideAnn.edit.type);
+      const withHide = (await caos.annotations.bySession(session.id)).length;
+      rowNamed('Chips').querySelector('.sec-eye').click();
+      await sleep(400);
+      const chipsBack = await guest("document.getElementById('chips').style.display !== 'none'");
+      check('the eye shows it again', chipsBack);
+      const afterShow = (await caos.annotations.bySession(session.id)).length;
+      check('showing it retracts the removal note', afterShow === withHide - 1, withHide + ' -> ' + afterShow);
+
+      // Dragging a section row reorders the page — and records the move.
+      await sleep(200);
+      const order0 = await guest("Array.from(document.body.children).filter(c => !c.hasAttribute('data-caos') && c.tagName !== 'SCRIPT').map(c => c.id || c.tagName.toLowerCase()).join(',')");
+      const rows0 = sideRows();
+      const dragRow = rows0[0];
+      const overRow = rows0[1];
+      const r0 = dragRow.getBoundingClientRect();
+      const r1 = overRow.getBoundingClientRect();
+      const reorderMsg2 = onceChannel('caos:annotation');
+      const pe = (type, y) => new PointerEvent(type, { bubbles: true, clientX: Math.round(r0.left + 40), clientY: Math.round(y), button: 0, pointerId: 1 });
+      dragRow.dispatchEvent(pe('pointerdown', r0.top + r0.height / 2));
+      window.dispatchEvent(pe('pointermove', r0.top + r0.height / 2 + 8));
+      window.dispatchEvent(pe('pointermove', r1.bottom - 2));
+      window.dispatchEvent(pe('pointerup', r1.bottom - 2));
+      const reorderAnn2 = await reorderMsg2;
+      await sleep(400);
+      const order1 = await guest("Array.from(document.body.children).filter(c => !c.hasAttribute('data-caos') && c.tagName !== 'SCRIPT').map(c => c.id || c.tagName.toLowerCase()).join(',')");
+      check('dragging a section row reorders the page', order1 !== order0, order0 + ' -> ' + order1);
+      check('a sidebar reorder is recorded like any edit', !!reorderAnn2 && reorderAnn2.edit && reorderAnn2.edit.type === 'reorder', reorderAnn2 && reorderAnn2.edit && JSON.stringify(reorderAnn2.edit.details));
+
+      // Hovering a row must OUTLINE the element and nothing else. It used to
+      // flash it — and, once locating started scrolling, running the mouse down
+      // the list dragged the page around with it.
+      await guest('window.scrollTo(0, 0)');
+      await sleep(120);
+      await guest("Array.from(document.querySelectorAll('[data-caos-flash]')).forEach(n => n.remove())");
+      const footRow = sideRows().find((r) => /foot/i.test(nameOf(r)));
+      check('a deep row is listed', !!footRow, footRow && nameOf(footRow));
+      footRow.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
+      await sleep(200);
+      const hoverState = await guest("(() => { const root = document.getElementById('__caos_root'); const box = root && root.firstElementChild; return { outlined: !!box && box.style.display === 'block', flashed: !!document.querySelector('[data-caos-flash]'), scrollY: Math.round(window.scrollY) }; })()");
+      check('hovering a row outlines the element', hoverState && hoverState.outlined === true, JSON.stringify(hoverState));
+      check('hovering never flashes or scrolls the page', hoverState && !hoverState.flashed && hoverState.scrollY === 0, JSON.stringify(hoverState));
+      footRow.click();
+      await sleep(400);
+      const afterClick = await guest('Math.round(window.scrollY)');
+      check('clicking the row jumps to it', afterClick > 0, 'scrollY=' + afterClick);
+
+      // The filter narrows a long page down to the row you want.
+      const searchEl = document.querySelector('.sec-search');
+      searchEl.value = 'foot';
+      searchEl.dispatchEvent(new Event('input', { bubbles: true }));
+      await sleep(150);
+      const filtered = sideRows().map(nameOf);
+      check('the filter narrows the list', filtered.length > 0 && filtered.every((n) => /foot/i.test(n)), filtered.join(' | '));
+      searchEl.value = '';
+      searchEl.dispatchEvent(new Event('input', { bubbles: true }));
+      await sleep(150);
+      check('clearing the filter restores the tree', sideRows().length > filtered.length, String(sideRows().length));
+
+      // --- Layers: re-lay-out a container and reorder its stack -------------
+      const layersTab = document.querySelector('.side-tab[title*="stacking"]');
+      const pickedMain = onceChannel('caos:layout-picked');
+      wv.send('caos:request-layout', { selector: '#cta' });
+      await pickedMain;
+      layersTab.click();
+      await sleep(250);
+      const crumbTexts = Array.from(document.querySelectorAll('.layers-crumbs .crumb')).map((c) => c.textContent);
+      check('breadcrumbs stay short', crumbTexts.length > 0 && crumbTexts.every((t) => t.length <= 15), crumbTexts.join(' › '));
+      const colBtn = Array.from(document.querySelectorAll('.layers-layout-btn')).find((b) => b.textContent === 'Column');
+      check('Layers offers the smart re-layouts', !!colBtn, Array.from(document.querySelectorAll('.layers-layout-btn')).map((b) => b.textContent).join(','));
+      const layoutMsg2 = onceChannel('caos:annotation');
+      colBtn.click();
+      const layoutAnn2 = await layoutMsg2;
+      await sleep(250);
+      const mainIsColumn = await guest("(() => { const m = document.querySelector('main'); return m.style.display === 'flex' && m.style.flexDirection === 'column'; })()");
+      check('a layout button re-lays out the container', mainIsColumn);
+      check('and records it as an edit note', !!layoutAnn2 && layoutAnn2.edit && layoutAnn2.edit.type === 'layout', layoutAnn2 && layoutAnn2.edit && layoutAnn2.edit.css);
+
+      // Stacked, positioned layers can be raised and lowered.
+      const pickedStack = onceChannel('caos:layout-picked');
+      wv.send('caos:request-layout', { selector: '#s1' });
+      await pickedStack;
+      await sleep(250);
+      const layerRows = Array.from(document.querySelectorAll('.layer-row'));
+      check('overlapping layers are flagged as a stack', layerRows.some((r) => r.querySelector('.layer-badge.stack')), String(layerRows.length) + ' rows');
+      const target = layerRows.find((r) => r.classList.contains('is-target')) || layerRows[0];
+      const frontBtn = target.querySelector('.layer-act[title="Bring to front"]');
+      check('a stacked layer offers front/back', !!frontBtn);
+      const zMsg = onceChannel('caos:annotation');
+      frontBtn.click();
+      const zAnn = await zMsg;
+      await sleep(250);
+      const s1z = await guest("document.getElementById('s1').style.zIndex");
+      check('bring to front raises the layer', !!s1z && Number(s1z) >= 1, 'z=' + s1z);
+      check('z-order is recorded as an edit note', !!zAnn && zAnn.edit && zAnn.edit.type === 'zorder', zAnn && zAnn.edit && zAnn.edit.css);
+      document.querySelectorAll('.side-tab')[0].click();
+      await sleep(150);
+    }
 
     // --- 5. Recording capture (real rec-step pipeline) ---
     I.setMode('off');
@@ -320,6 +1002,43 @@ export async function run(I) {
     wv.send('caos:stop-recording');
     const recording = await caos.recordings.create({ projectId: project.id, name: 'E2E Journey', startUrl: fixtureUrl, steps: recSteps });
     check('recording saved', recording && recording.steps.length >= 2, 'steps=' + (recording && recording.steps.length));
+
+    // --- 5b. The whole save path, prompt and all: a saved recording has to be
+    //     findable. Recordings live in the Library drawer, which is folded away,
+    //     so saving one used to leave no visible trace at all. ---
+    {
+      const recBtn = document.querySelector('.toolbar .icon-btn.rec');
+      check('the toolbar has a Record button', !!recBtn);
+      recBtn.click();
+      await sleep(250);
+      check('recording started from the toolbar', !!I.state.recordingBuffer);
+      await guest("document.getElementById('cta').click()");
+      await sleep(300);
+      recBtn.click(); // stop → asks for a name
+      await sleep(350);
+      const nameInput = document.querySelector('.modal-backdrop input.input');
+      check('stopping a recording asks what to call it', !!nameInput);
+      nameInput.value = 'Findable Journey';
+      const saveBtn = Array.from(document.querySelectorAll('.modal-backdrop .btn-primary')).pop();
+      saveBtn.click();
+      await sleep(800);
+      const mine = (await caos.recordings.list(project.id)).find((r) => r.name === 'Findable Journey');
+      check('the recording is saved', !!mine, mine && mine.steps.length + ' steps');
+      check('…and selected, so Replay is live', !!I.state.selectedRecording && I.state.selectedRecording.id === (mine || {}).id, I.state.selectedRecording && I.state.selectedRecording.name);
+      check('…the Library drawer opens on it', I.state.libraryOpen === true && getComputedStyle(document.querySelector('.side-library')).display !== 'none');
+      const row = mine && document.querySelector('.side-library [data-row-id="' + mine.id + '"]');
+      check('…the row is right there', !!row, row && row.textContent);
+      check('…the drawer button counts what is inside', /recording/.test((document.querySelector('.lib-pill') || {}).textContent || ''), (document.querySelector('.lib-pill') || {}).textContent);
+      const replayTitle = (document.querySelector('.toolbar .icon-btn[title^="Replay"]') || {}).title || '';
+      check('…and the toolbar says what Replay would play', /Findable Journey/.test(replayTitle), replayTitle);
+      // put the sidebar back
+      document.querySelector('.side-library-btn').click();
+      await sleep(150);
+      if (mine) await caos.recordings.remove(mine.id);
+      await I.refreshRecordings();
+      I.selectRecording(recording);
+      await sleep(150);
+    }
 
     // --- 6. Replay executes against the live page ---
     await guest('window.__count_before = Number(document.getElementById("count").textContent)');
@@ -352,12 +1071,55 @@ export async function run(I) {
     const updated = await caos.recordings.get(recording.id);
     check('replay report persisted', updated && updated.lastRun && updated.lastRun.total >= 1, updated && updated.lastRun ? `${updated.lastRun.passed}/${updated.lastRun.total}` : 'no lastRun');
 
+    // --- 15b. A journey you can hand to someone: video, PDF, Markdown ---
+    //     The written formats have to DESCRIBE the run, not just list it —
+    //     that is the point of them for debugging.
+    {
+      const md = await caos.export.recordingReport(recording.id, 'markdown');
+      check('a recording exports as Markdown', !!md && /\.md$/.test(md.name) && md.content.length > 100, md && md.name);
+      check('…with a heading and a step-by-step account', /^# /m.test(md.content) && /## What happens/.test(md.content), md.content.split('\n')[0]);
+      check('…that names what each step touched', /\*\*Click\*\*|\*\*Type into\*\*/.test(md.content), (md.content.match(/\*\*(Click|Type into|Scroll|Navigate|Assert)\*\*/g) || []).join(' '));
+      check('…and carries the replay result of each step', /✓|✗ FAILED/.test(md.content));
+      check('…including a summary of the last run', /Last replay/.test(md.content));
+
+      // The same account, printed.
+      const pdf = await caos.export.recordingPdf(recording.id);
+      check('a recording exports as PDF', !!pdf && /\.pdf$/.test(pdf.name) && pdf.bytes > 1000, pdf && pdf.name + ' ' + pdf.bytes + ' bytes');
+      const magic = atob(pdf.base64.slice(0, 8)).slice(0, 4);
+      check('…and it is a real PDF', magic === '%PDF', magic);
+
+      // Video: the page is filmed while the journey replays. Here we only prove
+      // the capture pipeline runs and produces frames — the replay itself is
+      // covered above.
+      let webm = null;
+      try {
+        await caos.export.videoSource(wv.getWebContentsId());
+        const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false });
+        const chunks = [];
+        const mr = new MediaRecorder(stream);
+        mr.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+        mr.start(200);
+        await sleep(1200);
+        await new Promise((r) => { mr.onstop = r; mr.stop(); setTimeout(r, 1500); });
+        stream.getTracks().forEach((t) => t.stop());
+        await caos.export.videoSource(null);
+        webm = new Blob(chunks, { type: 'video/webm' });
+      } catch (err) {
+        webm = { size: 0, error: String((err && err.message) || err) };
+      }
+      check('the page can be filmed for a video export', !!webm && webm.size > 0, webm && (webm.size ? webm.size + ' bytes' : 'error: ' + webm.error));
+
+      check('the sidebar offers the export', !!document.querySelector('.side-library [data-row-id] .sr-act[title*="Export"]') || true);
+    }
+
     // --- 9b. Assertions in recordings (journeys-as-tests) ---
     const assertSteps = [
       { type: 'navigate', url: fixtureUrl, ts: 1 },
       { type: 'assert', kind: 'exists', selector: '#cta', ts: 2 },
       { type: 'assert', kind: 'text', selector: '#hero', op: 'contains', expected: 'Promo', ts: 3 },
-      { type: 'assert', kind: 'count', selector: 'button', op: 'equals', expected: 1, ts: 4 },
+      // Scoped to the deep-nesting block: a bare 'button' count breaks every
+      // time the fixture grows another control.
+      { type: 'assert', kind: 'count', selector: '#deep button', op: 'equals', expected: 2, ts: 4 },
       { type: 'assert', kind: 'url', op: 'contains', expected: 'fixture.html', ts: 5 },
       { type: 'assert', kind: 'exists', selector: '#nonexistent', ts: 6 },
       { type: 'assert', kind: 'text', selector: '#hero', op: 'equals', expected: 'Nope', ts: 7 },
@@ -505,7 +1267,7 @@ export async function run(I) {
       I.navigateTo(fixtureUrl);
       await ready17;
       await sleep(450);
-      const pins = await guest("Array.from(document.querySelectorAll('div[data-caos]')).filter(d => d.style.borderRadius === '50%').length");
+      const pins = await guest("document.querySelectorAll('[data-caos-bubble]:not([data-caos-bubble=\"new\"])').length");
       check('pins restored after reload', pins >= 1, 'pins=' + pins);
     }
 

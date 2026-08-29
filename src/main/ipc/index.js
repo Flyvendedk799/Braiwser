@@ -12,6 +12,10 @@ function register({ repos, paths, getWindow }) {
   const on = (channel, fn) => ipcMain.handle(channel, async (_e, ...args) => fn(...args));
 
   // --- e2e self-test: print report and exit ---
+  // Checks stream in as they run, so a renderer crash still leaves a report.
+  const e2eChecks = [];
+  on('caos:e2e-check', (c) => { e2eChecks.push(c); return true; });
+  register.e2ePartial = () => e2eChecks;
   on('caos:e2e-done', (report) => {
     console.log('CAOS_E2E_REPORT ' + JSON.stringify(report));
     setTimeout(() => app.quit(), 100);
@@ -121,6 +125,69 @@ function register({ repos, paths, getWindow }) {
     }
   });
 
+  // --- recording exports (markdown / pdf / video) ---
+  on('caos:recording.report', (recordingId, format) => {
+    const rec = repos.recordings.get(recordingId);
+    if (!rec) throw new Error('Recording not found');
+    const { toRecordingMarkdown, toRecordingHtml } = require('../services/export/recording');
+    const slug = String(rec.name || 'recording').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 50) || 'recording';
+    if (format === 'html') return { name: slug + '.html', content: toRecordingHtml(rec, rec.lastRun) };
+    return { name: slug + '.md', content: toRecordingMarkdown(rec, rec.lastRun) };
+  });
+
+  // Print the HTML report through an offscreen window — no PDF dependency, and
+  // what you see in the Markdown is exactly what lands in the PDF.
+  on('caos:recording.pdf', async (recordingId) => {
+    const rec = repos.recordings.get(recordingId);
+    if (!rec) throw new Error('Recording not found');
+    const { toRecordingHtml } = require('../services/export/recording');
+    const html = toRecordingHtml(rec, rec.lastRun);
+    const printer = new BrowserWindow({ show: false, webPreferences: { offscreen: true, javascript: false } });
+    try {
+      await printer.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+      const pdf = await printer.webContents.printToPDF({
+        printBackground: true,
+        margins: { marginType: 'custom', top: 0.4, bottom: 0.4, left: 0.4, right: 0.4 },
+        pageSize: 'A4',
+      });
+      const slug = String(rec.name || 'recording').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 50) || 'recording';
+      return { name: slug + '.pdf', base64: pdf.toString('base64'), bytes: pdf.length };
+    } finally {
+      try { printer.destroy(); } catch (_e) { /* ignore */ }
+    }
+  });
+
+  // Save any binary the renderer produced (pdf, webm, zip…).
+  on('caos:save-binary', async ({ defaultName, base64, filters }) => {
+    const r = await dialog.showSaveDialog(win(), { title: 'Save', defaultPath: defaultName || 'file.bin', filters: filters || undefined });
+    if (r.canceled || !r.filePath) return null;
+    try { fs.writeFileSync(r.filePath, Buffer.from(String(base64), 'base64')); }
+    catch (err) { throw new Error(`Failed to save ${r.filePath}: ${err.message}`); }
+    return r.filePath;
+  });
+
+  // --- single-element export ---
+  // build() returns the bundle; save() puts it on disk. Split so the harness can
+  // exercise the capture without a file dialog.
+  on('caos:element.build', async (payload, format) => {
+    const { buildElementBundle } = require('../services/export/element');
+    return buildElementBundle(payload, format || 'auto');
+  });
+  on('caos:element.save', async ({ name, base64 }) => {
+    const isZip = /\.zip$/i.test(name || '');
+    const r = await dialog.showSaveDialog(win(), {
+      title: 'Export element',
+      defaultPath: name || 'element.html',
+      filters: isZip
+        ? [{ name: 'Zip archive', extensions: ['zip'] }]
+        : [{ name: 'HTML file', extensions: ['html'] }],
+    });
+    if (r.canceled || !r.filePath) return null;
+    try { fs.writeFileSync(r.filePath, Buffer.from(String(base64), 'base64')); }
+    catch (err) { throw new Error(`Failed to save ${r.filePath}: ${err.message}`); }
+    return r.filePath;
+  });
+
   // --- export ---
   on('caos:export.build', (format, sessionId, extras) => {
     const { buildExport } = require('../services/export');
@@ -166,19 +233,50 @@ function register({ repos, paths, getWindow }) {
     }
     const dbg = wc.debugger;
     let attached = false;
+    let overrode = false;
     try {
       if (!dbg.isAttached()) { dbg.attach('1.3'); attached = true; }
+      // Capture from the top so the shot starts at the top of the document.
+      try { await wc.executeJavaScript('window.scrollTo(0, 0)', true); } catch (_e) { /* ignore */ }
+      await new Promise((r) => setTimeout(r, 60));
       const metrics = await dbg.sendCommand('Page.getLayoutMetrics');
       const size = metrics.cssContentSize || metrics.contentSize || { width: 1200, height: 800 };
-      const shot = await dbg.sendCommand('Page.captureScreenshot', {
-        format: 'png',
-        captureBeyondViewport: true,
-        clip: { x: 0, y: 0, width: Math.ceil(size.width), height: Math.ceil(size.height), scale: 1 },
+      // Grow the VIEWPORT to the document and take an ordinary screenshot.
+      // 'captureBeyondViewport' is the tidier API, but on this Chromium it takes
+      // the renderer down outright (a NOTREACHED, not a catchable error) often
+      // enough to lose the app — and a crash is a worse screenshot than a
+      // slightly reflowed one. Height is capped so a runaway page cannot ask for
+      // a surface nothing can allocate.
+      const width = Math.max(320, Math.min(4000, Math.ceil(size.width)));
+      const full = Math.ceil(size.height);
+      const height = Math.max(240, Math.min(12000, full));
+      await dbg.sendCommand('Emulation.setDeviceMetricsOverride', {
+        width,
+        height,
+        deviceScaleFactor: 1,
+        mobile: false,
       });
-      return { ok: true, dataUrl: 'data:image/png;base64,' + shot.data, cssWidth: size.width, cssHeight: size.height };
+      overrode = true;
+      await new Promise((r) => setTimeout(r, 140)); // let it lay out at the new size
+      const shot = await dbg.sendCommand('Page.captureScreenshot', { format: 'png' });
+      return {
+        ok: true,
+        dataUrl: 'data:image/png;base64,' + shot.data,
+        cssWidth: width,
+        cssHeight: height,
+        truncated: height < full,
+      };
     } catch (e) {
-      return { ok: false, error: String((e && e.message) || e) };
+      // Last resort: whatever is on screen right now.
+      try {
+        const img = await wc.capturePage();
+        const size = img.getSize();
+        return { ok: true, dataUrl: img.toDataURL(), cssWidth: size.width, cssHeight: size.height, viewportOnly: true };
+      } catch (_e2) {
+        return { ok: false, error: String((e && e.message) || e) };
+      }
     } finally {
+      if (overrode) { try { await dbg.sendCommand('Emulation.clearDeviceMetricsOverride'); } catch (_e) { /* ignore */ } }
       try { if (attached) dbg.detach(); } catch (_e) { /* ignore */ }
     }
   });
