@@ -3,15 +3,29 @@
 // restore-annotations toggle.
 import { h, modal, icon, toast } from '../lib/dom.js';
 
-const PROVIDERS = ['claude', 'openai'];
+// Four ways to pay for a call. The two subscriptions are listed first because
+// they need no key pasted anywhere: if `claude` or `codex` is signed in on this
+// machine, the AI features already work.
+const PROVIDERS = ['claude-code', 'anthropic', 'codex', 'openai'];
+const SUBSCRIPTION_PROVIDERS = ['claude-code', 'codex'];
 const PROVIDER_LABELS = {
-  claude: 'Claude',
-  openai: 'OpenAI',
+  'claude-code': 'Claude subscription',
+  anthropic: 'Anthropic API key',
+  codex: 'ChatGPT subscription',
+  openai: 'OpenAI API key',
 };
 const MODEL_PLACEHOLDERS = {
-  claude: 'claude-sonnet-5',
-  openai: 'gpt-4o',
+  'claude-code': 'claude-sonnet-5',
+  anthropic: 'claude-sonnet-5',
+  codex: 'gpt-5',
+  openai: 'gpt-5',
 };
+
+const isSubscription = (p) => SUBSCRIPTION_PROVIDERS.includes(p);
+// `providers` is the readiness map from the main process: per provider,
+// { ready, via, hint, detail, plan }. Older shapes were a bare boolean.
+const readiness = (providers, p) => (providers && providers[p]) || {};
+const isReady = (providers, p) => !!readiness(providers, p).ready;
 
 // A model field: a picker of known-good ids plus free text, so a model released
 // after this build can still be typed in.
@@ -46,7 +60,7 @@ function modelField(provider, value, choices, onChange) {
 }
 
 export function openSettingsModal({ settings, providers, actions }) {
-  let provider = settings.aiProvider || 'claude';
+  let provider = settings.aiProvider || 'claude-code';
   const profile = { ...(settings.profile || {}) };
   const models = { ...(settings.models || {}) };
 
@@ -104,7 +118,7 @@ export function openSettingsModal({ settings, providers, actions }) {
   const cards = {};
   PROVIDERS.forEach((p) => {
     const radio = h('input', { type: 'radio', name: 'provider', value: p, checked: provider === p });
-    const badge = h('span', { class: `rc-badge ${providers[p] ? 'ok' : 'no'}`, text: providers[p] ? 'Key set' : 'No key' });
+    const badge = h('span', { class: `rc-badge ${isReady(providers, p) ? 'ok' : 'no'}`, text: badgeText(providers, p) });
     const card = h('label', { class: `radio-card ${provider === p ? 'sel' : ''}` }, [
       radio,
       h('span', { class: 'rc-name', text: providerLabel(p) }),
@@ -121,46 +135,40 @@ export function openSettingsModal({ settings, providers, actions }) {
     radioGroup.appendChild(card);
   });
 
-  body.appendChild(field('AI Provider', radioGroup, 'Which model answers AI tasks. Each provider needs its own API key below.'));
+  body.appendChild(field('AI Provider', radioGroup, 'Who pays for an AI task. A subscription needs no key — if the `claude` or `codex` CLI is signed in on this machine, it is already usable.'));
 
-  // ---- Per-provider model + key ----
+  // Repaint every badge and status line from a fresh readiness map. Connecting a
+  // subscription changes a row the user is not looking at, so re-rendering only
+  // the row they touched would leave the others stale.
+  const statusLines = {};
+  function repaint(next) {
+    if (next) Object.assign(providers, next);
+    PROVIDERS.forEach((p) => {
+      if (cards[p]) {
+        cards[p].badge.className = `rc-badge ${isReady(providers, p) ? 'ok' : 'no'}`;
+        cards[p].badge.textContent = badgeText(providers, p);
+      }
+      if (statusLines[p]) statusLines[p].textContent = readiness(providers, p).detail || '';
+    });
+  }
+
+  // ---- Per-provider model + credential ----
   PROVIDERS.forEach((p) => {
     const model = modelField(p, models[p], settings.modelChoices, (v) => {
       models[p] = v;
       persist({ models: { ...models } });
     });
 
-    const keyInput = h('input', { class: 'input', type: 'password', placeholder: providers[p] ? 'Stored key - enter a new one to replace' : 'Paste API key' });
-    const saveKeyBtn = h('button', { class: 'btn btn-sm', html: icon('save', 14) + '<span>Save key</span>', on: {
-      click: async () => {
-        const v = keyInput.value.trim();
-        if (!v) { toast('Enter a key first', 'warn'); return; }
-        await actions.setKey(p, v);
-        providers[p] = true;
-        keyInput.value = '';
-        keyInput.placeholder = 'Stored key - enter a new one to replace';
-        cards[p].badge.className = 'rc-badge ok';
-        cards[p].badge.textContent = 'Key set';
-        toast(`${providerLabel(p)} key saved`, 'success');
-      },
-    } });
-    const clearKeyBtn = h('button', { class: 'btn btn-sm btn-danger', title: 'Clear stored key', html: icon('trash', 14), on: {
-      click: async () => {
-        await actions.clearKey(p);
-        providers[p] = false;
-        keyInput.value = '';
-        keyInput.placeholder = 'Paste API key';
-        cards[p].badge.className = 'rc-badge no';
-        cards[p].badge.textContent = 'No key';
-        toast(`${providerLabel(p)} key cleared`);
-      },
-    } });
+    const status = h('div', { class: 'field-hint', style: { margin: '6px 0 0' }, text: readiness(providers, p).detail || '' });
+    statusLines[p] = status;
 
-    const group = h('div', {}, [
-      h('div', { style: { marginBottom: '8px' } }, [model.root]),
-      h('div', { class: 'input-row' }, [keyInput, saveKeyBtn, clearKeyBtn]),
-    ]);
-    body.appendChild(field(`${providerLabel(p)} - model and API key`, group));
+    const rows = [h('div', { style: { marginBottom: '8px' } }, [model.root])];
+    rows.push(isSubscription(p)
+      ? subscriptionRow(p, { providers, actions, repaint })
+      : keyRow(p, { providers, actions, repaint }));
+    rows.push(status);
+
+    body.appendChild(field(`${providerLabel(p)} — model and credential`, h('div', {}, rows)));
   });
 
   // ---- Replay delay ----
@@ -198,7 +206,7 @@ export function openSettingsModal({ settings, providers, actions }) {
 }
 
 export function openOnboardingModal({ settings, providers, actions }) {
-  let provider = settings.aiProvider || 'claude';
+  let provider = settings.aiProvider || 'claude-code';
   const profile = { ...(settings.profile || {}) };
   const models = { ...(settings.models || {}) };
   const keyInputs = {};
@@ -225,7 +233,7 @@ export function openOnboardingModal({ settings, providers, actions }) {
   const radioGroup = h('div', { class: 'radio-group' });
   PROVIDERS.forEach((p) => {
     const radio = h('input', { type: 'radio', name: 'onboarding-provider', value: p, checked: provider === p });
-    const badge = h('span', { class: `rc-badge ${providers[p] ? 'ok' : 'no'}`, text: providers[p] ? 'Key set' : 'No key' });
+    const badge = h('span', { class: `rc-badge ${isReady(providers, p) ? 'ok' : 'no'}`, text: badgeText(providers, p) });
     const card = h('label', { class: `radio-card ${provider === p ? 'sel' : ''}` }, [
       radio,
       h('span', { class: 'rc-name', text: providerLabel(p) }),
@@ -239,14 +247,23 @@ export function openOnboardingModal({ settings, providers, actions }) {
     cards[p] = { card, badge };
     radioGroup.appendChild(card);
   });
-  body.appendChild(field('Default AI provider', radioGroup, 'AI tasks will use this provider first. Both Claude and OpenAI can be configured.'));
+  body.appendChild(field('Default AI provider', radioGroup, 'AI tasks use this first. A subscription already signed in on this machine needs nothing else; the API-key providers need a key below.'));
 
   PROVIDERS.forEach((p) => {
     const model = modelField(p, models[p], settings.modelChoices, (v) => { models[p] = v; });
+    // A subscription has no key to collect. Offering an empty key box for one
+    // would invite a paste that the save path is right to reject.
+    if (isSubscription(p)) {
+      body.appendChild(field(`${providerLabel(p)} setup`, h('div', { class: 'provider-setup-row' }, [
+        model.root,
+        h('div', { class: 'field-hint', style: { margin: '0' }, text: readiness(providers, p).detail || '' }),
+      ])));
+      return;
+    }
     const keyInput = h('input', {
       class: 'input',
       type: 'password',
-      placeholder: providers[p] ? 'Stored key - enter a new one to replace' : `Paste ${providerLabel(p)} API key`,
+      placeholder: readiness(providers, p).hint ? `Saved (${readiness(providers, p).hint}) — enter a new one to replace` : `Paste ${providerLabel(p)}`,
     });
     keyInputs[p] = keyInput;
     body.appendChild(field(`${providerLabel(p)} setup`, h('div', { class: 'provider-setup-row' }, [
@@ -265,6 +282,7 @@ export function openOnboardingModal({ settings, providers, actions }) {
     });
     if (!skipKeys) {
       for (const p of PROVIDERS) {
+        if (!keyInputs[p]) continue; // a subscription — nothing was collected
         const key = keyInputs[p].value.trim();
         if (key) await actions.setKey(p, key);
       }
@@ -293,4 +311,130 @@ function field(label, control, hint) {
 
 function providerLabel(provider) {
   return PROVIDER_LABELS[provider] || provider;
+}
+
+// The badge has to distinguish four states, not two: a key that is saved here, a
+// key inherited from the environment, a subscription that is signed in, and
+// nothing at all. Showing "No key" over a working environment variable is what
+// makes people paste a second key in.
+function badgeText(providers, p) {
+  const { ready, via } = readiness(providers, p);
+  if (!ready) return isSubscription(p) ? 'Not signed in' : 'No key';
+  if (via === 'environment') return 'From environment';
+  if (via === 'cli') return 'CLI login';
+  if (via === 'browser') return 'Signed in';
+  return 'Key set';
+}
+
+// A metered provider: paste a key, or clear the stored one. The key is never read
+// back — the placeholder shows the masked hint the main process supplies.
+function keyRow(p, { providers, actions, repaint }) {
+  const hint = readiness(providers, p).hint;
+  const placeholder = () => (readiness(providers, p).hint ? `Saved (${readiness(providers, p).hint}) — enter a new one to replace` : 'Paste API key');
+  const keyInput = h('input', { class: 'input', type: 'password', placeholder: hint ? `Saved (${hint}) — enter a new one to replace` : 'Paste API key' });
+
+  const saveKeyBtn = h('button', { class: 'btn btn-sm', html: icon('save', 14) + '<span>Save key</span>', on: {
+    click: async () => {
+      const v = keyInput.value.trim();
+      if (!v) { toast('Enter a key first', 'warn'); return; }
+      try {
+        repaint(await actions.setKey(p, v));
+        keyInput.value = '';
+        keyInput.placeholder = placeholder();
+        toast(`${providerLabel(p)} saved`, 'success');
+      } catch (err) { toast('Could not save that key: ' + errText(err), 'error', 5000); }
+    },
+  } });
+
+  const clearKeyBtn = h('button', { class: 'btn btn-sm btn-danger', title: 'Clear stored key', html: icon('trash', 14), on: {
+    click: async () => {
+      try {
+        repaint(await actions.clearKey(p));
+        keyInput.value = '';
+        keyInput.placeholder = placeholder();
+        toast(`${providerLabel(p)} cleared`);
+      } catch (err) { toast('Could not clear that key: ' + errText(err), 'error', 5000); }
+    },
+  } });
+
+  return h('div', { class: 'input-row' }, [keyInput, saveKeyBtn, clearKeyBtn]);
+}
+
+// A subscription: nothing to paste. Codex is CLI-only, so it reports what it
+// found and stops there. Claude can also be signed in from here, for a machine
+// with no `claude` CLI on it — the browser shows a code to bring back.
+function subscriptionRow(p, { providers, actions, repaint }) {
+  if (p === 'codex') {
+    return h('div', { class: 'input-row' }, [
+      h('button', { class: 'btn btn-sm', text: 'Re-check', on: { click: async () => {
+        repaint(await actions.refreshProviders());
+        toast(isReady(providers, 'codex') ? 'Codex subscription found' : 'Still no Codex login found', isReady(providers, 'codex') ? 'success' : 'warn');
+      } } }),
+    ]);
+  }
+
+  const connectBtn = h('button', { class: 'btn btn-sm btn-primary', text: 'Sign in with Claude', on: { click: async () => {
+    try {
+      await actions.claudeLoginStart();
+      openPasteCodeModal(actions, repaint);
+    } catch (err) { toast('Could not start the sign-in: ' + errText(err), 'error', 5000); }
+  } } });
+
+  const recheckBtn = h('button', { class: 'btn btn-sm', text: 'Re-check', on: { click: async () => {
+    repaint(await actions.refreshProviders());
+  } } });
+
+  const disconnectBtn = h('button', { class: 'btn btn-sm btn-danger', title: 'Forget the subscription signed in here', html: icon('trash', 14), on: {
+    click: async () => {
+      try {
+        repaint(await actions.claudeDisconnect());
+        toast('Signed out of the Claude subscription');
+      } catch (err) { toast(errText(err), 'error', 5000); }
+    },
+  } });
+
+  // A CLI login is not ours to revoke: it belongs to `claude`, and the honest
+  // action there is to say so rather than offer a button that cannot work.
+  const via = readiness(providers, p).via;
+  return h('div', { class: 'input-row' }, via === 'cli' ? [recheckBtn] : [connectBtn, recheckBtn, disconnectBtn]);
+}
+
+// Step two of the sign-in: the authorize page shows a code rather than
+// redirecting anywhere, so it has to be carried back by hand.
+function openPasteCodeModal(actions, repaint) {
+  const input = h('input', { class: 'input mono', type: 'text', placeholder: 'Paste the code from the browser' });
+  const m = modal({
+    title: 'Finish signing in',
+    width: 460,
+    body: h('div', {}, [
+      h('div', { class: 'field-hint', style: { margin: '0 0 8px' }, text: 'Your browser is showing a sign-in code. Paste it here — the whole code, or the URL it is in.' }),
+      input,
+    ]),
+    actions: [
+      { label: 'Cancel', kind: 'ghost' },
+      // Returning true holds the modal open, so a bad or half-pasted code keeps
+      // the field — and what the user pasted — in front of them to fix.
+      { label: 'Connect', kind: 'primary', onClick: async () => {
+        const v = input.value.trim();
+        if (!v) { toast('Paste the code first', 'warn'); return true; }
+        try {
+          const result = await actions.claudeLoginFinish(v);
+          repaint(result && result.status);
+          toast(result && result.plan ? `Connected — ${result.plan} plan` : 'Claude subscription connected', 'success');
+          return false;
+        } catch (err) {
+          toast(errText(err), 'error', 6000);
+          return true;
+        }
+      } },
+    ],
+  });
+  setTimeout(() => input.focus(), 50);
+}
+
+// IPC rejections arrive with Electron's channel prefix on the front; the sentence
+// the main process wrote is the part worth showing.
+function errText(err) {
+  const raw = (err && err.message) || String(err);
+  return raw.replace(/^Error invoking remote method '[^']+':\s*/, '').replace(/^Error:\s*/, '');
 }

@@ -1084,6 +1084,33 @@ export async function run(I) {
     const aiFix = await caos.ai.run({ task: 'suggest-fix', annotations: [{ kind: 'element', action: 'fix', note: 'tighten this', target: { selector: '#cta' } }] });
     check('ai suggest-fix returns a result', aiFix && aiFix.ok === true && (aiFix.text || '').length > 5, aiFix && (aiFix.ok ? 'ok' : aiFix.error));
 
+    // --- 8b. Credentials (ai-auth) ---
+    // Four ways to pay for a call, and the settings page has to be able to tell
+    // them apart. What matters here is the shape and, above all, that no channel
+    // hands a key back to the renderer.
+    const creds = await caos.secrets.providers();
+    const credProviders = Object.keys(creds || {}).sort().join(',');
+    check('every provider reports its readiness', credProviders === 'anthropic,claude-code,codex,openai', credProviders);
+    check('…as a status, not a bare boolean',
+      !!creds['claude-code'] && typeof creds['claude-code'].ready === 'boolean' && typeof creds['claude-code'].detail === 'string',
+      JSON.stringify(creds['claude-code']));
+
+    const roundTrip = await caos.secrets.setKey('openai', 'sk-e2e-abcdefghijklmnop9876');
+    check('a metered provider accepts a key', !!roundTrip.openai.ready, JSON.stringify(roundTrip.openai));
+    check('…and reports it only as a mask',
+      typeof roundTrip.openai.hint === 'string' && roundTrip.openai.hint.includes('…')
+        && !JSON.stringify(roundTrip).includes('sk-e2e-abcdefghijklmnop9876'),
+      roundTrip.openai.hint);
+    const cleared = await caos.secrets.clearKey('openai');
+    check('…and can be cleared again', cleared.openai.ready === false, JSON.stringify(cleared.openai));
+
+    // A subscription's credential is a login. Offering it a key field would be a
+    // dead end, so the main process refuses one rather than storing it nowhere.
+    let refused = null;
+    try { await caos.secrets.setKey('claude-code', 'sk-should-not-store'); }
+    catch (err) { refused = String((err && err.message) || err); }
+    check('a subscription refuses an API key', !!refused && /signs in/.test(refused), refused || 'accepted it');
+
     // --- 9. Replay report persisted (journeys-as-tests) ---
     const updated = await caos.recordings.get(recording.id);
     check('replay report persisted', updated && updated.lastRun && updated.lastRun.total >= 1, updated && updated.lastRun ? `${updated.lastRun.passed}/${updated.lastRun.total}` : 'no lastRun');

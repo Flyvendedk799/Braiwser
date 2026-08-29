@@ -146,9 +146,45 @@ function register({ repos, paths, getWindow }) {
     nativeTheme.themeSource = next.theme === 'light' || next.theme === 'dark' ? next.theme : 'system';
     return next;
   });
-  on('caos:secrets.providers', () => repos.secrets.providers());
-  on('caos:secrets.setKey', (provider, key) => repos.secrets.setKey(provider, key));
-  on('caos:secrets.clearKey', (provider) => repos.secrets.clearKey(provider));
+  // --- credentials ---
+  // Readiness, never the credential itself: `status` carries a masked hint at
+  // most, and there is no channel that returns a whole key to the renderer.
+  const auth = () => require('../services/ai/auth');
+  const WIRE_OF = { anthropic: 'anthropic', 'claude-code': 'anthropic', openai: 'openai', codex: 'openai' };
+
+  on('caos:secrets.providers', () => auth().status(repos.dir));
+  on('caos:secrets.setKey', async (provider, key) => {
+    const wire = WIRE_OF[provider];
+    // Only the metered providers hold a key; a subscription's credential is a
+    // login and cannot be pasted in.
+    if (wire !== provider) throw new Error(`${provider} signs in — it does not take an API key`);
+    if (typeof key !== 'string' || !key.trim()) throw new Error('Enter a key first');
+    await auth().setKey(repos.dir, wire, key.trim());
+    return auth().status(repos.dir);
+  });
+  on('caos:secrets.clearKey', async (provider) => {
+    const wire = WIRE_OF[provider];
+    if (wire !== provider) throw new Error(`${provider} signs in — it does not take an API key`);
+    await auth().clearKey(repos.dir, wire);
+    return auth().status(repos.dir);
+  });
+
+  // Signing in to a Claude subscription from inside Braiwser, for a machine with
+  // no `claude` CLI. The authorize page shows a code to paste back rather than
+  // redirecting to a loopback port, so this is two steps with the browser between.
+  on('caos:auth.claudeLoginStart', async () => {
+    const { url } = await auth().beginClaudeLogin();
+    await shell.openExternal(url);
+    return { url };
+  });
+  on('caos:auth.claudeLoginFinish', async (pasted) => {
+    const result = await auth().completeClaudeLogin(repos.dir, pasted);
+    return { ...result, status: await auth().status(repos.dir) };
+  });
+  on('caos:auth.claudeDisconnect', async () => {
+    await auth().disconnectClaudeLogin(repos.dir);
+    return auth().status(repos.dir);
+  });
 
   // --- recording exports (Playwright spec / raw JSON) ---
   on('caos:export.recording', (format, recordingId) => {

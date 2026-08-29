@@ -822,7 +822,7 @@ function syncToolbar() {
     device: currentDevice(),
     auditing: state.auditing,
     aiProvider,
-    providerReady: !!(aiProvider && state.providers && state.providers[aiProvider]),
+    providerReady: !!(aiProvider && state.providers && state.providers[aiProvider] && state.providers[aiProvider].ready),
     profileName: state.settings && state.settings.profile && state.settings.profile.displayName,
     undoCount: state.editStacks.undo,
     redoCount: state.editStacks.redo,
@@ -2127,6 +2127,25 @@ function profileActions() {
     },
     clearKey: async (provider) => {
       state.providers = await caos.secrets.clearKey(provider);
+      syncProfileUi();
+      return state.providers;
+    },
+    // The Claude subscription sign-in, for a machine with no `claude` CLI. Step
+    // one opens the browser; step two takes the code it shows.
+    claudeLoginStart: () => caos.secrets.claudeLoginStart(),
+    claudeLoginFinish: async (pasted) => {
+      const result = await caos.secrets.claudeLoginFinish(pasted);
+      if (result && result.status) state.providers = result.status;
+      syncProfileUi();
+      return result;
+    },
+    claudeDisconnect: async () => {
+      state.providers = await caos.secrets.claudeDisconnect();
+      syncProfileUi();
+      return state.providers;
+    },
+    refreshProviders: async () => {
+      state.providers = await caos.secrets.providers();
       syncProfileUi();
       return state.providers;
     },

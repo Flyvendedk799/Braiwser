@@ -164,8 +164,12 @@ export function createToolbar(actions) {
 }
 
 function profileTooltip({ aiProvider, providerReady, profileName }) {
-  const provider = aiProvider === 'openai' ? 'OpenAI' : 'Claude';
-  const status = providerReady ? 'key set' : 'no key set';
+  const labels = { 'claude-code': 'Claude subscription', anthropic: 'Anthropic API key', codex: 'ChatGPT subscription', openai: 'OpenAI API key' };
+  const provider = labels[aiProvider] || aiProvider || 'Claude';
+  const subscription = aiProvider === 'claude-code' || aiProvider === 'codex';
+  const status = providerReady
+    ? (subscription ? 'signed in' : 'key set')
+    : (subscription ? 'not signed in' : 'no key set');
   const name = profileName ? `${profileName} - ` : '';
   return `${name}Profile: ${provider} (${status})`;
 }

@@ -140,18 +140,18 @@ export function createAiPanel(config, actions) {
   function setProfile(settings = {}, providers = {}) {
     profileSettings = settings || {};
     profileProviders = providers || {};
-    const provider = profileSettings.aiProvider || 'claude';
-    const ready = !!profileProviders[provider];
+    const provider = profileSettings.aiProvider || 'claude-code';
+    const ready = !!(profileProviders[provider] && profileProviders[provider].ready);
     providerBtn.className = `provider-status ${ready ? 'ready' : 'needs-setup'}`;
-    providerBtn.innerHTML = `${icon(ready ? 'check' : 'settings', 13)}<span>${providerLabel(provider)}</span><span class="provider-status-dot">${ready ? 'Key set' : 'No key'}</span>`;
-    providerBtn.title = `${providerLabel(provider)} ${ready ? 'API key is set' : 'API key is not set'} - open Profile`;
+    providerBtn.innerHTML = `${icon(ready ? 'check' : 'settings', 13)}<span>${providerLabel(provider)}</span><span class="provider-status-dot">${readyWord(provider, ready)}</span>`;
+    providerBtn.title = `${providerLabel(provider)} — ${readyWord(provider, ready)} · open Profile`;
     providerBtn.setAttribute('aria-label', providerBtn.title);
   }
 
   function localNotice() {
     const link = h('a', { text: 'Open Profile', on: { click: actions.openSettings } });
     return h('div', { class: 'ai-local-notice' }, [
-      h('span', { text: `${providerLabel(profileSettings.aiProvider || 'claude')} has no API key saved, so this result was generated locally.` }),
+      h('span', { text: `${providerLabel(profileSettings.aiProvider || 'claude-code')} is not connected, so this result was generated locally.` }),
       link,
     ]);
   }
@@ -161,8 +161,23 @@ function prettyTask(id) {
   return id.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+const PROVIDER_LABELS = {
+  'claude-code': 'Claude subscription',
+  anthropic: 'Anthropic API key',
+  codex: 'ChatGPT subscription',
+  openai: 'OpenAI API key',
+};
+
 function providerLabel(provider) {
-  return provider === 'openai' ? 'OpenAI' : 'Claude';
+  return PROVIDER_LABELS[provider] || provider || 'Claude';
+}
+
+// A subscription is "signed in"; a metered provider has a "key". Saying "no key"
+// beside a subscription sends people looking for a field that is not there.
+function readyWord(provider, ready) {
+  const subscription = provider === 'claude-code' || provider === 'codex';
+  if (subscription) return ready ? 'Signed in' : 'Not signed in';
+  return ready ? 'Key set' : 'No key';
 }
 
 // Escape, then apply a light markdown subset: headings, bold, inline code, and

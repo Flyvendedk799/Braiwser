@@ -163,6 +163,18 @@ app.whenReady().then(() => {
     audit: path.join(__dirname, '..', 'webview', 'audit.js'),
   };
   registerIpc({ repos, paths, getWindow: () => mainWindow });
+
+  // Credentials, once the window is on its way up rather than before it. Both of
+  // these load the ESM auth library, and neither is worth delaying first paint
+  // for: the migration moves any plaintext API key into the encrypted store, and
+  // the refresh replaces the built-in model list with the registry's. A failure
+  // in either leaves the app working on its compiled-in defaults.
+  const authModule = require('./services/ai/auth');
+  authModule.migratePlaintextKeys(repos.dir, repos.secrets.legacy).catch(() => {});
+  Promise.all(Object.keys(config.MODEL_CHOICES).map(async (provider) => {
+    const models = await authModule.modelsFor(provider);
+    if (models.length) config.MODEL_CHOICES[provider] = models;
+  })).catch(() => {});
   installMenu({
     getWindow: () => mainWindow,
     devices: config.DEVICE_PRESETS,

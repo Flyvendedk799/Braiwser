@@ -102,9 +102,14 @@ contextBridge.exposeInMainWorld('caos', {
   },
 
   secrets: {
+    // Readiness per provider — { ready, via, hint, detail, plan } — never a key.
     providers: () => invoke('caos:secrets.providers'),
     setKey: (provider, key) => invoke('caos:secrets.setKey', provider, key),
     clearKey: (provider) => invoke('caos:secrets.clearKey', provider),
+    // Signing in to a Claude subscription: open the browser, paste the code back.
+    claudeLoginStart: () => invoke('caos:auth.claudeLoginStart'),
+    claudeLoginFinish: (pasted) => invoke('caos:auth.claudeLoginFinish', pasted),
+    claudeDisconnect: () => invoke('caos:auth.claudeDisconnect'),
   },
 
   ai: {

@@ -18,7 +18,32 @@ const crypto = require('crypto');
 const { JsonCollection, JsonDocument } = require('./db');
 const { DEFAULT_SETTINGS, DEVICE_PRESETS, THEMES } = require('../config');
 
-const AI_PROVIDERS = ['claude', 'openai'];
+// Four ways to pay for a call, two wires. `claude-code` and `codex` are
+// subscriptions already signed in on the machine; the other two are metered API
+// keys. See services/ai/auth.js.
+const AI_PROVIDERS = ['claude-code', 'anthropic', 'codex', 'openai'];
+
+// Settings written before the provider list grew named Anthropic 'claude'. Those
+// installs have an API key, not a subscription, so they map to 'anthropic' —
+// mapping them to 'claude-code' would silently point a configured user at a
+// subscription they may not have.
+const LEGACY_PROVIDERS = { claude: 'anthropic' };
+
+function migrateProvider(value) {
+  return LEGACY_PROVIDERS[value] || value;
+}
+
+// The per-provider model map is keyed by provider, so it needs the same rename —
+// and the two Anthropic providers share a model, so a migrated choice seeds both.
+function migrateModels(models) {
+  const out = { ...models };
+  if (typeof out.claude === 'string' && out.claude) {
+    out.anthropic = out.anthropic || out.claude;
+    out['claude-code'] = out['claude-code'] || out.claude;
+  }
+  delete out.claude;
+  return out;
+}
 const DEVICE_IDS = DEVICE_PRESETS.map((d) => d.id);
 const THEME_IDS = THEMES.map((t) => t.id);
 
@@ -32,9 +57,11 @@ function normalizeSettings(raw = {}) {
     },
     models: {
       ...DEFAULT_SETTINGS.models,
-      ...(base.models && typeof base.models === 'object' ? base.models : {}),
+      ...(base.models && typeof base.models === 'object' ? migrateModels(base.models) : {}),
     },
-    aiProvider: AI_PROVIDERS.includes(base.aiProvider) ? base.aiProvider : DEFAULT_SETTINGS.aiProvider,
+    aiProvider: AI_PROVIDERS.includes(migrateProvider(base.aiProvider))
+      ? migrateProvider(base.aiProvider)
+      : DEFAULT_SETTINGS.aiProvider,
     onboardingComplete: !!base.onboardingComplete,
     restoreAnnotationsOnLoad: base.restoreAnnotationsOnLoad !== false,
     replayDelayMs: Number.isFinite(Number(base.replayDelayMs)) ? Math.max(0, Number(base.replayDelayMs)) : DEFAULT_SETTINGS.replayDelayMs,
@@ -232,22 +259,12 @@ function createRepositories(userDataDir) {
     },
   };
 
-  const secrets = {
-    providers: () => {
-      const s = secretsD.data();
-      return { claude: !!s.claude, openai: !!s.openai };
-    },
-    getKey: (provider) => secretsD.data()[provider] || null,
-    setKey: (provider, key) => {
-      // Whitelist providers and require a non-empty string so the renderer can't
-      // write arbitrary keys into secrets.json.
-      if (provider !== 'claude' && provider !== 'openai') return secrets.providers();
-      if (typeof key !== 'string' || !key) return secrets.providers();
-      secretsD.set(provider, key);
-      return secrets.providers();
-    },
-    clearKey: (provider) => { secretsD.unset(provider); return secrets.providers(); },
-  };
+  // API keys no longer live here. They are held encrypted by services/ai/auth.js,
+  // which also resolves the two subscription logins — so a key is never sitting
+  // in plaintext next to the projects, and nothing in the store can hand one back
+  // to the renderer. What remains is the old document, exposed only so the
+  // one-time migration can drain it and blank it.
+  const secrets = { legacy: secretsD };
 
   return { dir, projects, sessions, annotations, recordings, history, bookmarks, settings, secrets };
 }

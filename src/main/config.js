@@ -53,17 +53,27 @@ const AI_TASKS = {
 
 // Known-good model ids offered in the Settings picker. Free text is still
 // accepted so a newly released model can be used before this list catches up.
+const ANTHROPIC_MODELS = [
+  { id: 'claude-opus-5', label: 'Claude Opus 5 — most capable' },
+  { id: 'claude-sonnet-5', label: 'Claude Sonnet 5 — balanced' },
+  { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5 — fastest' },
+];
+const OPENAI_MODELS = [
+  { id: 'gpt-5', label: 'GPT-5' },
+  { id: 'gpt-5-mini', label: 'GPT-5 mini — fastest' },
+  { id: 'o4-mini', label: 'o4-mini — reasoning' },
+  { id: 'gpt-4.1', label: 'GPT-4.1' },
+];
+
+// Both Anthropic providers answer to the same model ids, and so do both OpenAI
+// ones — what differs between them is who pays, not what you can ask for. This
+// list is refreshed from the ai-auth registry at boot, so it cannot drift from
+// the ids the providers actually accept.
 const MODEL_CHOICES = {
-  claude: [
-    { id: 'claude-opus-5', label: 'Claude Opus 5 — most capable' },
-    { id: 'claude-sonnet-5', label: 'Claude Sonnet 5 — balanced' },
-    { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5 — fastest' },
-  ],
-  openai: [
-    { id: 'gpt-4o', label: 'GPT-4o' },
-    { id: 'gpt-4o-mini', label: 'GPT-4o mini — fastest' },
-    { id: 'gpt-4.1', label: 'GPT-4.1' },
-  ],
+  'claude-code': ANTHROPIC_MODELS,
+  anthropic: ANTHROPIC_MODELS,
+  codex: OPENAI_MODELS,
+  openai: OPENAI_MODELS,
 };
 
 // Severity ladder used by the page audit. Ordered most → least severe.
@@ -135,10 +145,16 @@ const DEFAULT_SETTINGS = {
   profile: {
     displayName: '',
   },
-  aiProvider: 'claude',
+  // The subscription already signed in on this machine is the default, so the AI
+  // features work on a fresh install with nothing pasted anywhere. With no
+  // `claude` login present this simply reports "not connected" in Settings and
+  // AI tasks answer locally until a credential is added.
+  aiProvider: 'claude-code',
   models: {
-    claude: 'claude-sonnet-5',
-    openai: 'gpt-4o',
+    'claude-code': 'claude-sonnet-5',
+    anthropic: 'claude-sonnet-5',
+    codex: 'gpt-5',
+    openai: 'gpt-5',
   },
   replayDelayMs: 600,
   // Left sidebar: which page tab is showing, and whether the library drawer

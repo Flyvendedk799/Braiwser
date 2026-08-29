@@ -137,9 +137,11 @@ corrupting what you already have.
   (`<project>/.braiwser/…`, or the app data dir for URL projects) and optionally runs
   a configured coding-agent command right there, streaming its output live
 - **AI assistant** — transcribe notes into a polished review, generate an agent
-  prompt, cluster by theme, summarize, or suggest a fix for a single note. Choose
-  Claude or OpenAI, pick a model, and store the key locally. **With no key it still
-  works**, synthesizing a useful result locally from your notes.
+  prompt, cluster by theme, summarize, or suggest a fix for a single note. If the
+  `claude` CLI is signed in on your machine it works with **nothing configured** —
+  the call goes on that subscription. Otherwise sign in to a Claude subscription
+  from Settings, or paste an Anthropic/OpenAI API key. **With no credential at all
+  it still works**, synthesizing a useful result locally from your notes.
 
 Guest console errors and failed loads are captured (bounded, per tab) and included
 in the prompt and Markdown exports, so the agent sees runtime errors next to the
@@ -231,18 +233,35 @@ and webview code is CommonJS.
 - **Recording** `{ id, projectId, name, startUrl, steps[], lastRun? }`
 
 Storage is plain JSON under Electron's `userData/caos/`, written atomically
-(temp file → fsync → rename). API keys live in a separate `secrets.json` there and
-are never returned wholesale to the renderer or written into a project directory.
+(temp file → fsync → rename). Credentials live in a separate `credentials.json`
+there, encrypted at rest (AES-256-GCM under a per-machine secret, itself kept in
+the OS keyring where one is available). No channel returns a key to the renderer:
+the settings page is sent a mask such as `sk-ant-…9ZQ`, never the value.
 
 ---
 
 ## Configuring AI
 
-On first launch, onboarding asks for a local profile name, a default provider
-(Claude or OpenAI), model ids, and optional API keys. Change any of it later from
-**Profile** in the toolbar or **Settings** (`⌘,`). The model field offers known-good
-ids and still accepts free text, so a model released after this build is usable
-immediately. The AI tab shows which provider is active and whether it has a key.
+There are four ways to pay for a call, handled by
+[`@flyvendedk799/ai-auth`](https://github.com/Flyvendedk799/ai-auth):
+
+| Provider | Credential | How to connect |
+| --- | --- | --- |
+| **Claude subscription** | OAuth | Automatic if `claude` is signed in here, or **Sign in with Claude** in Settings |
+| **ChatGPT subscription** | OAuth | Automatic if `codex` is signed in here |
+| **Anthropic API key** | Metered key | Paste it in Settings, or set `ANTHROPIC_API_KEY` |
+| **OpenAI API key** | Metered key | Paste it in Settings, or set `OPENAI_API_KEY` |
+
+The subscription paths read the login the CLI already wrote and never disturb it:
+the file is re-read on every call, so signing out of `claude` is noticed at once,
+and a token is only refreshed once it has actually expired.
+
+On first launch, onboarding asks for a local profile name, a default provider,
+model ids, and — for the metered providers only — an API key. Change any of it
+later from **Profile** in the toolbar or **Settings** (`⌘,`). The model field
+offers known-good ids and still accepts free text, so a model released after this
+build is usable immediately. The AI tab shows which provider is active and whether
+it is connected.
 
 Without a key, AI tasks fall back to local synthesis so the app stays fully useful
 offline.
