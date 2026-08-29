@@ -57,6 +57,15 @@
     <div id="s1" style="position:absolute;left:0;top:0;width:90px;height:44px;background:#fcc"></div>
     <div id="s2" style="position:absolute;left:24px;top:10px;width:90px;height:44px;background:#ccf"></div>
   </div>
+  <!-- Deliberate audit bait: each element trips exactly one rule, so the audit
+       suite can assert on specific ruleIds. Placed after <main> so it never
+       shifts the coordinates the inspect/draw/arrange sections click at. -->
+  <section id="audit-bait">
+    <img id="a-img" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==" width="20" height="20" />
+    <button id="a-noname" style="width:30px;height:30px"></button>
+    <input id="a-nolabel" type="text" />
+    <p id="a-contrast" style="color:#bbbbbb;background:#ffffff">barely readable</p>
+  </section>
   <script>
     // Record interactions so replay can be observed.
     let n = 0;

@@ -13,8 +13,25 @@ contextBridge.exposeInMainWorld('caos', {
 
   config: () => invoke('caos:config'),
 
+  // Menu accelerators dispatch command ids here; app.js owns the command table.
+  onCommand: (cb) => {
+    const listener = (_e, payload) => cb(payload || {});
+    ipcRenderer.on('caos:command', listener);
+    return () => ipcRenderer.removeListener('caos:command', listener);
+  },
+
+  system: {
+    theme: () => invoke('caos:system-theme.get'),
+    onThemeChange: (cb) => {
+      const listener = (_e, theme) => cb(theme);
+      ipcRenderer.on('caos:system-theme', listener);
+      return () => ipcRenderer.removeListener('caos:system-theme', listener);
+    },
+  },
+
   fs: {
     openFile: () => invoke('caos:open-file'),
+    openJson: () => invoke('caos:open-json'),
     openDirectory: () => invoke('caos:open-directory'),
     save: (payload) => invoke('caos:save', payload),
     saveScreenshot: (payload) => invoke('caos:save-screenshot', payload),
@@ -102,5 +119,11 @@ contextBridge.exposeInMainWorld('caos', {
     saveBinary: (payload) => invoke('caos:save-binary', payload),
     videoSource: (webContentsId) => invoke('caos:video.source', webContentsId),
     saveElement: (payload) => invoke('caos:element.save', payload),
+    recording: (format, recordingId) => invoke('caos:export.recording', format, recordingId),
+  },
+
+  bundle: {
+    export: (projectId) => invoke('caos:bundle.export', projectId),
+    import: (text) => invoke('caos:bundle.import', text),
   },
 });

@@ -44,6 +44,8 @@ export function createSectionsPanel(actions) {
   const bar = h('div', { class: 'sec-bar' }, [search, count, refreshBtn]);
   const listWrap = h('div', {
     class: 'sec-list',
+    role: 'tree',
+    'aria-label': 'Page sections',
     on: { mouseleave: () => actions.hoverClear() },
   });
   const dropLine = h('div', { class: 'sec-drop-line' });
@@ -94,6 +96,9 @@ export function createSectionsPanel(actions) {
     const toggle = h('button', {
       class: `sec-toggle ${kids.length && !flat ? '' : 'leaf'} ${openNow ? 'open' : ''}`,
       title: kids.length ? (openNow ? 'Collapse' : 'Expand') : '',
+      'aria-label': kids.length ? (openNow ? 'Collapse' : 'Expand') : '',
+      'aria-hidden': kids.length && !flat ? null : 'true',
+      tabindex: kids.length && !flat ? '0' : '-1',
       html: icon('chevron', 11),
       on: {
         click: (e) => {
@@ -106,6 +111,7 @@ export function createSectionsPanel(actions) {
     const eye = h('button', {
       class: 'sec-eye',
       title: node.hidden ? 'Show on the page' : 'Hide on the page (records a removal note)',
+      'aria-label': node.hidden ? 'Show on the page' : 'Hide on the page',
       html: icon(node.hidden ? 'eye-off' : 'eye', 13),
       on: {
         click: (e) => {
@@ -123,6 +129,10 @@ export function createSectionsPanel(actions) {
           (node.selector && node.selector === activeSelector ? ' active' : '') +
           (node.hidden ? ' is-hidden' : ''),
         title: node.selector || '',
+        role: 'treeitem',
+        tabindex: '0',
+        'aria-selected': node.selector && node.selector === activeSelector ? 'true' : 'false',
+        ...(kids.length && !flat ? { 'aria-expanded': openNow ? 'true' : 'false' } : {}),
         on: {
           click: () => {
             if (suppressClick) return;
@@ -131,6 +141,21 @@ export function createSectionsPanel(actions) {
           mouseenter: () => {
             if (drag) springLoad(node, depth);
             else actions.hover(node);
+          },
+          // Keyboard focus should highlight the element on the page just like
+          // hovering does, or the tree is unusable without a mouse.
+          focus: () => actions.hover(node),
+          keydown: (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              actions.select(node);
+            } else if (e.key === 'ArrowRight' && kids.length && !flat && !openNow) {
+              e.preventDefault();
+              setOpen(node, depth, true);
+            } else if (e.key === 'ArrowLeft' && kids.length && !flat && openNow) {
+              e.preventDefault();
+              setOpen(node, depth, false);
+            }
           },
         },
       },

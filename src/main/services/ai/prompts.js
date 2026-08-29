@@ -84,6 +84,9 @@ function renderAnnotation(a, index) {
     if (attrs.ariaLabel) lines.push(`   aria-label: ${attrs.ariaLabel}`);
   }
 
+  if (a.viewport && a.viewport.w && a.viewport.id !== 'fit') {
+    lines.push(`   Viewport: ${a.viewport.label} ${a.viewport.w}x${a.viewport.h}`);
+  }
   if (a.note) lines.push(`   Note: ${a.note.trim()}`);
   lines.push(`   Status: ${a.status || 'open'} · Priority: ${a.priority || 'normal'}`);
   return lines.join('\n');

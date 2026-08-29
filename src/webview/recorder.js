@@ -1,4 +1,4 @@
-// Chrome AI OS — recorder.js
+// Braiwser — recorder.js
 // Captures real user interactions on the page as a step list and streams them
 // out via the onStep callback. Capture-phase, never preventDefault — the page
 // must behave totally normally while recording.

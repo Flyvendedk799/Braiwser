@@ -175,12 +175,23 @@ export function createLayersPanel(actions) {
         {
           class: `layer-row ${s.isTarget ? 'is-target' : ''} ${s.hidden ? 'is-hidden' : ''}`,
           title: s.selector || '',
+          role: 'option',
+          tabindex: '0',
+          'aria-selected': s.isTarget ? 'true' : 'false',
           on: {
             click: (e) => {
               if (suppressClick || e.target.closest('.layer-acts')) return;
               actions.selectLayout(s);
             },
             mouseenter: () => { if (!drag) actions.hover(s); },
+            // Keyboard focus highlights the layer on the page, the same way
+            // hovering it does — otherwise the list is mouse-only.
+            focus: () => { if (!drag) actions.hover(s); },
+            keydown: (e) => {
+              if (e.key !== 'Enter' && e.key !== ' ') return;
+              e.preventDefault();
+              actions.selectLayout(s);
+            },
           },
         },
         [

@@ -1,4 +1,4 @@
-// Chrome AI OS — replay.js
+// Braiwser — replay.js
 // Re-executes recorded steps against the live page. 'navigate' steps are owned
 // by the host (it changes the webview src), so they are a no-op here.
 
@@ -107,7 +107,7 @@ function compareStr(op, actual, expected) {
   return a.toLowerCase().includes(e.toLowerCase()); // 'contains' (default)
 }
 
-// Chrome AI OS injects its own UI (data-caos). Assertions must never count or
+// Braiwser injects its own UI (data-caos). Assertions must never count or
 // match those elements — only the page's real content.
 function notOwnUI(el) {
   try {

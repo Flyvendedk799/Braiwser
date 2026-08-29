@@ -1,8 +1,8 @@
-// Chrome AI OS — renderer controller.
+// Braiwser — renderer controller.
 // Owns app state, builds the shell, wires the <webview> guest, and orchestrates
 // the annotation / recording / replay / AI / export flows. Talks to the backend
 // only through window.caos and to the guest page only through the webview.
-import { h, clear, toast, confirmDialog, promptDialog, modal, menu, esc } from './lib/dom.js';
+import { h, clear, toast, confirmDialog, promptDialog, modal, menu, esc, icon } from './lib/dom.js';
 import { createToolbar } from './components/toolbar.js';
 import { createSidebar } from './components/sidebar.js';
 import { createNotesPanel } from './components/notes-panel.js';
@@ -10,6 +10,7 @@ import { createSectionsPanel } from './components/sections-panel.js';
 import { createStylePanel } from './components/style-panel.js';
 import { createLayersPanel } from './components/layers-panel.js';
 import { createAiPanel } from './components/ai-panel.js';
+import { createAuditPanel } from './components/audit-panel.js';
 import { openOnboardingModal, openSettingsModal } from './components/settings-modal.js';
 import { createTabStrip } from './components/tabs.js';
 import { compositeAnnotations } from './lib/screenshots.js';
@@ -44,11 +45,14 @@ const state = {
   bookmarked: false,
   history: [],
   bookmarks: [],
+  systemTheme: 'dark',
+  auditing: false,
 };
 
 let wv; // the ACTIVE tab's <webview>
-let toolbar, sidebar, notesPanel, sectionsPanel, layersPanel, stylePanel, aiPanel, tabStrip, webviewHost;
+let toolbar, sidebar, notesPanel, sectionsPanel, layersPanel, stylePanel, aiPanel, auditPanel, tabStrip, webviewHost;
 let statusLeft, statusRight;
+let deviceBadge;
 let tabButtons = {};
 let stageOverlay, overlayLabel, overlayFill, overlayCancelBtn;
 const replayWaiters = new Map(); // index -> {resolve}
@@ -67,8 +71,15 @@ async function boot() {
     if (state.settings.sideTab === 'layers' || state.settings.sideTab === 'sections') state.sideTab = state.settings.sideTab;
     state.libraryOpen = !!state.settings.libraryOpen;
   }
+  state.systemTheme = await caos.system.theme();
+  applyTheme();
+  caos.system.onThemeChange((theme) => {
+    state.systemTheme = theme;
+    if ((state.settings.theme || 'dark') === 'system') applyTheme();
+  });
   buildShell();
   setupShortcuts();
+  caos.onCommand(({ command, arg }) => runCommand(command, arg));
   await refreshProjects();
   await refreshRecordings();
   await refreshHistory();
@@ -82,6 +93,7 @@ async function boot() {
   } else {
     createTab(state.config.welcomeUrl);
   }
+  applyDevice();
 
   if (!caos.e2e && !state.settings.onboardingComplete) {
     setTimeout(openOnboarding, 250);
@@ -94,6 +106,9 @@ async function boot() {
       startRecording, refreshPins, refreshRecordings,
       createTab, setActiveTab, closeTab, refreshHistory, refreshBookmarks,
       captureElement, exportSelectedElement, exportRecordingDoc,
+      runCommand, runAudit, setDevice, applyTheme, currentDevice,
+      auditPanel: () => auditPanel, notesPanel: () => notesPanel,
+      exportRecordingAs, importBundleText,
     };
     import('./lib/e2e.js')
       .then((m) => m.run(internals))
@@ -122,6 +137,8 @@ function buildShell() {
     openFile: openFile,
     openFolder: openFolder,
     toggleBookmark: toggleBookmark,
+    runAudit: () => runAudit(),
+    openDeviceMenu: onDeviceMenu,
   });
 
   // Both side panels drive the page the same way: a quiet outline on hover, a
@@ -164,6 +181,9 @@ function buildShell() {
     exportRecording: exportRecording,
     deleteRecording: deleteRecording,
     openUrl: (url) => navigateTo(url),
+    exportBundle: exportProjectBundle,
+    importBundle: importProjectBundle,
+    exportRecording: onExportRecording,
     removeBookmark: async (b) => { await caos.bookmarks.remove(b.id); await refreshBookmarks(); updateBookmarkState(); },
     clearHistory: async () => { if (await confirmDialog({ title: 'Clear history', message: 'Remove all browsing history?', confirmLabel: 'Clear' })) { await caos.history.clear(); await refreshHistory(); } },
   }, { sections: sectionsPanel.root, layers: layersPanel.root });
@@ -177,10 +197,19 @@ function buildShell() {
     remove: removeAnnotation,
     copySelector: (a) => copyText(a.target && a.target.selector, 'Selector copied'),
     suggestFix: (a) => { switchTab('ai'); aiPanel.runExternal('suggest-fix', { annotations: [a], context: { annotation: a } }); },
-    onCount: (total) => {
-      if (tabButtons.notes) tabButtons.notes.querySelector('.pill').textContent = String(total);
-      syncStatus();
-    },
+    currentUrl: () => state.currentUrl,
+    bulkUpdate: bulkUpdateAnnotations,
+    bulkRemove: bulkRemoveAnnotations,
+    onCount: (total) => { setTabCount('notes', total); syncStatus(); },
+  });
+
+  auditPanel = createAuditPanel(state.config, {
+    run: () => runAudit(),
+    locate: (f) => locateTarget(f.target),
+    copySelector: (f) => copyText(f.selector, 'Selector copied'),
+    addOne: (f) => promoteFindings([f]),
+    addAll: (list) => promoteFindings(list),
+    onCount: (total) => setTabCount('audit', total),
   });
 
   stylePanel = createStylePanel({
@@ -201,9 +230,9 @@ function buildShell() {
   syncProfileUi();
 
   const tabs = h('div', { class: 'tabs' });
-  ['notes', 'style', 'ai'].forEach((id) => {
-    const labels = { notes: 'Notes', style: 'Style', ai: 'AI' };
-    const showPill = id === 'notes';
+  ['notes', 'style', 'audit', 'ai'].forEach((id) => {
+    const labels = { notes: 'Notes', style: 'Style', audit: 'Audit', ai: 'AI' };
+    const showPill = id === 'notes' || id === 'audit';
     const btn = h('button', {
       class: `tab ${id === state.activeTab ? 'active' : ''}`,
       html: `<span>${labels[id]}</span>${showPill ? '<span class="pill">0</span>' : ''}`,
@@ -226,7 +255,7 @@ function buildShell() {
     ]),
   ]);
 
-  const panel = h('aside', { class: 'panel' }, [tabs, notesPanel.root, stylePanel.root, aiPanel.root, footer]);
+  const panel = h('aside', { class: 'panel' }, [tabs, notesPanel.root, stylePanel.root, auditPanel.root, aiPanel.root, footer]);
 
   // ---- Stage (tab strip + webview host) ----
   tabStrip = createTabStrip({ newTab: () => createTab(state.config.welcomeUrl), selectTab: setActiveTab, closeTab: closeTab });
@@ -238,7 +267,8 @@ function buildShell() {
   statusLeft = h('div', { class: 'status-left' });
   statusRight = h('div', { class: 'status-right' });
   const statusBar = h('div', { class: 'statusbar' }, [statusLeft, statusRight]);
-  const stage = h('div', { class: 'stage' }, [tabStrip.root, webviewHost, stageOverlay, statusBar]);
+  deviceBadge = h('div', { class: 'device-badge' });
+  const stage = h('div', { class: 'stage' }, [tabStrip.root, webviewHost, deviceBadge, stageOverlay, statusBar]);
 
   const body = h('div', { class: 'body' }, [sidebar.root, stage, panel]);
   root.appendChild(toolbar.root);
@@ -282,39 +312,213 @@ function exportBtn(label, format) {
 }
 
 function switchTab(id) {
+  const panels = { notes: notesPanel, style: stylePanel, audit: auditPanel, ai: aiPanel };
+  if (!panels[id]) return;
   state.activeTab = id;
   Object.entries(tabButtons).forEach(([k, b]) => b.classList.toggle('active', k === id));
-  [notesPanel, stylePanel, aiPanel].forEach((p) => p.root.classList.remove('active'));
-  ({ notes: notesPanel, style: stylePanel, ai: aiPanel })[id].root.classList.add('active');
+  Object.values(panels).forEach((p) => p.root.classList.remove('active'));
+  panels[id].root.classList.add('active');
+}
+
+function setTabCount(id, total) {
+  const btn = tabButtons[id];
+  const pill = btn && btn.querySelector('.pill');
+  if (pill) pill.textContent = String(total);
 }
 
 // ============================================================ SHORTCUTS
+// Accelerators live in the native menu (src/main/menu.js) so they fire even
+// while the guest <webview> owns keyboard focus — a renderer keydown listener
+// never sees those. Escape stays here because a menu accelerator would swallow
+// it from modals and text fields.
 function setupShortcuts() {
   document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
     const t = e.target;
     const editable = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
-    const mod = e.metaKey || e.ctrlKey;
-    const k = (e.key || '').toLowerCase();
-    if (mod && k === 'l') { e.preventDefault(); toolbar.focusAddress(); return; }
-    if (mod && k === 't') { e.preventDefault(); createTab(state.config.welcomeUrl); return; }
-    if (mod && k === 'w') { e.preventDefault(); if (state.activeTabId) closeTab(state.activeTabId); return; }
-    if (mod && k === 'r') { e.preventDefault(); const tab = activeTab(); if (wv) { try { tab && tab.loading ? wv.stop() : wv.reload(); } catch (_e) { /* ignore */ } } return; }
-    if (mod && (k === '1' || k === '2' || k === '3' || k === '4')) {
-      e.preventDefault();
-      setMode({ 1: 'inspect', 2: 'draw', 3: 'edit', 4: 'arrange' }[k]);
-      return;
-    }
-    if (!mod && !editable && (k === '?' || (k === '/' && e.shiftKey))) { e.preventDefault(); showShortcuts(); return; }
-    if (mod && k === '/') { e.preventDefault(); showShortcuts(); return; }
-    if (mod && k === 'z') {
-      e.preventDefault();
-      sendWv(e.shiftKey ? 'caos:redo-edit' : 'caos:undo-edit');
-      return;
-    }
-    if (mod && k === 'y') { e.preventDefault(); sendWv('caos:redo-edit'); return; }
-    if (mod && k === '0') { e.preventDefault(); setMode('off'); return; }
-    if (!mod && k === 'escape' && !editable && state.mode !== 'off') { setMode('off'); }
+    if (editable || document.querySelector('.modal-backdrop')) return;
+    if (state.mode !== 'off') setMode('off');
   });
+}
+
+// ============================================================ COMMANDS
+// One table for every menu item. Keeping it here (rather than in the menu)
+// means the menu stays declarative and every command is testable in-process.
+const COMMANDS = {
+  'tab.new': () => createTab(state.config.welcomeUrl),
+  'tab.close': () => { if (state.activeTabId) closeTab(state.activeTabId); },
+  'file.open': () => openFile(),
+  'folder.open': () => openFolder(),
+  'project.new': () => createProject(),
+  'session.new': () => createSession(),
+  'export.markdown': () => doExport('markdown'),
+  'export.prompt': () => doExport('prompt'),
+  'export.json': () => doExport('json'),
+  'export.copyPrompt': () => copyExport('prompt'),
+  'agent.handoff': () => handoffToAgent(),
+  'bundle.export': () => exportProjectBundle(state.currentProject),
+  'bundle.import': () => importProjectBundle(),
+  'settings.open': () => openSettings(),
+
+  'notes.search': () => { switchTab('notes'); notesPanel.focusSearch(); },
+  'panel.notes': () => switchTab('notes'),
+  'panel.style': () => switchTab('style'),
+  'panel.audit': () => switchTab('audit'),
+  'panel.ai': () => switchTab('ai'),
+
+  'view.theme': (id) => setTheme(id),
+  'view.device': (id) => setDevice(id),
+  'view.rotate': () => rotateDevice(),
+  'zoom.in': () => nudgeZoom(0.5),
+  'zoom.out': () => nudgeZoom(-0.5),
+  'zoom.reset': () => setZoom(0),
+  'devtools.page': () => togglePageDevTools(),
+
+  'nav.back': () => { if (wv && safe(() => wv.canGoBack())) wv.goBack(); },
+  'nav.forward': () => { if (wv && safe(() => wv.canGoForward())) wv.goForward(); },
+  'nav.reload': () => { const t = activeTab(); if (!wv) return; try { t && t.loading ? wv.stop() : wv.reload(); } catch (_e) { /* ignore */ } },
+  'nav.address': () => toolbar.focusAddress(),
+  'nav.home': () => navigateTo(state.config.welcomeUrl),
+  'nav.bookmark': () => toggleBookmark(),
+
+  'mode.inspect': () => setMode('inspect'),
+  'mode.draw': () => setMode('draw'),
+  'mode.edit': () => setMode('edit'),
+  'mode.arrange': () => setMode('arrange'),
+  'mode.assert': () => setMode('assert'),
+  'mode.off': () => setMode('off'),
+  'audit.run': () => runAudit(),
+  'edit.undo': () => sendWv('caos:undo-edit'),
+  'edit.redo': () => sendWv('caos:redo-edit'),
+  'record.toggle': () => toggleRecord(),
+  'replay.run': () => replaySelected(),
+  'shot.viewport': () => doScreenshot(false),
+  'shot.fullpage': () => doScreenshot(true),
+
+  'help.shortcuts': () => showShortcuts(),
+  'help.about': () => showAbout(),
+  'help.welcome': () => navigateTo(state.config.welcomeUrl),
+};
+
+function runCommand(command, arg) {
+  const fn = COMMANDS[command];
+  if (!fn) return false;
+  try {
+    fn(arg);
+  } catch (e) {
+    toast('That action failed: ' + (e && e.message ? e.message : e), 'error');
+  }
+  return true;
+}
+
+// ============================================================ THEME
+// settings.theme is 'dark' | 'light' | 'system'; 'system' resolves against the
+// live OS preference reported by the main process.
+function resolvedTheme() {
+  const choice = (state.settings && state.settings.theme) || 'dark';
+  return choice === 'system' ? state.systemTheme || 'dark' : choice;
+}
+
+function applyTheme() {
+  document.documentElement.dataset.theme = resolvedTheme();
+}
+
+async function setTheme(id) {
+  const next = await caos.settings.set({ theme: id });
+  if (next) state.settings = next;
+  applyTheme();
+  toast(`Theme: ${id}`);
+}
+
+// ============================================================ DEVICE VIEWPORT
+function devicePresets() {
+  return (state.config && state.config.devicePresets) || [{ id: 'fit', label: 'Fit to window', w: 0, h: 0 }];
+}
+
+// The active preset, already rotated if landscape is on. `short` is the compact
+// label the toolbar button shows.
+function currentDevice() {
+  const id = (state.settings && state.settings.device) || 'fit';
+  const preset = devicePresets().find((d) => d.id === id) || devicePresets()[0];
+  const landscape = !!(state.settings && state.settings.deviceLandscape) && preset.w > 0;
+  return {
+    id: preset.id,
+    label: preset.label,
+    short: preset.id === 'fit' ? 'Fit' : `${landscape ? preset.h : preset.w}px`,
+    w: landscape ? preset.h : preset.w,
+    h: landscape ? preset.w : preset.h,
+    landscape,
+  };
+}
+
+// Size every tab's webview, not just the active one, so switching tabs does not
+// briefly show a differently-sized page.
+function applyDevice() {
+  const d = currentDevice();
+  const on = d.id !== 'fit' && d.w > 0;
+  if (webviewHost) webviewHost.classList.toggle('device', on);
+  for (const t of state.tabs) {
+    if (!t.wv) continue;
+    t.wv.style.width = on ? d.w + 'px' : '';
+    t.wv.style.height = on ? d.h + 'px' : '';
+  }
+  if (deviceBadge) {
+    deviceBadge.classList.toggle('show', on);
+    deviceBadge.innerHTML = on ? `<b>${esc(d.label)}</b> ${d.w} × ${d.h}${d.landscape ? ' · landscape' : ''}` : '';
+  }
+  syncToolbar();
+}
+
+async function setDevice(id) {
+  const next = await caos.settings.set({ device: id });
+  if (next) state.settings = next;
+  applyDevice();
+  const d = currentDevice();
+  toast(d.id === 'fit' ? 'Viewport: fit to window' : `Viewport: ${d.label} ${d.w}×${d.h}`);
+}
+
+async function rotateDevice() {
+  if (currentDevice().id === 'fit') { toast('Pick a device viewport first', 'warn'); return; }
+  const next = await caos.settings.set({ deviceLandscape: !state.settings.deviceLandscape });
+  if (next) state.settings = next;
+  applyDevice();
+}
+
+function onDeviceMenu() {
+  const anchorEl = toolbar.deviceAnchor();
+  const active = currentDevice();
+  const items = devicePresets().map((d) => ({
+    label: (d.id === active.id ? '● ' : '   ') + d.label + (d.w ? `  ${d.w}×${d.h}` : ''),
+    onClick: () => setDevice(d.id),
+  }));
+  items.push({ label: (state.settings.deviceLandscape ? '● ' : '   ') + 'Rotate (landscape)', onClick: () => rotateDevice() });
+  menu(anchorEl, items);
+}
+
+// ============================================================ ZOOM / DEVTOOLS
+function setZoom(level) {
+  const tab = activeTab();
+  if (!wv || !tab) return;
+  tab.zoom = level;
+  try { wv.setZoomLevel(level); } catch (_e) { /* not ready */ }
+}
+
+function nudgeZoom(delta) {
+  const tab = activeTab();
+  if (!tab) return;
+  const next = Math.max(-4, Math.min(4, (tab.zoom || 0) + delta));
+  setZoom(next);
+  toast(`Page zoom ${Math.round(Math.pow(1.2, next) * 100)}%`);
+}
+
+function togglePageDevTools() {
+  if (!wv) return;
+  try {
+    if (wv.isDevToolsOpened()) wv.closeDevTools();
+    else wv.openDevTools();
+  } catch (_e) {
+    toast('DevTools are not available for this page', 'warn');
+  }
 }
 
 // ============================================================ TABS + WEBVIEW WIRING
@@ -327,6 +531,8 @@ function createTab(url) {
   const tab = { id: 'tab' + ++tabSeq, wv: el, url: url || '', title: '' };
   state.tabs.push(tab);
   webviewHost.appendChild(el);
+  const d = currentDevice();
+  if (d.id !== 'fit' && d.w > 0) { el.style.width = d.w + 'px'; el.style.height = d.h + 'px'; }
   setupTabWebview(tab);
   setActiveTab(tab.id);
   if (url) { el.src = url; tab.url = url; }
@@ -516,6 +722,9 @@ function setupTabWebview(tab) {
       case 'caos:assert-pick':
         if (isActive()) onAssertPick(payload);
         break;
+      case 'caos:audit-result':
+        if (isActive()) onAuditResult(payload);
+        break;
     }
   });
 }
@@ -611,6 +820,8 @@ function syncToolbar() {
     replaying: state.replaying,
     bookmarked: state.bookmarked,
     loading: !!(activeTab() && activeTab().loading),
+    device: currentDevice(),
+    auditing: state.auditing,
     aiProvider,
     providerReady: !!(aiProvider && state.providers && state.providers[aiProvider]),
     profileName: state.settings && state.settings.profile && state.settings.profile.displayName,
@@ -624,7 +835,7 @@ const MOD = navigator.platform.toLowerCase().includes('mac') ? '⌘' : 'Ctrl';
 const TOOL_HINTS = {
   off: {
     dot: 'off',
-    text: 'No tool active — pick one above, or press ' + MOD + '1 Inspect · ' + MOD + '2 Draw · ' + MOD + '3 Edit · ' + MOD + '4 Rearrange',
+    text: 'No tool active — pick one above, or press ' + MOD + '⇧E Inspect · ' + MOD + '⇧D Draw · ' + MOD + '⇧T Edit · ' + MOD + '⇧M Rearrange',
   },
   inspect: {
     dot: 'inspect',
@@ -664,7 +875,7 @@ function syncStatus() {
   const notes = state.annotations.length;
   const edits = state.editStacks.undo;
   if (edits) {
-    statusRight.appendChild(h('span', { class: 'status-chip', text: edits + ' page edit' + (edits === 1 ? '' : 's') + ' · ' + MOD + 'Z to undo' }));
+    statusRight.appendChild(h('span', { class: 'status-chip', text: edits + ' page edit' + (edits === 1 ? '' : 's') + ' · ' + MOD + '⇧Z to undo' }));
   }
   statusRight.appendChild(
     h('span', { class: 'status-meta', text: notes + (notes === 1 ? ' note' : ' notes') + (state.currentSession ? ' · ' + state.currentSession.name : '') })
@@ -674,51 +885,6 @@ function syncStatus() {
   );
 }
 
-// ---- the shortcut sheet -------------------------------------------------------
-const SHORTCUTS = [
-  ['Tools', [
-    [MOD + '1', 'Inspect — capture notes'],
-    [MOD + '2', 'Draw — circle a region'],
-    [MOD + '3', 'Edit — copy and style'],
-    [MOD + '4', 'Rearrange — move and resize'],
-    [MOD + '0 / Esc', 'Put the tools away'],
-  ]],
-  ['On the page', [
-    ['Click', 'Capture / select the element'],
-    ['Double-click', 'Edit the text right there'],
-    ['Drag', 'Move it (Rearrange) or circle it (Draw)'],
-    ['Alt-drag', 'Free-move, ignoring the layout'],
-    ['Esc', 'Cancel the drag or close the note'],
-  ]],
-  ['History', [
-    [MOD + 'Z', 'Undo the last page edit'],
-    [MOD + '⇧Z / ' + MOD + 'Y', 'Redo it'],
-  ]],
-  ['Notes & editor', [
-    [MOD + '↵', 'Save the note you are writing'],
-    ['Drag a label', 'Scrub a number in the Style panel'],
-  ]],
-  ['Browsing', [
-    [MOD + 'L', 'Focus the address bar'],
-    [MOD + 'T / ' + MOD + 'W', 'New tab / close tab'],
-    [MOD + 'R', 'Reload the page'],
-  ]],
-];
-
-function showShortcuts() {
-  const body = h('div', { class: 'shortcuts' }, SHORTCUTS.map(([group, rows]) =>
-    h('div', { class: 'sc-group' }, [
-      h('div', { class: 'sc-group-title', text: group }),
-      h('div', { class: 'sc-rows' }, rows.map(([keys, what]) =>
-        h('div', { class: 'sc-row' }, [
-          h('kbd', { class: 'sc-keys', text: keys }),
-          h('span', { class: 'sc-what', text: what }),
-        ])
-      )),
-    ])
-  ));
-  modal({ title: 'Keyboard shortcuts', width: 540, body, actions: [{ label: 'Close', kind: 'primary' }] });
-}
 
 function safe(fn) { try { return fn(); } catch (_e) { return false; } }
 
@@ -742,15 +908,70 @@ function setMode(mode) {
 
 // ============================================================ ANNOTATIONS
 async function onAnnotation(raw) {
-  if (!raw) return;
+  const saved = await captureAnnotation(raw);
+  if (saved) toast(`Note captured — ${saved.action}`, 'success');
+}
+
+// Persist one annotation into the active session, stamping it with the page and
+// the viewport it was captured at. Shared by in-page capture and audit promotion.
+async function captureAnnotation(raw) {
+  if (!raw) return null;
   const session = await ensureSession();
-  const annotation = { ...raw, sessionId: session.id, url: raw.url || state.currentUrl, title: raw.title || state.currentTitle };
-  const saved = await caos.annotations.create(annotation);
+  const d = currentDevice();
+  const annotation = {
+    ...raw,
+    sessionId: session.id,
+    url: raw.url || state.currentUrl,
+    title: raw.title || state.currentTitle,
+    viewport: raw.viewport || { id: d.id, label: d.label, w: d.w || (wv ? wv.clientWidth : 0), h: d.h || (wv ? wv.clientHeight : 0) },
+  };
+  let saved;
+  try {
+    saved = await caos.annotations.create(annotation);
+  } catch (e) {
+    toast('Could not save that note: ' + (e && e.message ? e.message : e), 'error');
+    return null;
+  }
   state.annotations.push(saved);
   notesPanel.setAnnotations(state.annotations);
   bumpSessionCount(session.id, 1);
-  toast(`Note captured — ${saved.action}`, 'success');
   refreshPins();
+  return saved;
+}
+
+// ---- bulk triage -----------------------------------------------------------
+async function bulkUpdateAnnotations(list, patch) {
+  if (!list || !list.length) return;
+  for (const a of list) {
+    try {
+      const updated = await caos.annotations.update(a.id, patch);
+      const i = state.annotations.findIndex((x) => x.id === a.id);
+      if (i >= 0) state.annotations[i] = updated || { ...a, ...patch };
+    } catch (_e) { /* keep going — one failure must not strand the rest */ }
+  }
+  notesPanel.setAnnotations(state.annotations);
+  refreshPins();
+  toast(`Updated ${list.length} note${list.length === 1 ? '' : 's'}`, 'success');
+}
+
+async function bulkRemoveAnnotations(list) {
+  if (!list || !list.length) return;
+  const ok = await confirmDialog({
+    title: 'Delete notes',
+    message: `Delete ${list.length} note${list.length === 1 ? '' : 's'}? This cannot be undone.`,
+    confirmLabel: 'Delete',
+  });
+  if (!ok) return;
+  for (const a of list) {
+    try {
+      await caos.annotations.remove(a.id);
+      state.annotations = state.annotations.filter((x) => x.id !== a.id);
+      if (state.currentSession) bumpSessionCount(state.currentSession.id, -1);
+    } catch (_e) { /* ignore */ }
+  }
+  notesPanel.setAnnotations(state.annotations);
+  refreshPins();
+  toast(`Deleted ${list.length} note${list.length === 1 ? '' : 's'}`);
 }
 
 // ---- single-element export ---------------------------------------------------
@@ -857,6 +1078,14 @@ async function locateAnnotation(a) {
     await sleep(150);
   }
   const ok = await highlightAndAck(a.target);
+  if (!ok) toast('Could not locate that element on the page', 'warn');
+}
+
+// Highlight an arbitrary target descriptor (used by audit findings, which are
+// not annotations but carry the same anchor shape).
+async function locateTarget(target) {
+  if (!target) { toast('This finding has no element to locate', 'warn'); return; }
+  const ok = await highlightAndAck(target);
   if (!ok) toast('Could not locate that element on the page', 'warn');
 }
 
@@ -1485,6 +1714,178 @@ function compareStr(op, actual, expected) {
   return a.toLowerCase().includes(e.toLowerCase());
 }
 
+// ============================================================ PAGE AUDIT
+// The audit runs inside the guest page (src/webview/audit.js) so it sees the
+// real, computed, post-JavaScript DOM. Findings are not annotations until the
+// user promotes them — an audit is a suggestion, a note is a decision.
+const AUDIT_TIMEOUT_MS = 15000;
+let auditTimer = null;
+
+function runAudit() {
+  if (!wv) { toast('Open a page first', 'warn'); return; }
+  if (state.auditing) return;
+  if (/welcome\.html$/.test(state.currentUrl || '')) { toast('Open a real page to audit', 'warn'); return; }
+  state.auditing = true;
+  switchTab('audit');
+  auditPanel.setRunning(true);
+  syncToolbar();
+  sendWv('caos:run-audit');
+  clearTimeout(auditTimer);
+  auditTimer = setTimeout(() => {
+    if (!state.auditing) return;
+    onAuditResult({ error: 'The page did not answer the audit in time. Reload it and try again.', findings: [], counts: {}, total: 0 });
+  }, AUDIT_TIMEOUT_MS);
+}
+
+function onAuditResult(report) {
+  clearTimeout(auditTimer);
+  state.auditing = false;
+  syncToolbar();
+  auditPanel.setReport(report);
+  if (!report || report.error) return;
+  if (!report.total) toast('Audit passed — no issues found', 'success');
+  else toast(`Audit found ${report.total} issue${report.total === 1 ? '' : 's'}`, report.counts && report.counts.critical ? 'error' : 'warn');
+}
+
+// Severity decides both the action tag and the note priority, so a promoted
+// finding lands in exports already triaged.
+const AUDIT_ACTION = { critical: 'fix', serious: 'fix', moderate: 'change', minor: 'comment' };
+const AUDIT_PRIORITY = { critical: 'critical', serious: 'high', moderate: 'normal', minor: 'low' };
+
+function findingToAnnotation(f) {
+  const detail = f.detail ? ` ${f.detail}` : '';
+  const help = f.help ? ` Fix: ${f.help}` : '';
+  return {
+    kind: f.target && f.target.selector ? 'element' : 'region',
+    action: AUDIT_ACTION[f.severity] || 'comment',
+    note: `[audit:${f.ruleId}] ${f.title}.${detail}${help}`.trim(),
+    target: f.target || {},
+    priority: AUDIT_PRIORITY[f.severity] || 'normal',
+  };
+}
+
+async function promoteFindings(findings) {
+  const list = (findings || []).filter(Boolean);
+  if (!list.length) { toast('Nothing to capture', 'warn'); return; }
+  const done = [];
+  for (const f of list) {
+    const saved = await captureAnnotation(findingToAnnotation(f));
+    if (saved) done.push(f.id);
+  }
+  auditPanel.markPromoted(done);
+  if (done.length) toast(`Captured ${done.length} finding${done.length === 1 ? '' : 's'} as notes`, 'success');
+}
+
+// ============================================================ BUNDLES
+async function exportProjectBundle(project) {
+  const p = project || state.currentProject;
+  if (!p) { toast('Open a project first', 'warn'); return; }
+  try {
+    const bundle = await caos.bundle.export(p.id);
+    const saved = await caos.fs.save({ defaultName: bundle.defaultName, content: bundle.content });
+    if (saved) {
+      const c = bundle.counts;
+      toast(`Exported ${c.sessions} session(s), ${c.annotations} note(s), ${c.recordings} recording(s)`, 'success');
+    }
+  } catch (e) {
+    toast('Bundle export failed: ' + (e && e.message ? e.message : e), 'error');
+  }
+}
+
+async function importProjectBundle() {
+  let picked;
+  try {
+    picked = await caos.fs.openJson();
+  } catch (e) {
+    toast('Could not read that file: ' + (e && e.message ? e.message : e), 'error');
+    return;
+  }
+  if (!picked) return;
+  await importBundleText(picked.text);
+}
+
+async function importBundleText(text) {
+  try {
+    const res = await caos.bundle.import(text);
+    await refreshProjects();
+    await openProject(res.project);
+    const c = res.counts;
+    toast(`Imported “${res.project.name}” — ${c.sessions} session(s), ${c.annotations} note(s), ${c.recordings} recording(s)`, 'success');
+    return res;
+  } catch (e) {
+    toast('Import failed: ' + (e && e.message ? e.message : e), 'error');
+    return null;
+  }
+}
+
+// ============================================================ RECORDING EXPORT
+function onExportRecording(rec) {
+  modal({
+    title: `Export “${rec.name}”`,
+    width: 440,
+    body: h('div', { class: 'field-hint', style: { margin: '0' }, text: 'A journey is already a selector-anchored step list, so it converts straight into a Playwright spec you can drop into your test suite. JSON keeps the raw steps for archiving or re-import.' }),
+    actions: [
+      { label: 'Cancel', kind: 'ghost' },
+      { label: 'JSON', kind: 'ghost', onClick: () => exportRecordingAs('json', rec) },
+      { label: 'Playwright test', kind: 'primary', onClick: () => exportRecordingAs('playwright', rec) },
+    ],
+  });
+}
+
+async function exportRecordingAs(format, rec) {
+  try {
+    const out = await caos.export.recording(format, rec.id);
+    const saved = await caos.fs.save({ defaultName: out.defaultName, content: out.content });
+    if (saved) toast(format === 'json' ? 'Journey exported' : 'Playwright test written', 'success');
+    return out;
+  } catch (e) {
+    toast('Export failed: ' + (e && e.message ? e.message : e), 'error');
+    return null;
+  }
+}
+
+// ============================================================ HELP
+function keyLabel(combo) {
+  const mac = (state.config && state.config.platform) === 'darwin';
+  return String(combo)
+    .replace(/Mod/g, mac ? '\u2318' : 'Ctrl')
+    .replace(/Alt/g, mac ? '\u2325' : 'Alt')
+    .replace(/Shift/g, mac ? '\u21e7' : 'Shift')
+    .split('+')
+    .map((s2) => s2.trim())
+    .filter(Boolean);
+}
+
+function showShortcuts() {
+  const body = h('div', {});
+  for (const group of (state.config && state.config.shortcuts) || []) {
+    const rows = group.items.map(([label, combo]) =>
+      h('div', { class: 'shortcut-row' }, [
+        h('span', { text: label }),
+        h('span', { class: 'shortcut-keys' }, keyLabel(combo).map((k) => h('kbd', { text: k }))),
+      ])
+    );
+    body.appendChild(h('div', { class: 'shortcut-group' }, [h('h4', { text: group.group }), ...rows]));
+  }
+  modal({ title: 'Keyboard shortcuts', width: 520, body, actions: [{ label: 'Close', kind: 'primary' }] });
+}
+
+function showAbout() {
+  const version = (state.config && state.config.appVersion) || '';
+  const body = h('div', {}, [
+    h('div', { class: 'about-hero' }, [
+      h('div', { class: 'about-mark', html: icon('inspect', 24) }),
+      h('div', {}, [
+        h('div', { class: 'about-name', text: 'Braiwser' }),
+        h('div', { class: 'about-version', text: 'v' + version }),
+      ]),
+    ]),
+    h('p', { class: 'about-copy', text: 'An annotation-first inspector browser for reviewing web UIs and handing precise change requests to a coding agent. Open any project or URL, click elements to capture them, audit accessibility, record journeys as tests, and export the whole review as Markdown, an agent prompt, or a Playwright spec.' }),
+    h('p', { class: 'about-copy', text: 'Everything — projects, notes, journeys, API keys — stays on this machine. Nothing is uploaded unless you run an AI task with your own key.' }),
+  ]);
+  modal({ title: 'About', width: 480, body, actions: [{ label: 'Close', kind: 'primary' }] });
+}
+
 // ============================================================ SCREENSHOT
 function onScreenshot(e) {
   const anchorEl = (e && e.currentTarget) || document.body;
@@ -1650,10 +2051,20 @@ async function handoffToAgent() {
 }
 
 // ============================================================ SETTINGS
+// The settings/onboarding modals render option lists that live in config, so
+// hand them a view of settings with those choices folded in.
+function settingsView() {
+  return {
+    ...state.settings,
+    availableThemes: (state.config && state.config.themes) || [],
+    modelChoices: (state.config && state.config.modelChoices) || {},
+  };
+}
+
 async function openOnboarding() {
   state.providers = await caos.secrets.providers();
   openOnboardingModal({
-    settings: state.settings,
+    settings: settingsView(),
     providers: { ...state.providers },
     actions: profileActions(),
   });
@@ -1662,7 +2073,7 @@ async function openOnboarding() {
 async function openSettings() {
   state.providers = await caos.secrets.providers();
   openSettingsModal({
-    settings: state.settings,
+    settings: settingsView(),
     providers: { ...state.providers },
     actions: profileActions(),
   });
@@ -1673,8 +2084,11 @@ function profileActions() {
     setSettings: async (patch) => {
       const next = await caos.settings.set(patch);
       if (next) state.settings = next;
+      // Appearance and viewport changes must land immediately, not on restart.
+      if (patch && Object.prototype.hasOwnProperty.call(patch, 'theme')) applyTheme();
+      if (patch && (patch.device !== undefined || patch.deviceLandscape !== undefined)) applyDevice();
       syncProfileUi();
-      return state.settings;
+      return settingsView();
     },
     setKey: async (provider, key) => {
       state.providers = await caos.secrets.setKey(provider, key);

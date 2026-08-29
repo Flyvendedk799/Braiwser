@@ -1,4 +1,4 @@
-/* Chrome AI OS — renderer theme. Linear / DevTools-grade dark UI.
+/* Braiwser — renderer theme. Linear / DevTools-grade dark UI.
    All color comes from CSS variables so a light theme could be layered later. */
 
 :root {
@@ -1223,17 +1223,188 @@ button:focus:not(:focus-visible) { outline: none; }
 .status-dot.dot-assert { background: var(--change); }
 .status-dot.dot-rec { background: var(--remove); animation: pulse 1.2s infinite; }
 
-/* ---- shortcut sheet ---- */
-.shortcuts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 22px; }
-.sc-group-title {
-  font-size: 10.5px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
-  color: var(--faint); margin-bottom: 6px;
+/* ============================================================ LIGHT THEME
+   The dark palette lives on bare :root above; light is a pure token swap so
+   every component inherits it without knowing a theme exists. The renderer
+   resolves 'system' to a concrete value and stamps data-theme on <html>. */
+:root[data-theme='light'] {
+  --bg: #f6f7f9;
+  --bg2: #ffffff;
+  --panel: #ffffff;
+  --line: #e2e5ea;
+  --line2: #cdd2db;
+  --text: #14171f;
+  --dim: #566071;
+  --faint: #6b7482;
+  --accent: #2f6bff;
+  --accent-soft: rgba(47, 107, 255, 0.12);
+  --accent-line: rgba(47, 107, 255, 0.45);
+
+  --remove: #d63b3b;
+  --change: #b56a00;
+  --fix: #2f6bff;
+  --add: #16855a;
+  --question: #7a45c9;
+  --comment: #6b7482;
+
+  --hi: #eef0f4;
+  --hi2: #e4e7ed;
+  --shadow: 0 16px 44px rgba(15, 22, 41, 0.16);
 }
-.sc-rows { display: flex; flex-direction: column; gap: 4px; }
-.sc-row { display: flex; align-items: baseline; gap: 9px; }
-.sc-keys {
-  flex: 0 0 auto; min-width: 74px; font-family: var(--mono); font-size: 11px;
-  background: var(--bg); border: 1px solid var(--line2); border-bottom-width: 2px;
-  border-radius: 6px; padding: 2px 6px; color: var(--text); text-align: center;
+:root[data-theme='light'] ::-webkit-scrollbar-thumb { background: #c6ccd6; background-clip: padding-box; }
+:root[data-theme='light'] ::-webkit-scrollbar-thumb:hover { background: #aeb6c4; background-clip: padding-box; }
+:root[data-theme='light'] .stage-overlay { background: rgba(255, 255, 255, 0.96); }
+:root[data-theme='light'] .btn-primary { color: #fff; }
+:root[data-theme='light'] .ai-result strong { color: var(--text); }
+:root[data-theme='light'] .agent-output { background: #f3f4f7; color: #1d2230; }
+:root[data-theme='light'] .tab-chip .tc-close:hover { background: var(--hi2); }
+:root[data-theme='light'] .tabstrip-new:hover { background: var(--hi); }
+:root[data-theme='light'] .step-acts .sr-act:hover { background: var(--hi2); }
+:root[data-theme='light'] .icon-btn.active,
+:root[data-theme='light'] .icon-btn.hot { color: #fff; }
+
+/* ============================================================ A11Y BASELINE */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
-.sc-what { font-size: 12px; color: var(--dim); }
+/* Mouse users never see the ring; keyboard users always do. */
+:focus:not(:focus-visible) { outline: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .rec-dot { animation: none; opacity: 1; }
+}
+
+/* ============================================================ DEVICE VIEWPORT
+   In device mode the guest is rendered at an exact CSS size and centred on a
+   neutral backdrop, so responsive breakpoints can be reviewed truthfully. */
+.wv-host.device { background: var(--bg); display: grid; place-items: center; padding: 18px; overflow: auto; }
+.wv-host.device .wv.active {
+  position: relative;
+  inset: auto;
+  border-radius: 10px;
+  border: 1px solid var(--line2);
+  box-shadow: var(--shadow);
+  background: #fff;
+}
+.device-badge {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 4;
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--bg2);
+  border: 1px solid var(--line2);
+  color: var(--dim);
+  font-size: 11.5px;
+  font-weight: 600;
+  pointer-events: none;
+}
+.device-badge.show { display: flex; }
+.device-badge b { color: var(--text); font-weight: 700; }
+
+/* ============================================================ AUDIT TAB */
+.audit-bar { padding: 12px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
+.audit-row { display: flex; gap: 8px; align-items: center; }
+.audit-row .btn { flex: 0 0 auto; }
+.audit-summary { display: flex; flex-wrap: wrap; gap: 6px; }
+.sev-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; font-weight: 700; padding: 2px 9px; border-radius: 999px;
+  border: 1px solid var(--line2); color: var(--dim); background: transparent;
+  cursor: pointer;
+}
+.sev-pill .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.sev-pill.on { border-color: currentColor; }
+.sev-critical { color: var(--remove); }
+.sev-serious { color: var(--change); }
+.sev-moderate { color: var(--fix); }
+.sev-minor { color: var(--comment); }
+.audit-list { padding: 10px 12px 20px; display: flex; flex-direction: column; gap: 8px; }
+.finding {
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--bg2); padding: 10px 11px; position: relative; overflow: hidden;
+}
+.finding::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--stripe, var(--line2)); }
+.finding-top { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+.finding-sev { font-size: 10px; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; }
+.finding-rule { font-size: 10.5px; color: var(--faint); font-family: var(--mono); }
+.finding-grow { flex: 1 1 auto; }
+.finding-title { font-size: 12.8px; font-weight: 650; color: var(--text); margin-bottom: 4px; }
+.finding-detail { font-size: 12px; color: var(--dim); line-height: 1.45; word-break: break-word; }
+.finding-snippet { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-top: 6px; word-break: break-all; }
+.finding-help { font-size: 11.5px; color: var(--faint); line-height: 1.45; margin-top: 6px; border-top: 1px dashed var(--line); padding-top: 6px; }
+.finding-acts { display: flex; gap: 1px; }
+.audit-meta { font-size: 11.5px; color: var(--faint); }
+
+/* ============================================================ NOTES SEARCH + BULK */
+.notes-search-row { display: flex; gap: 8px; align-items: center; padding: 10px 12px 0; }
+.notes-search-row .input { height: 30px; font-size: 12.5px; }
+.bulk-bar {
+  display: none; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 12px; border-bottom: 1px solid var(--line);
+  background: var(--accent-soft);
+}
+.bulk-bar.show { display: flex; }
+.bulk-count { font-size: 12px; font-weight: 700; color: var(--accent); }
+.bulk-grow { flex: 1 1 auto; }
+.note-check { accent-color: var(--accent); width: 14px; height: 14px; flex: 0 0 auto; cursor: pointer; }
+.note.selected { border-color: var(--accent-line); background: var(--accent-soft); }
+
+/* ============================================================ HELP / ABOUT */
+.shortcut-group { margin-bottom: 16px; }
+.shortcut-group h4 { margin: 0 0 7px; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); font-weight: 800; }
+.shortcut-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 0; font-size: 12.5px; }
+.shortcut-row + .shortcut-row { border-top: 1px solid var(--line); }
+.shortcut-keys { display: flex; gap: 4px; flex: 0 0 auto; }
+kbd {
+  font-family: var(--sans); font-size: 11px; font-weight: 700; color: var(--dim);
+  background: var(--hi2); border: 1px solid var(--line2); border-bottom-width: 2px;
+  border-radius: 5px; padding: 1px 6px; min-width: 18px; text-align: center;
+}
+.about-hero { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
+.about-mark {
+  width: 46px; height: 46px; border-radius: 13px; display: grid; place-items: center; color: #fff;
+  background: linear-gradient(135deg, #5b8cff, #c792ea); box-shadow: 0 8px 26px rgba(91, 140, 255, 0.35);
+}
+.about-name { font-size: 19px; font-weight: 800; letter-spacing: -0.02em; }
+.about-version { font-size: 12px; color: var(--faint); font-family: var(--mono); }
+.about-copy { font-size: 12.5px; color: var(--dim); line-height: 1.55; }
+
+/* ============================================================ DEVICE MENU BUTTON */
+.device-btn .dv-label { font-size: 11.5px; font-weight: 700; }
+
+/* Sidebar section headers can carry more than one action. */
+.side-head-acts { display: flex; align-items: center; gap: 2px; }
+
+/* Copy-selector affordance on DOM-tree rows. */
+.tree-copy {
+  margin-left: auto; border: 0; background: transparent; color: var(--faint);
+  cursor: pointer; padding: 0 2px; border-radius: 4px; display: none; flex: 0 0 auto;
+}
+.tree-self:hover .tree-copy, .tree-self:focus-visible .tree-copy { display: block; }
+.tree-copy:hover { color: var(--text); background: var(--hi2); }
+
+/* Model picker: a known-good dropdown above a free-text id field. */
+.model-field { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+@media (min-width: 520px) { .model-field { grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); } }
+
+/* The toolbar paints its own gradient rather than a token, so light mode needs
+   an explicit counterpart. */
+:root[data-theme='light'] .toolbar { background: linear-gradient(180deg, #ffffff, #f1f3f7); }
+:root[data-theme='light'] .toolbar .icon-btn.active { background: var(--accent); border-color: var(--accent); }
+
+/* Icon-only footer action: it must not claim an equal share of the row. */
+.panel-footer .btn-icon-only { flex: 0 0 34px; padding: 0; justify-content: center; }

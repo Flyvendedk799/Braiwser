@@ -104,6 +104,11 @@ function toPrompt(session, annotations, consoleLog) {
       line += ` Move the element in the markup out of \`${d.fromParentSelector}\` (index ${d.fromIndex}) and into \`${d.parentSelector}\` at index ${d.toIndex} (0-based).`;
     }
 
+    // A responsive bug is only reproducible at the width it was seen at.
+    if (a.viewport && a.viewport.w && a.viewport.id && a.viewport.id !== 'fit') {
+      line += ` Observed at the ${a.viewport.label} viewport (${a.viewport.w}×${a.viewport.h}).`;
+    }
+
     // Surface priority when it is above the baseline so the agent can order work.
     if (a.priority && a.priority !== 'normal') {
       line += ` [priority: ${a.priority}]`;
