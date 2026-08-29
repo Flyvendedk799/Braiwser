@@ -13,6 +13,16 @@ const registerIpc = require('./ipc');
 let mainWindow = null;
 let videoSourceId = null; // the webContents the renderer may film
 
+// A replay we are filming must keep painting even if the user clicks away to
+// another window. Chromium otherwise throttles occluded/background renderers to
+// a crawl, which turns an export into a few frozen frames.
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+// On Windows the occlusion detector alone will park the compositor the moment
+// another window covers ours, which empties the capture stream mid-take.
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
+
 // Window chrome must not flash the wrong colour before the renderer paints.
 function shellBackground(theme) {
   const dark = theme === 'dark' || (theme !== 'light' && nativeTheme.shouldUseDarkColors);
@@ -34,6 +44,7 @@ function createWindow(settings) {
       nodeIntegration: false,
       webviewTag: true,
       spellcheck: true,
+      backgroundThrottling: false,
     },
   });
 
@@ -84,10 +95,12 @@ function createWindow(settings) {
     });
   }
   // Screen capture for "export as video": the renderer asks to record, and we
-  // hand it the guest page's own web contents — so the film is the page itself,
-  // with none of our chrome in the frame and no cropping guesswork.
+  // hand back the guest page's own frame — so the film is the page itself, at
+  // the page's own resolution, with none of our chrome in it and no cropping
+  // guesswork. The frame keeps streaming across cross-document navigations, so
+  // a journey that moves between pages films as one continuous take.
   try {
-    const { session: electronSession, ipcMain: ipc } = require('electron');
+    const { session: electronSession, ipcMain: ipc, webContents } = require('electron');
     ipc.removeHandler && ipc.removeHandler('caos:video.source');
     ipc.handle('caos:video.source', (_e, id) => {
       videoSourceId = typeof id === 'number' ? id : null;
@@ -95,13 +108,13 @@ function createWindow(settings) {
     });
     electronSession.defaultSession.setDisplayMediaRequestHandler(
       (request, callback) => {
-        // Only ever our own window, only when the renderer asked for it, never a
-        // picker and never the desktop. desktopCapturer does not list the calling
-        // app's own windows here, so hand back the window's own media-source id
-        // directly — which is exactly what getMediaSourceId() is for.
-        if (videoSourceId == null || !mainWindow || mainWindow.isDestroyed()) { callback({}); return; }
+        // Only ever the page we were told to film, only when the renderer asked
+        // for it, never a picker and never the desktop.
+        if (videoSourceId == null) { callback({}); return; }
         try {
-          callback({ video: { id: mainWindow.getMediaSourceId(), name: mainWindow.getTitle() } });
+          const guest = webContents.fromId(videoSourceId);
+          if (!guest || guest.isDestroyed()) { callback({}); return; }
+          callback({ video: guest.mainFrame });
         } catch (err) {
           console.log('[video] ' + ((err && err.message) || err));
           callback({});
@@ -124,6 +137,7 @@ app.on('web-contents-created', (_e, contents) => {
     webPreferences.sandbox = false;
     webPreferences.contextIsolation = true;
     webPreferences.nodeIntegration = false;
+    webPreferences.backgroundThrottling = false;
   });
   // Guest pages must not spawn uncontrolled in-app windows. Deny all popups;
   // open vetted http/https links in the OS browser instead.

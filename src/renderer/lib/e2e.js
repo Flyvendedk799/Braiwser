@@ -1105,26 +1105,56 @@ export async function run(I) {
       const magic = atob(pdf.base64.slice(0, 8)).slice(0, 4);
       check('…and it is a real PDF', magic === '%PDF', magic);
 
-      // Video: the page is filmed while the journey replays. Here we only prove
-      // the capture pipeline runs and produces frames — the replay itself is
-      // covered above.
-      let webm = null;
+      // Video: the page is filmed while the journey replays. Here we prove the
+      // capture pipeline runs, that what it films is the PAGE and not the whole
+      // app window, and that the file it produces is a seekable MP4 — the replay
+      // itself is covered above.
+      const film = { size: 0, error: null, capture: null, head: '' };
       try {
         await caos.export.videoSource(wv.getWebContentsId());
         const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false });
+        const track = stream.getVideoTracks()[0];
+        // getSettings() reports the constraint ceiling (1920x1080), not the size
+        // of the frames actually arriving — read those off a <video> instead. It
+        // has to be in the document; Chromium does not decode a detached one.
+        const probe = document.createElement('video');
+        probe.autoplay = true; probe.muted = true; probe.playsInline = true;
+        probe.style.cssText = 'position:fixed;bottom:0;right:0;width:2px;height:2px;opacity:0.01;pointer-events:none';
+        document.body.appendChild(probe);
+        probe.srcObject = stream;
+        await sleep(1200);
+        film.capture = { w: probe.videoWidth, h: probe.videoHeight, displaySurface: track && track.getSettings().displaySurface };
+        const mime = ['video/mp4;codecs=avc1.42E01E', 'video/mp4', 'video/webm'].find((t) => MediaRecorder.isTypeSupported(t));
+        film.mime = mime;
         const chunks = [];
-        const mr = new MediaRecorder(stream);
+        const mr = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
         mr.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
         mr.start(200);
         await sleep(1200);
-        await new Promise((r) => { mr.onstop = r; mr.stop(); setTimeout(r, 1500); });
+        await new Promise((r) => { mr.onstop = r; mr.stop(); setTimeout(r, 2500); });
         stream.getTracks().forEach((t) => t.stop());
+        probe.srcObject = null;
+        probe.remove();
         await caos.export.videoSource(null);
-        webm = new Blob(chunks, { type: 'video/webm' });
+        const blob = new Blob(chunks, { type: mime || 'video/webm' });
+        film.size = blob.size;
+        const bytes = new Uint8Array(await blob.slice(0, 12).arrayBuffer());
+        film.head = String.fromCharCode(...bytes.slice(4, 8));
       } catch (err) {
-        webm = { size: 0, error: String((err && err.message) || err) };
+        film.error = String((err && err.message) || err);
       }
-      check('the page can be filmed for a video export', !!webm && webm.size > 0, webm && (webm.size ? webm.size + ' bytes' : 'error: ' + webm.error));
+      check('the page can be filmed for a video export', film.size > 0,
+        film.size ? film.size + ' bytes' : 'error: ' + film.error);
+      // The frames must be the guest page's own surface, at the page's own size.
+      // A window capture films the whole shell — chrome, sidebar and all — and
+      // would come back the width of the window rather than of the webview.
+      const wvRect = wv.getBoundingClientRect();
+      const capW = (film.capture && film.capture.w) || 0;
+      check('…filming the page itself, not the app window',
+        !!film.capture && film.capture.displaySurface === 'browser'
+          && capW > 0 && Math.abs(capW - wvRect.width * devicePixelRatio) <= 4,
+        JSON.stringify({ ...film.capture, wv: Math.round(wvRect.width), dpr: devicePixelRatio }));
+      check('…into a seekable MP4', film.head === 'ftyp', film.mime + ' magic=' + film.head);
 
       check('the sidebar offers the export', !!document.querySelector('.side-library [data-row-id] .sr-act[title*="Export"]') || true);
     }

@@ -183,7 +183,6 @@ function buildShell() {
     openUrl: (url) => navigateTo(url),
     exportBundle: exportProjectBundle,
     importBundle: importProjectBundle,
-    exportRecording: onExportRecording,
     removeBookmark: async (b) => { await caos.bookmarks.remove(b.id); await refreshBookmarks(); updateBookmarkState(); },
     clearHistory: async () => { if (await confirmDialog({ title: 'Clear history', message: 'Remove all browsing history?', confirmLabel: 'Clear' })) { await caos.history.clear(); await refreshHistory(); } },
   }, { sections: sectionsPanel.root, layers: layersPanel.root });
@@ -1368,28 +1367,31 @@ async function deleteRecording(r) {
 
 // ============================================================ REPLAY
 // ---- exporting a journey ------------------------------------------------------
-// Three shapes, one journey: a film of it happening, or a written account of
-// every step for a bug report / an agent. The written ones describe the whole
-// run, including how the last replay went.
+// Five shapes, one journey: a film of it happening, a written account of every
+// step for a bug report / an agent, or the steps themselves as a spec or raw
+// JSON. The written ones describe the whole run, including how the last replay
+// went.
 function exportRecording(rec) {
   if (!rec) return;
   const pick = (fn) => () => { m.close(); fn(); return true; };
+  const choice = (fn, title, sub) => h('div', { class: 'export-choice', on: { click: pick(fn) } }, [
+    h('div', { class: 'ec-title', text: title }),
+    h('div', { class: 'ec-sub', text: sub }),
+  ]);
   const m = modal({
     title: 'Export “' + rec.name + '”',
     width: 460,
     body: h('div', { class: 'export-choices' }, [
-      h('div', { class: 'export-choice', on: { click: pick(() => exportRecordingVideo(rec)) } }, [
-        h('div', { class: 'ec-title', text: '🎬  Video (.webm)' }),
-        h('div', { class: 'ec-sub', text: 'Replays the journey now and films the page while it runs.' }),
-      ]),
-      h('div', { class: 'export-choice', on: { click: pick(() => exportRecordingDoc(rec, 'pdf')) } }, [
-        h('div', { class: 'ec-title', text: '📄  PDF report' }),
-        h('div', { class: 'ec-sub', text: 'Every step in order — targets, values, scrolls, assertions and the last replay’s results.' }),
-      ]),
-      h('div', { class: 'export-choice', on: { click: pick(() => exportRecordingDoc(rec, 'markdown')) } }, [
-        h('div', { class: 'ec-title', text: '📝  Markdown' }),
-        h('div', { class: 'ec-sub', text: 'The same account as text, for an issue or a coding agent.' }),
-      ]),
+      choice(() => exportRecordingVideo(rec), '🎬  Video (.mp4)',
+        'Replays the journey now and films the page — just the page — while it runs.'),
+      choice(() => exportRecordingDoc(rec, 'pdf'), '📄  PDF report',
+        'Every step in order — targets, values, scrolls, assertions and the last replay’s results.'),
+      choice(() => exportRecordingDoc(rec, 'markdown'), '📝  Markdown',
+        'The same account as text, for an issue or a coding agent.'),
+      choice(() => exportRecordingAs('playwright', rec), '🧪  Playwright test',
+        'The selector-anchored steps as a spec you can drop straight into your test suite.'),
+      choice(() => exportRecordingAs('json', rec), '📦  JSON',
+        'The raw steps, for archiving or re-import.'),
     ]),
     actions: [{ label: 'Cancel', kind: 'ghost' }],
   });
@@ -1417,50 +1419,91 @@ async function exportRecordingDoc(rec, kind) {
   }
 }
 
+// The container to film in. MP4/H.264 first: it carries its duration and sample
+// table in the finalised moov atom, so players can scrub, seek and fast-forward
+// it, and it drops straight into a ticket, a slide or a chat. MediaRecorder's
+// WebM has no duration in the header and no cue index, so players treat it as a
+// live stream you can only watch start-to-finish — a last resort, not a default.
+const VIDEO_FORMATS = [
+  { mime: 'video/mp4;codecs=avc1.42E01E', ext: 'mp4', label: 'MP4 video' },
+  { mime: 'video/mp4', ext: 'mp4', label: 'MP4 video' },
+  { mime: 'video/webm;codecs=vp9', ext: 'webm', label: 'WebM video' },
+  { mime: 'video/webm', ext: 'webm', label: 'WebM video' },
+];
+
+function pickVideoFormat() {
+  if (!window.MediaRecorder) return null;
+  return VIDEO_FORMATS.find((f) => MediaRecorder.isTypeSupported(f.mime)) || null;
+}
+
 // Film the guest page while the journey replays. The main process hands us the
-// page's own web contents, so the frame is the page and nothing else.
+// page's own frame, so the film is the page at its own resolution — none of our
+// toolbar, sidebar or window chrome in shot, and no cropping guesswork.
 async function exportRecordingVideo(rec) {
   if (state.replaying || state.recordingBuffer) { toast('Finish what is running first', 'warn'); return null; }
+  const fmt = pickVideoFormat();
+  if (!fmt) { toast('This build cannot record video', 'error'); return null; }
   selectRecording(rec);
+
   let stream = null;
   let recorder = null;
+  let track = null;
   const chunks = [];
   try {
     await caos.export.videoSource(wv.getWebContentsId());
     stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: false });
-    const mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find(
-      (t) => window.MediaRecorder && MediaRecorder.isTypeSupported(t)
-    );
-    recorder = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 4_000_000 } : undefined);
+    track = stream.getVideoTracks()[0] || null;
+    recorder = new MediaRecorder(stream, { mimeType: fmt.mime, videoBitsPerSecond: 6_000_000 });
     recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
     recorder.start(250);
   } catch (err) {
     if (stream) stream.getTracks().forEach((t) => t.stop());
-    toast('Could not start recording the screen: ' + ((err && err.message) || err), 'error', 5000);
+    await caos.export.videoSource(null);
+    toast('Could not start filming the page: ' + ((err && err.message) || err), 'error', 5000);
     return null;
   }
 
+  const startedAt = Date.now();
   toast('Filming the replay…', 'info', 2000);
   try {
     await replaySelected();
   } finally {
     await new Promise((r) => setTimeout(r, 400)); // let the last frames land
-    try { recorder.stop(); } catch (_e) { /* ignore */ }
-    await new Promise((r) => { recorder.onstop = r; setTimeout(r, 1500); });
+    // Flush the tail, then wait for the muxer to finalise — for MP4 this is when
+    // the moov atom (duration + seek index) is written, so cutting it short here
+    // is exactly what produces an unseekable file.
+    await new Promise((resolve) => {
+      let done = false;
+      const finish = () => { if (!done) { done = true; resolve(); } };
+      recorder.onstop = finish;
+      try { recorder.requestData(); } catch (_e) { /* ignore */ }
+      try { recorder.stop(); } catch (_e) { finish(); }
+      setTimeout(finish, 4000);
+    });
     stream.getTracks().forEach((t) => t.stop());
     await caos.export.videoSource(null);
   }
 
-  const blob = new Blob(chunks, { type: 'video/webm' });
-  if (!blob.size) { toast('Nothing was captured', 'error'); return null; }
+  const blob = new Blob(chunks, { type: fmt.mime });
+  if (!blob.size) {
+    toast(track && track.readyState === 'ended'
+      ? 'The page stopped before anything was filmed'
+      : 'Nothing was captured', 'error', 5000);
+    return null;
+  }
+
   const base64 = await blobToBase64(blob);
   const slug = (rec.name || 'journey').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'journey';
+  const name = slug + '.' + fmt.ext;
   const saved = await caos.export.saveBinary({
-    defaultName: slug + '.webm',
+    defaultName: name,
     base64,
-    filters: [{ name: 'WebM video', extensions: ['webm'] }],
+    filters: [{ name: fmt.label, extensions: [fmt.ext] }],
   });
-  if (saved) toast('Saved ' + slug + '.webm (' + Math.max(1, Math.round(blob.size / 1024)) + ' KB)', 'success', 4000);
+  if (saved) {
+    const secs = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+    toast(`Saved ${name} — ${secs}s, ${Math.max(1, Math.round(blob.size / 1024))} KB`, 'success', 4000);
+  }
   return saved;
 }
 
@@ -1819,19 +1862,6 @@ async function importBundleText(text) {
 }
 
 // ============================================================ RECORDING EXPORT
-function onExportRecording(rec) {
-  modal({
-    title: `Export “${rec.name}”`,
-    width: 440,
-    body: h('div', { class: 'field-hint', style: { margin: '0' }, text: 'A journey is already a selector-anchored step list, so it converts straight into a Playwright spec you can drop into your test suite. JSON keeps the raw steps for archiving or re-import.' }),
-    actions: [
-      { label: 'Cancel', kind: 'ghost' },
-      { label: 'JSON', kind: 'ghost', onClick: () => exportRecordingAs('json', rec) },
-      { label: 'Playwright test', kind: 'primary', onClick: () => exportRecordingAs('playwright', rec) },
-    ],
-  });
-}
-
 async function exportRecordingAs(format, rec) {
   try {
     const out = await caos.export.recording(format, rec.id);
