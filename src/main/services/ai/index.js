@@ -57,7 +57,7 @@ async function runAiTask(payload, repos) {
     // into a network test.
     let credential = null;
     try {
-      credential = process.env.CAOS_E2E === '1' ? null : await auth.credentialFor(repos.dir, provider);
+      credential = require('../../env').isE2E() ? null : await auth.credentialFor(repos.dir, provider);
     } catch (err) {
       return { ok: false, error: (err && err.message) || String(err) };
     }
@@ -72,9 +72,10 @@ async function runAiTask(payload, repos) {
       context: payload && payload.context,
     });
 
+    const timeoutMs = (payload && payload.timeoutMs) || settings.aiTimeoutMs || 120000;
     const text = wire === 'anthropic'
-      ? await callAnthropic(credential, { model, system, user })
-      : await callOpenAi(credential, { model, system, user });
+      ? await callAnthropic(credential, { model, system, user, timeoutMs })
+      : await callOpenAi(credential, { model, system, user, timeoutMs });
 
     return { ok: true, text, provider, model };
   } catch (err) {
@@ -86,14 +87,14 @@ async function runAiTask(payload, repos) {
   }
 }
 
-async function callAnthropic(credential, { model, system, user }) {
+async function callAnthropic(credential, { model, system, user, timeoutMs }) {
   const shaped = await auth.anthropicShape(credential, system);
-  return claude.complete({ headers: shaped.headers, system: shaped.system, model, user });
+  return claude.complete({ headers: shaped.headers, system: shaped.system, model, user, timeoutMs });
 }
 
-async function callOpenAi(credential, { model, system, user }) {
+async function callOpenAi(credential, { model, system, user, timeoutMs }) {
   const shaped = auth.openaiShape(credential);
-  return openai.complete({ headers: shaped.headers, baseUrl: shaped.baseUrl, system, model, user });
+  return openai.complete({ headers: shaped.headers, baseUrl: shaped.baseUrl, system, model, user, timeoutMs });
 }
 
 module.exports = { runAiTask, FALLBACK_MODELS };

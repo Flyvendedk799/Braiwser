@@ -1,13 +1,14 @@
 // Shell preload — the ONLY bridge between the renderer UI and the main process.
-// Exposes a clean, namespaced, promise-based API as window.caos. The renderer
-// never sees raw IPC channel strings.
+// Exposes window.braiwser (canonical) and window.caos (alias during rename).
+// The renderer never sees raw IPC channel strings.
 const { contextBridge, ipcRenderer } = require('electron');
 
 const invoke = (channel, ...args) => ipcRenderer.invoke(channel, ...args);
+const e2eEnabled = process.env.BRAIWSER_E2E === '1' || process.env.CAOS_E2E === '1';
 
-contextBridge.exposeInMainWorld('caos', {
-  // End-to-end self-test hooks (only meaningful when CAOS_E2E=1 is set).
-  e2e: process.env.CAOS_E2E === '1',
+const api = {
+  // End-to-end self-test hooks (only meaningful when BRAIWSER_E2E=1 / CAOS_E2E=1).
+  e2e: e2eEnabled,
   e2eDone: (payload) => invoke('caos:e2e-done', payload),
   e2eCheck: (check) => invoke('caos:e2e-check', check),
 
@@ -18,6 +19,12 @@ contextBridge.exposeInMainWorld('caos', {
     const listener = (_e, payload) => cb(payload || {});
     ipcRenderer.on('caos:command', listener);
     return () => ipcRenderer.removeListener('caos:command', listener);
+  },
+
+  onUpdate: (cb) => {
+    const listener = (_e, payload) => cb(payload || {});
+    ipcRenderer.on('caos:update', listener);
+    return () => ipcRenderer.removeListener('caos:update', listener);
   },
 
   system: {
@@ -42,6 +49,9 @@ contextBridge.exposeInMainWorld('caos', {
   agent: {
     write: (sessionId, extras) => invoke('caos:agent.write', sessionId, extras),
     run: (sessionId, filePath) => invoke('caos:agent.run', sessionId, filePath),
+    templates: () => invoke('caos:agent.templates'),
+    presets: () => invoke('caos:agent.presets'),
+    templatedPrompt: (payload) => invoke('caos:agent.templatedPrompt', payload),
     onOutput: (cb) => {
       const listener = (_e, chunk) => cb(chunk);
       ipcRenderer.on('caos:agent.output', listener);
@@ -73,6 +83,7 @@ contextBridge.exposeInMainWorld('caos', {
     create: (a) => invoke('caos:annotations.create', a),
     update: (id, patch) => invoke('caos:annotations.update', id, patch),
     remove: (id) => invoke('caos:annotations.remove', id),
+    reorder: (sessionId, orderedIds) => invoke('caos:annotations.reorder', sessionId, orderedIds),
   },
 
   recordings: {
@@ -102,11 +113,9 @@ contextBridge.exposeInMainWorld('caos', {
   },
 
   secrets: {
-    // Readiness per provider — { ready, via, hint, detail, plan } — never a key.
     providers: () => invoke('caos:secrets.providers'),
     setKey: (provider, key) => invoke('caos:secrets.setKey', provider, key),
     clearKey: (provider) => invoke('caos:secrets.clearKey', provider),
-    // Signing in to a Claude subscription: open the browser, paste the code back.
     claudeLoginStart: () => invoke('caos:auth.claudeLoginStart'),
     claudeLoginFinish: (pasted) => invoke('caos:auth.claudeLoginFinish', pasted),
     claudeDisconnect: () => invoke('caos:auth.claudeDisconnect'),
@@ -131,4 +140,70 @@ contextBridge.exposeInMainWorld('caos', {
     export: (projectId) => invoke('caos:bundle.export', projectId),
     import: (text) => invoke('caos:bundle.import', text),
   },
-});
+
+  license: {
+    status: () => invoke('caos:license.status'),
+    activate: (key) => invoke('caos:license.activate', key),
+    demoKey: (opts) => invoke('caos:license.demoKey', opts),
+    canUse: (feature) => invoke('caos:license.canUse', feature),
+  },
+
+  analytics: {
+    track: (event, props) => invoke('caos:analytics.track', event, props),
+    funnel: () => invoke('caos:analytics.funnel'),
+    diagnostics: () => invoke('caos:analytics.diagnostics'),
+  },
+
+  sync: {
+    status: () => invoke('caos:sync.status'),
+    signIn: (email) => invoke('caos:sync.signIn', email),
+    signOut: () => invoke('caos:sync.signOut'),
+    enqueue: (projectId) => invoke('caos:sync.enqueue', projectId),
+    drain: () => invoke('caos:sync.drain'),
+  },
+
+  team: {
+    list: () => invoke('caos:team.list'),
+    create: (payload) => invoke('caos:team.create', payload),
+    invite: (workspaceId, member) => invoke('caos:team.invite', workspaceId, member),
+    listComments: (query) => invoke('caos:team.comments.list', query),
+    addComment: (payload) => invoke('caos:team.comments.add', payload),
+  },
+
+  billing: {
+    status: () => invoke('caos:billing.status'),
+    checkout: (opts) => invoke('caos:billing.checkout', opts),
+    seats: (n) => invoke('caos:billing.seats', n),
+    gdprExport: () => invoke('caos:billing.gdprExport'),
+    gdprDelete: () => invoke('caos:billing.gdprDelete'),
+  },
+
+  integrations: {
+    issue: (payload) => invoke('caos:integrations.issue', payload),
+    ciStarter: (projectPath) => invoke('caos:integrations.ciStarter', projectPath),
+    webhook: (event, data) => invoke('caos:integrations.webhook', event, data),
+    slack: (text) => invoke('caos:integrations.slack', text),
+  },
+
+  review: {
+    checklists: () => invoke('caos:review.checklists'),
+    applyChecklist: (id, sessionId) => invoke('caos:review.applyChecklist', id, sessionId),
+    clientPack: (sessionId) => invoke('caos:review.clientPack', sessionId),
+    htmlReport: (sessionId) => invoke('caos:review.htmlReport', sessionId),
+  },
+
+  update: {
+    check: () => invoke('caos:update.check'),
+    install: () => invoke('caos:update.install'),
+  },
+
+  enterprise: {
+    status: () => invoke('caos:enterprise.status'),
+    sso: (cfg) => invoke('caos:enterprise.sso', cfg),
+    marketplace: () => invoke('caos:enterprise.marketplace'),
+    schema: () => invoke('caos:enterprise.schema'),
+  },
+};
+
+contextBridge.exposeInMainWorld('braiwser', api);
+contextBridge.exposeInMainWorld('caos', api);

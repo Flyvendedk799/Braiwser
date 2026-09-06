@@ -1,15 +1,17 @@
-// One-time data migration for the Chrome AI OS → Braiwser rename.
+// One-time data migrations for Braiwser store identity.
 //
-// Electron derives userData from the package name, so renaming the app moved
-// the store from <appData>/chrome-ai-os to <appData>/braiwser. Existing users
-// would otherwise open v1 to an empty workspace. On first launch under the new
-// name we copy the old `caos/` store across verbatim; the old directory is left
-// untouched so a downgrade still works.
+// 1) Chrome AI OS → Braiwser app rename: copy legacy appData stores into the
+//    current userData tree.
+// 2) Store folder rename: userData/caos → userData/braiwser.
+//
+// Old directories are left untouched so a downgrade still works. Failures never
+// throw — a botched migration must not stop the app from booting.
 const fs = require('fs');
 const path = require('path');
 
 const LEGACY_APP_DIRS = ['chrome-ai-os', 'Chrome AI OS'];
-const STORE_DIR = 'caos';
+const LEGACY_STORE_DIR = 'caos';
+const STORE_DIR = 'braiwser';
 
 function copyTree(from, to) {
   fs.mkdirSync(to, { recursive: true });
@@ -17,22 +19,30 @@ function copyTree(from, to) {
     const src = path.join(from, entry.name);
     const dst = path.join(to, entry.name);
     if (entry.isDirectory()) copyTree(src, dst);
-    else if (entry.isFile()) fs.copyFileSync(src, dst);
+    else if (entry.isFile() && !fs.existsSync(dst)) fs.copyFileSync(src, dst);
   }
 }
 
-// Returns { migrated:boolean, from?:string } — never throws, since a failed
-// migration must not stop the app from booting.
 function migrateLegacyUserData({ appDataDir, userDataDir }) {
   try {
     const target = path.join(userDataDir, STORE_DIR);
+    const legacyLocal = path.join(userDataDir, LEGACY_STORE_DIR);
+
+    // Prefer an existing braiwser/ store. Otherwise promote caos/ in place.
+    if (!fs.existsSync(target) && fs.existsSync(legacyLocal)) {
+      copyTree(legacyLocal, target);
+      return { migrated: true, from: legacyLocal, kind: 'store-rename' };
+    }
+
     if (fs.existsSync(target)) return { migrated: false };
 
     for (const legacy of LEGACY_APP_DIRS) {
-      const source = path.join(appDataDir, legacy, STORE_DIR);
-      if (source === target || !fs.existsSync(source)) continue;
-      copyTree(source, target);
-      return { migrated: true, from: source };
+      for (const storeName of [STORE_DIR, LEGACY_STORE_DIR]) {
+        const source = path.join(appDataDir, legacy, storeName);
+        if (source === target || !fs.existsSync(source)) continue;
+        copyTree(source, target);
+        return { migrated: true, from: source, kind: 'app-rename' };
+      }
     }
     return { migrated: false };
   } catch (err) {
@@ -40,4 +50,4 @@ function migrateLegacyUserData({ appDataDir, userDataDir }) {
   }
 }
 
-module.exports = { migrateLegacyUserData };
+module.exports = { migrateLegacyUserData, STORE_DIR, LEGACY_STORE_DIR };

@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.1.0
+
+Productization release: MVP → full end-to-end product foundations for solo
+builders, design/QA, and agencies — with optional cloud/team seams ahead.
+
+### Identity and data
+
+- Store folder renamed to `userData/braiwser/` (migrates from `caos/`).
+- Explicit **schema version** + migrations; `window.braiwser` API with `window.caos` alias.
+- E2E flag: `BRAIWSER_E2E` (alias `CAOS_E2E` still accepted).
+
+### Workflows
+
+- Persona onboarding (Agent / Reviewer / Agency) with persona-aware empty states.
+- Note drag-reorder, client/internal visibility, configurable AI timeout.
+- Handoff templates, agent presets, review checklists, client packs, static HTML reports.
+- Full-page capture softens `position:fixed`/`sticky` chrome; replay allows tab switching.
+
+### Distribution and GTM
+
+- `electron-updater` wiring, GitHub Release workflow, marketing site under `website/`.
+- Published `.braiwser.json` schema; architecture + support docs.
+
+### Monetization and platform
+
+- Local Pro license activation (`BRW1.…`), Free/Pro feature list (soft until enforce flag).
+- Opt-in analytics + diagnostics; optional sync sign-in + encrypted snapshot queue.
+- Team workspaces/comments, billing/GDPR helpers, integrations (issue drafts, CI starter),
+  enterprise SSO/marketplace stubs.
+
 ## 1.0.0
 
 The release that takes Braiwser from a capable prototype to a finished product.

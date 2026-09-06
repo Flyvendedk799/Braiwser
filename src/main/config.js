@@ -13,6 +13,65 @@ const ACTION_TAGS = [
 
 const PRIORITIES = ['low', 'normal', 'high', 'critical'];
 const STATUSES = ['open', 'resolved'];
+const VISIBILITIES = ['internal', 'client'];
+
+const PERSONAS = [
+  {
+    id: 'agent',
+    label: 'Agent builder',
+    tip: 'Inspect issues, copy an agent prompt, hand off, then replay a journey to verify.',
+    primaryAction: 'handoff',
+  },
+  {
+    id: 'reviewer',
+    label: 'Design / QA',
+    tip: 'Run an audit, review breakpoints, promote findings, and export Markdown.',
+    primaryAction: 'audit',
+  },
+  {
+    id: 'agency',
+    label: 'Agency / freelance',
+    tip: 'Capture client findings, record a journey video, and ship a branded review pack.',
+    primaryAction: 'client-pack',
+  },
+];
+
+const HANDOFF_TEMPLATES = [
+  { id: 'fix-ui', label: 'Fix UI', description: 'Priority-ordered UI fixes with selectors and CSS context.' },
+  { id: 'a11y', label: 'Accessibility', description: 'A11y-focused change request from notes and audit findings.' },
+  { id: 'responsive', label: 'Responsive', description: 'Breakpoint-specific fixes with viewport metadata.' },
+  { id: 'regression', label: 'Regression from journey', description: 'Turn failing journey assertions into fix tasks.' },
+];
+
+const REVIEW_CHECKLISTS = [
+  {
+    id: 'a11y-pass',
+    label: 'Accessibility pass',
+    items: ['Run page audit', 'Check keyboard focus', 'Verify form labels', 'Contrast on key CTAs'],
+  },
+  {
+    id: 'responsive-pass',
+    label: 'Responsive pass',
+    items: ['Mobile S', 'Mobile L', 'Tablet', 'Laptop', 'Desktop'],
+  },
+  {
+    id: 'pre-launch',
+    label: 'Pre-launch',
+    items: ['Hero CTA works', 'Nav links', 'Empty states', 'Error states', 'Record smoke journey'],
+  },
+];
+
+const PRO_FEATURES = [
+  'agent-handoff',
+  'ai-polish',
+  'playwright-export',
+  'client-pack',
+  'project-bundle',
+  'html-report',
+  'integrations',
+  'sync',
+  'team',
+];
 
 // Assertion step kinds for recordings (journeys-as-tests). `count`'s "contains"
 // op means "at least"; `url` is evaluated host-side against the live location.
@@ -142,8 +201,24 @@ const SHORTCUTS = [
 
 const DEFAULT_SETTINGS = {
   onboardingComplete: false,
+  persona: 'agent',
   profile: {
     displayName: '',
+  },
+  agency: {
+    name: '',
+    logoDataUrl: '',
+  },
+  sync: {
+    enabled: false,
+    accountEmail: '',
+    workspaceId: '',
+  },
+  integrations: {
+    github: { enabled: false, tokenHint: '', repo: '' },
+    linear: { enabled: false, apiKeyHint: '', teamId: '' },
+    jira: { enabled: false, site: '', email: '', apiTokenHint: '' },
+    slack: { enabled: false, webhookHint: '' },
   },
   // The subscription already signed in on this machine is the default, so the AI
   // features work on a fresh install with nothing pasted anywhere. With no
@@ -157,6 +232,10 @@ const DEFAULT_SETTINGS = {
     openai: 'gpt-5',
   },
   replayDelayMs: 600,
+  aiTimeoutMs: 120000,
+  analyticsOptIn: false,
+  crashReportsOptIn: false,
+  licenseKey: '',
   // Left sidebar: which page tab is showing, and whether the library drawer
   // (projects / sessions / recordings / bookmarks / history) is expanded.
   sideTab: 'sections',
@@ -174,6 +253,11 @@ module.exports = {
   ACTION_TAGS,
   PRIORITIES,
   STATUSES,
+  VISIBILITIES,
+  PERSONAS,
+  HANDOFF_TEMPLATES,
+  REVIEW_CHECKLISTS,
+  PRO_FEATURES,
   ASSERTION_KINDS,
   DEVICE_PRESETS,
   THEMES,

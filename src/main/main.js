@@ -9,6 +9,7 @@ const { migrateLegacyUserData } = require('./migrate');
 const { installMenu } = require('./menu');
 const config = require('./config');
 const registerIpc = require('./ipc');
+const { isE2E } = require('./env');
 
 let mainWindow = null;
 let videoSourceId = null; // the webContents the renderer may film
@@ -49,7 +50,7 @@ function createWindow(settings) {
   });
 
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
-  const e2e = process.env.CAOS_E2E === '1';
+  const e2e = isE2E();
   if (e2e) {
     const levels = ['log', 'warn', 'error'];
     mainWindow.webContents.on('console-message', (_e, level, message) => {
@@ -62,6 +63,7 @@ function createWindow(settings) {
         const ipc = require('./ipc');
         const partial = ipc.e2ePartial ? ipc.e2ePartial() : [];
         const passed = partial.filter((c) => c.pass).length;
+        console.log('BRAIWSER_E2E_REPORT ' + JSON.stringify({ ok: false, crashed: true, passed, total: partial.length, checks: partial }));
         console.log('CAOS_E2E_REPORT ' + JSON.stringify({ ok: false, crashed: true, passed, total: partial.length, checks: partial }));
       } catch (_err) {
         /* ignore */
@@ -184,6 +186,14 @@ app.whenReady().then(() => {
   const settings = repos.settings.get();
   applyNativeTheme(settings.theme);
   createWindow(settings);
+
+  try {
+    require('./services/analytics').track(repos, 'install', { version: app.getVersion() });
+  } catch (_e) { /* ignore */ }
+
+  try {
+    require('./services/updater').initUpdater({ getWindow: () => mainWindow, repos });
+  } catch (_e) { /* optional */ }
 
   // Following the OS theme means reacting to it changing while we run.
   nativeTheme.on('updated', () => {

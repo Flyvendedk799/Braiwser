@@ -1,7 +1,7 @@
 // Braiwser — renderer controller.
 // Owns app state, builds the shell, wires the <webview> guest, and orchestrates
 // the annotation / recording / replay / AI / export flows. Talks to the backend
-// only through window.caos and to the guest page only through the webview.
+// only through window.braiwser (alias: window.caos) and to the guest page only through the webview.
 import { h, clear, toast, confirmDialog, promptDialog, modal, menu, esc, icon } from './lib/dom.js';
 import { createToolbar } from './components/toolbar.js';
 import { createSidebar } from './components/sidebar.js';
@@ -15,7 +15,7 @@ import { openOnboardingModal, openSettingsModal } from './components/settings-mo
 import { createTabStrip } from './components/tabs.js';
 import { compositeAnnotations } from './lib/screenshots.js';
 
-const caos = window.caos;
+const caos = window.braiwser || window.caos;
 
 const state = {
   config: null,
@@ -193,6 +193,7 @@ function buildShell() {
     editNote: (a, note) => updateAnnotation(a, { note }),
     toggleStatus: (a) => updateAnnotation(a, { status: (a.status || 'open') === 'open' ? 'resolved' : 'open' }),
     setPriority: (a, priority) => updateAnnotation(a, { priority }),
+    setVisibility: (a, visibility) => updateAnnotation(a, { visibility }),
     remove: removeAnnotation,
     copySelector: (a) => copyText(a.target && a.target.selector, 'Selector copied'),
     suggestFix: (a) => { switchTab('ai'); aiPanel.runExternal('suggest-fix', { annotations: [a], context: { annotation: a } }); },
@@ -200,6 +201,12 @@ function buildShell() {
     bulkUpdate: bulkUpdateAnnotations,
     bulkRemove: bulkRemoveAnnotations,
     onCount: (total) => { setTabCount('notes', total); syncStatus(); },
+    getPersona: () => (state.settings && state.settings.persona) || 'agent',
+    reorder: async (orderedIds) => {
+      if (!state.currentSession) return;
+      state.annotations = await caos.annotations.reorder(state.currentSession.id, orderedIds);
+      notesPanel.setAnnotations(state.annotations);
+    },
   });
 
   auditPanel = createAuditPanel(state.config, {
@@ -542,9 +549,10 @@ function createTab(url) {
 function setActiveTab(id) {
   const tab = state.tabs.find((t) => t.id === id);
   if (!tab) return;
+  // Replay stays bound to the tab that started it (ipc acks ignore other tabs).
+  // Switching away is allowed so you can keep working; the toast makes that clear.
   if (state.replaying && tab.id !== state.activeTabId) {
-    toast('Finish or cancel replay before switching tabs', 'warn');
-    return;
+    toast('Replay continues on the other tab', 'info', 2200);
   }
   state.activeTabId = id;
   wv = tab.wv; // global alias used throughout
@@ -2088,6 +2096,7 @@ function settingsView() {
     ...state.settings,
     availableThemes: (state.config && state.config.themes) || [],
     modelChoices: (state.config && state.config.modelChoices) || {},
+    personas: (state.config && state.config.personas) || [],
   };
 }
 
@@ -2149,6 +2158,10 @@ function profileActions() {
       syncProfileUi();
       return state.providers;
     },
+    licenseStatus: () => caos.license.status(),
+    activateLicense: (key) => caos.license.activate(key),
+    syncSignIn: (email) => caos.sync.signIn(email),
+    syncSignOut: () => caos.sync.signOut(),
   };
 }
 

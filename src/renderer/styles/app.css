@@ -452,6 +452,8 @@ button:focus:not(:focus-visible) { outline: none; }
 }
 .note.resolved { opacity: 0.6; }
 .note.resolved .note-text { text-decoration: line-through; text-decoration-color: var(--faint); }
+.note.dragging { opacity: 0.45; }
+.note.drag-over { outline: 1px dashed var(--accent, #3ddc97); }
 
 .note-top { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
 .note-action {

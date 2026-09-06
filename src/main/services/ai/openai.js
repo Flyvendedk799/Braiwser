@@ -9,9 +9,10 @@
 
 const CHAT_URL = 'https://api.openai.com/v1/chat/completions';
 
-async function post(url, headers, body, label) {
+async function post(url, headers, body, label, timeoutMs) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 120000); // 120s cap
+  const ms = Math.max(5000, Number(timeoutMs) || 120000);
+  const timer = setTimeout(() => controller.abort(), ms);
   let res;
   try {
     res = await fetch(url, {
@@ -21,7 +22,7 @@ async function post(url, headers, body, label) {
       signal: controller.signal,
     });
   } catch (err) {
-    if (err && err.name === 'AbortError') throw new Error(`${label} request timed out after 120s`);
+    if (err && err.name === 'AbortError') throw new Error(`${label} request timed out after ${Math.round(ms / 1000)}s`);
     throw err;
   } finally {
     clearTimeout(timer);
@@ -39,13 +40,13 @@ async function post(url, headers, body, label) {
 
 // { headers, baseUrl, model, system, user } -> Promise<string>
 // baseUrl set = a Codex subscription; null = a metered OpenAI key.
-async function complete({ headers, baseUrl, model, system, user }) {
+async function complete({ headers, baseUrl, model, system, user, timeoutMs }) {
   if (baseUrl) {
     const data = await post(`${baseUrl}/responses`, headers, {
       model,
       instructions: typeof system === 'string' ? system : '',
       input: user,
-    }, 'Codex');
+    }, 'Codex', timeoutMs);
     return responsesText(data);
   }
 
@@ -56,7 +57,7 @@ async function complete({ headers, baseUrl, model, system, user }) {
       { role: 'user', content: user },
     ],
     max_tokens: 4096,
-  }, 'OpenAI');
+  }, 'OpenAI', timeoutMs);
 
   return (
     (data.choices &&

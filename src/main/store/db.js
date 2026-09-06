@@ -6,7 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 
-function atomicWrite(file, data) {
+function atomicWriteFile(file, data) {
   const tmp = file + '.tmp';
   let fd;
   try {
@@ -21,6 +21,10 @@ function atomicWrite(file, data) {
     try { fs.unlinkSync(tmp); } catch (_e) { /* ignore */ }
     throw new Error(`Failed to persist ${path.basename(file)}: ${err.message}`);
   }
+}
+
+function atomicWrite(file, data) {
+  atomicWriteFile(file, data);
 }
 
 class JsonCollection {
@@ -87,4 +91,4 @@ class JsonDocument {
   unset(k) { delete this.data()[k]; this._save(); return this._d; }
 }
 
-module.exports = { JsonCollection, JsonDocument };
+module.exports = { JsonCollection, JsonDocument, atomicWriteFile };

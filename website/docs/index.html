@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Docs — Braiwser</title>
+  <link rel="stylesheet" href="../styles.css" />
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="../index.html">Braiwser</a>
+    <nav>
+      <a href="privacy.html">Privacy</a>
+      <a class="cta" href="https://github.com/Flyvendedk799/Braiwser/releases/latest">Download</a>
+    </nav>
+  </header>
+  <section class="section">
+    <h2>Documentation</h2>
+    <p class="section-lede">Install, connect AI credentials, hand off to an agent, export Playwright, and understand the privacy model.</p>
+    <div class="icp">
+      <article>
+        <h3>Install</h3>
+        <p>Download a release build, or <code>npm install && npm start</code> from the repo. Requires Node 18+ for development.</p>
+      </article>
+      <article>
+        <h3>AI credentials</h3>
+        <p>Claude / Codex subscription (CLI already signed in), or Anthropic / OpenAI API keys in Settings. No key → local synthesis.</p>
+      </article>
+      <article>
+        <h3>Agent hand-off</h3>
+        <p>Copy prompt or Hand off. Templates: Fix UI, Accessibility, Responsive, Regression. Configure <code>agentCommand</code> with <code>{promptPath}</code>.</p>
+      </article>
+      <article>
+        <h3>Playwright export</h3>
+        <p>Record a journey → export a runnable spec. Drop it under <code>tests/braiwser</code> or use Integrations → CI starter.</p>
+      </article>
+      <article>
+        <h3>Client packs</h3>
+        <p>Agency persona: set studio name, mark notes client-facing, export HTML report or client pack Markdown.</p>
+      </article>
+      <article>
+        <h3>Sync &amp; team</h3>
+        <p>Optional. Sign in under Settings to queue encrypted project snapshots. Team workspaces add comments and invites.</p>
+      </article>
+    </div>
+  </section>
+</body>
+</html>
