@@ -178,7 +178,7 @@ export function openSettingsModal({ settings, providers, actions }) {
     delayInput.value = String(v);
     persist({ replayDelayMs: v });
   });
-  body.appendChild(field('Replay delay (ms)', delayInput, 'Pause between steps when replaying a recorded journey.'));
+  body.appendChild(field('Replay delay (ms)', delayInput, 'Minimum pause between steps. Replay also honours the real gaps from recording (capped), so journeys stay watchable. Video export uses a higher floor automatically.'));
 
   const timeoutInput = h('input', { class: 'input', type: 'number', min: '5', step: '5', value: String(Math.round((settings.aiTimeoutMs || 120000) / 1000)) });
   timeoutInput.addEventListener('change', () => {
