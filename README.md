@@ -232,11 +232,15 @@ and webview code is CommonJS.
   url, viewport, status, priority, edit?, … }`
 - **Recording** `{ id, projectId, name, startUrl, steps[], lastRun? }`
 
-Storage is plain JSON under Electron's `userData/caos/`, written atomically
+Storage is plain JSON under Electron's `userData/braiwser/` (migrated from
+`userData/caos/` on first launch), written atomically
 (temp file → fsync → rename). Credentials live in a separate `credentials.json`
 there, encrypted at rest (AES-256-GCM under a per-machine secret, itself kept in
 the OS keyring where one is available). No channel returns a key to the renderer:
 the settings page is sent a mask such as `sk-ant-…9ZQ`, never the value.
+
+The renderer talks to main through `window.braiwser` (with `window.caos` kept as
+a compatibility alias during the rename period).
 
 ---
 
@@ -285,8 +289,9 @@ region drawing, rearrange edits, the audit engine and finding promotion, device
 viewports, themes, note search and bulk triage, DOM tree, record and replay,
 assertions and their failure paths, full-page capture and compositing, tabs,
 history and bookmarks, persistence and restore, exports (Markdown / prompt / JSON /
-Playwright), project bundle round-trips, the agent hand-off, and the menu command
-bus. **149 checks.** It exits non-zero when any check fails, so CI goes red.
+Playwright), project bundle round-trips, the agent hand-off, the menu command
+bus, and product-platform foundations (license, templates, checklists, schema).
+It exits non-zero when any check fails, so CI goes red.
 
 CI (`.github/workflows/ci.yml`) runs both gates under Xvfb, builds the unpacked
 app on Linux, macOS and Windows, and then runs the whole suite **again against

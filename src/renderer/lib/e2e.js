@@ -1222,7 +1222,11 @@ export async function run(I) {
     const written = await caos.agent.write(hSession.id);
     check('hand-off wrote request file', written && /request-.*\.md$/.test(written.file || '') && written.length > 20, written && written.file);
     // Configure a harmless command that reads the file back; verify it ran + read it.
-    await caos.settings.set({ agentCommand: 'cat "{promptPath}"' });
+    await caos.settings.set({
+      agentCommand: (I.state.config && I.state.config.platform === 'win32')
+        ? 'cmd /c type "{promptPath}"'
+        : 'cat "{promptPath}"',
+    });
     const ran = await caos.agent.run(hSession.id, written.file);
     check('agent command ran & read the file', ran && ran.ok && /Handoff probe note/.test(ran.output || ''), ran && (ran.ok ? 'output ok' : ran.error));
     const noCmd = await caos.settings.set({ agentCommand: '' });
@@ -1562,6 +1566,30 @@ export async function run(I) {
       I.runCommand('mode.off');
       check('command exits the mode', I.state.mode === 'off');
       check('page-edit undo/redo are on the command bus', I.runCommand('edit.undo') !== false && I.runCommand('edit.redo') !== false);
+    }
+
+    // --- 25. Product platform foundations ---
+    {
+      const api = window.braiwser || window.caos;
+      check('window.braiwser alias is exposed', !!window.braiwser);
+      const license = await api.license.status();
+      check('license status returns a tier', !!(license && license.tier), JSON.stringify(license));
+      const demo = await api.license.demoKey({ email: 'e2e@braiwser.local', tier: 'pro', days: 1 });
+      check('demo license key is issued', /^BRW1\./.test(demo), demo);
+      const activated = await api.license.activate(demo);
+      check('demo license activates', !!(activated && activated.ok), JSON.stringify(activated));
+      const templates = await api.agent.templates();
+      check('handoff templates are listed', Array.isArray(templates) && templates.length >= 4, String(templates && templates.length));
+      const checklists = await api.review.checklists();
+      check('review checklists are listed', Array.isArray(checklists) && checklists.length >= 3);
+      const schema = await api.enterprise.schema();
+      check('open bundle schema is published', schema && schema.$id && /braiwser-bundle/.test(schema.$id), schema && schema.$id);
+      const html = await api.review.htmlReport(session.id);
+      check('html report builds', !!(html && html.content && /Braiwser/.test(html.content)));
+      const sync = await api.sync.status();
+      check('sync status is readable offline', !!(sync && typeof sync.enabled === 'boolean'));
+      const funnel = await api.analytics.funnel();
+      check('analytics funnel is readable', !!(funnel && typeof funnel.total === 'number'));
     }
 
     // --- cleanup ---

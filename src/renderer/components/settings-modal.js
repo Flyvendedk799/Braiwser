@@ -180,6 +180,94 @@ export function openSettingsModal({ settings, providers, actions }) {
   });
   body.appendChild(field('Replay delay (ms)', delayInput, 'Pause between steps when replaying a recorded journey.'));
 
+  const timeoutInput = h('input', { class: 'input', type: 'number', min: '5', step: '5', value: String(Math.round((settings.aiTimeoutMs || 120000) / 1000)) });
+  timeoutInput.addEventListener('change', () => {
+    const secs = Math.max(5, parseInt(timeoutInput.value, 10) || 120);
+    timeoutInput.value = String(secs);
+    persist({ aiTimeoutMs: secs * 1000 });
+  });
+  body.appendChild(field('AI timeout (seconds)', timeoutInput, 'Abort a provider call after this many seconds.'));
+
+  const personas = settings.personas || [
+    { id: 'agent', label: 'Agent builder' },
+    { id: 'reviewer', label: 'Design / QA' },
+    { id: 'agency', label: 'Agency / freelance' },
+  ];
+  const personaSelect = h('select', { class: 'select', 'aria-label': 'Persona' }, personas.map((p) =>
+    h('option', { value: p.id, text: p.label, ...(p.id === (settings.persona || 'agent') ? { selected: 'selected' } : {}) })
+  ));
+  personaSelect.value = settings.persona || 'agent';
+  personaSelect.addEventListener('change', () => persist({ persona: personaSelect.value }));
+  body.appendChild(field('Workflow persona', personaSelect, 'Tunes empty states and tips. Features stay the same.'));
+
+  const agencyName = h('input', { class: 'input', type: 'text', value: (settings.agency && settings.agency.name) || '', placeholder: 'Studio or agency name' });
+  agencyName.addEventListener('change', () => persist({ agency: { ...(settings.agency || {}), name: agencyName.value.trim() } }));
+  body.appendChild(field('Agency / studio name', agencyName, 'Used on client packs and HTML reports.'));
+
+  const licenseInput = h('input', { class: 'input mono', type: 'text', value: settings.licenseKey || '', placeholder: 'BRW1.… Pro license key' });
+  const licenseStatus = h('div', { class: 'field-hint', text: 'Free tier active until a Pro key is activated.' });
+  if (actions.licenseStatus) {
+    actions.licenseStatus().then((st) => {
+      if (st && st.pro) licenseStatus.textContent = `Pro active (${st.tier})`;
+    }).catch(() => {});
+  }
+  const licenseRow = h('div', { class: 'provider-setup-row' }, [
+    licenseInput,
+    h('button', {
+      class: 'btn btn-sm',
+      text: 'Activate',
+      on: {
+        click: async () => {
+          if (!actions.activateLicense) return;
+          const res = await actions.activateLicense(licenseInput.value.trim());
+          if (res && res.ok) {
+            toast('Pro license activated', 'success');
+            licenseStatus.textContent = `Pro active (${res.tier})`;
+            persist({ licenseKey: licenseInput.value.trim() });
+          } else toast((res && res.error) || 'Invalid license', 'error');
+        },
+      },
+    }),
+  ]);
+  body.appendChild(field('Pro license', licenseRow, null));
+  body.appendChild(licenseStatus);
+
+  const analyticsToggle = h('input', { type: 'checkbox', checked: !!settings.analyticsOptIn });
+  analyticsToggle.addEventListener('change', () => persist({ analyticsOptIn: analyticsToggle.checked }));
+  body.appendChild(field('Anonymous product analytics', analyticsToggle, 'Opt-in only. Events stay local unless you later enable a sync endpoint.'));
+
+  const crashToggle = h('input', { type: 'checkbox', checked: !!settings.crashReportsOptIn });
+  crashToggle.addEventListener('change', () => persist({ crashReportsOptIn: crashToggle.checked }));
+  body.appendChild(field('Crash breadcrumbs', crashToggle, 'Opt-in. Stores local crash notes to include in diagnostics you choose to share.'));
+
+  const syncEmail = h('input', { class: 'input', type: 'email', value: (settings.sync && settings.sync.accountEmail) || '', placeholder: 'you@company.com' });
+  const syncRow = h('div', { class: 'provider-setup-row' }, [
+    syncEmail,
+    h('button', {
+      class: 'btn btn-sm',
+      text: 'Sign in',
+      on: {
+        click: async () => {
+          if (!actions.syncSignIn) return;
+          const res = await actions.syncSignIn(syncEmail.value.trim());
+          toast(res && res.ok ? 'Sync account saved' : (res && res.error) || 'Sign-in failed', res && res.ok ? 'success' : 'error');
+        },
+      },
+    }),
+    h('button', {
+      class: 'btn btn-sm btn-ghost',
+      text: 'Sign out',
+      on: {
+        click: async () => {
+          if (actions.syncSignOut) await actions.syncSignOut();
+          syncEmail.value = '';
+          toast('Signed out of sync', 'info');
+        },
+      },
+    }),
+  ]);
+  body.appendChild(field('Optional cloud sync', syncRow, 'Local-first. Sign-in enables multi-device project snapshots.'));
+
   // ---- Agent hand-off command ----
   const agentInput = h('input', { class: 'input mono', type: 'text', value: settings.agentCommand || '', placeholder: 'e.g. claude -p "Apply the changes in {promptPath}"' });
   agentInput.addEventListener('change', () => persist({ agentCommand: agentInput.value.trim() }));
@@ -216,11 +304,38 @@ export function openOnboardingModal({ settings, providers, actions }) {
     h('div', { class: 'onboarding-hero' }, [
       h('div', { class: 'onboarding-mark', html: icon('ai', 24) }),
       h('div', {}, [
-        h('div', { class: 'onboarding-title', text: 'Set up your AI profile' }),
-        h('div', { class: 'onboarding-copy', text: 'Choose Claude or OpenAI now, add an API key if you have one, and switch providers later from Profile.' }),
+        h('div', { class: 'onboarding-title', text: 'Welcome to Braiwser' }),
+        h('div', { class: 'onboarding-copy', text: 'Pick how you work, then optionally connect Claude or OpenAI. Everything stays on this machine.' }),
       ]),
     ]),
   ]);
+
+  let persona = settings.persona || 'agent';
+  const personas = (settings.personas || [
+    { id: 'agent', label: 'Agent builder', tip: 'Inspect → hand off to your coding agent.' },
+    { id: 'reviewer', label: 'Design / QA', tip: 'Audit, breakpoints, export Markdown.' },
+    { id: 'agency', label: 'Agency / freelance', tip: 'Client packs, PDF, journey video.' },
+  ]);
+  const personaTip = h('div', { class: 'field-hint', text: (personas.find((p) => p.id === persona) || {}).tip || '' });
+  const personaGroup = h('div', { class: 'radio-group' });
+  const personaCards = {};
+  personas.forEach((p) => {
+    const radio = h('input', { type: 'radio', name: 'onboarding-persona', value: p.id, checked: persona === p.id });
+    const card = h('label', { class: `radio-card ${persona === p.id ? 'sel' : ''}` }, [
+      radio,
+      h('span', { class: 'rc-name', text: p.label }),
+    ]);
+    radio.addEventListener('change', () => {
+      persona = p.id;
+      Object.values(personaCards).forEach((c) => c.classList.remove('sel'));
+      card.classList.add('sel');
+      personaTip.textContent = p.tip || '';
+    });
+    personaCards[p.id] = card;
+    personaGroup.appendChild(card);
+  });
+  body.appendChild(field('How will you use Braiwser?', personaGroup, null));
+  body.appendChild(personaTip);
 
   const nameInput = h('input', {
     class: 'input',
@@ -276,6 +391,7 @@ export function openOnboardingModal({ settings, providers, actions }) {
     profile.displayName = nameInput.value.trim();
     await actions.setSettings({
       profile: { ...profile },
+      persona,
       aiProvider: provider,
       models: { ...models },
       onboardingComplete: true,

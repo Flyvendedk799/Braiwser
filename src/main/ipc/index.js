@@ -33,6 +33,11 @@ function register({ repos, paths, getWindow }) {
     actionTags: config.ACTION_TAGS,
     priorities: config.PRIORITIES,
     statuses: config.STATUSES,
+    visibilities: config.VISIBILITIES,
+    personas: config.PERSONAS,
+    handoffTemplates: config.HANDOFF_TEMPLATES,
+    reviewChecklists: config.REVIEW_CHECKLISTS,
+    proFeatures: config.PRO_FEATURES,
     assertionKinds: config.ASSERTION_KINDS,
     devicePresets: config.DEVICE_PRESETS,
     themes: config.THEMES,
@@ -42,6 +47,8 @@ function register({ repos, paths, getWindow }) {
     aiTasks: config.AI_TASKS,
     appVersion: app.getVersion(),
     platform: process.platform,
+    docsUrl: 'https://braiwser.app/docs',
+    siteUrl: 'https://braiwser.app',
     inspectorPath: pathToFileURL(paths.inspector).href,
     welcomeUrl: pathToFileURL(paths.welcome).href,
   }));
@@ -120,6 +127,93 @@ function register({ repos, paths, getWindow }) {
   on('caos:annotations.create', (a) => repos.annotations.create(a));
   on('caos:annotations.update', (id, patch) => repos.annotations.update(id, patch));
   on('caos:annotations.remove', (id) => repos.annotations.remove(id));
+  on('caos:annotations.reorder', (sessionId, orderedIds) => repos.annotations.reorder(sessionId, orderedIds));
+
+  // --- product platform (license, sync, team, billing, integrations, …) ---
+  on('caos:license.status', () => require('../services/license').status(repos));
+  on('caos:license.activate', (key) => require('../services/license').activate(repos, key));
+  on('caos:license.demoKey', (opts) => require('../services/license').issueDemoKey(opts || {}));
+  on('caos:license.canUse', (feature) => require('../services/license').canUse(repos, feature));
+
+  on('caos:analytics.track', (event, props) => require('../services/analytics').track(repos, event, props || {}));
+  on('caos:analytics.funnel', () => require('../services/analytics').funnel(repos));
+  on('caos:analytics.diagnostics', () =>
+    require('../services/analytics').buildDiagnostics({ repos, appVersion: app.getVersion(), paths }));
+
+  on('caos:sync.status', () => require('../services/sync').accountStatus(repos));
+  on('caos:sync.signIn', (email) => require('../services/sync').signIn(repos, email));
+  on('caos:sync.signOut', () => require('../services/sync').signOut(repos));
+  on('caos:sync.enqueue', (projectId) => require('../services/sync').enqueueProjectSnapshot(repos, projectId));
+  on('caos:sync.drain', () => require('../services/sync').drainLocal(repos));
+
+  on('caos:team.list', () => require('../services/team').listWorkspaces(repos));
+  on('caos:team.create', (payload) => require('../services/team').createWorkspace(repos, payload || {}));
+  on('caos:team.invite', (workspaceId, member) => require('../services/team').inviteMember(repos, workspaceId, member || {}));
+  on('caos:team.comments.list', (query) => require('../services/team').listComments(repos, query || {}));
+  on('caos:team.comments.add', (payload) => require('../services/team').addComment(repos, payload || {}));
+
+  on('caos:billing.status', () => require('../services/billing').billingStatus(repos));
+  on('caos:billing.checkout', (opts) => require('../services/billing').createCheckoutIntent(repos, opts || {}));
+  on('caos:billing.seats', (seats) => require('../services/billing').applySeatChange(repos, seats));
+  on('caos:billing.gdprExport', () => require('../services/billing').exportGdprPackage(repos));
+  on('caos:billing.gdprDelete', () => require('../services/billing').deleteAccountData(repos));
+
+  on('caos:integrations.issue', (payload) => require('../services/integrations').createIssueDraft(repos, payload || {}));
+  on('caos:integrations.ciStarter', (projectPath) => require('../services/integrations').writeCiStarter(projectPath));
+  on('caos:integrations.webhook', (event, data) => require('../services/integrations').webhookEnvelope(event, data));
+  on('caos:integrations.slack', (text) => require('../services/integrations').slackPayload(text));
+
+  on('caos:agent.templates', () => require('../services/agent/templates').listTemplates());
+  on('caos:agent.presets', () => require('../services/agent/templates').AGENT_PRESETS);
+  on('caos:agent.templatedPrompt', (payload) => {
+    const session = repos.sessions.get(payload && payload.sessionId);
+    const annotations = session ? repos.annotations.bySession(session.id) : [];
+    const project = session && session.projectId ? repos.projects.get(session.projectId) : null;
+    const recording = payload && payload.recordingId ? repos.recordings.get(payload.recordingId) : null;
+    const text = require('../services/agent/templates').applyTemplate(payload && payload.templateId, {
+      session,
+      annotations,
+      project,
+      consoleErrors: payload && payload.consoleLog,
+      recording,
+    });
+    return { ok: true, text };
+  });
+
+  on('caos:review.checklists', () => require('../services/review/checklists').listChecklists());
+  on('caos:review.applyChecklist', (checklistId, sessionId) => {
+    const notes = require('../services/review/checklists').checklistSessionNotes(checklistId);
+    const created = notes.map((n) => repos.annotations.create({ ...n, sessionId }));
+    return { ok: true, created };
+  });
+  on('caos:review.clientPack', (sessionId) => {
+    const session = repos.sessions.get(sessionId);
+    if (!session) throw new Error('Session not found');
+    return require('../services/review/checklists').buildClientPack({
+      session,
+      annotations: repos.annotations.bySession(sessionId),
+      project: session.projectId ? repos.projects.get(session.projectId) : null,
+      settings: repos.settings.get(),
+    });
+  });
+  on('caos:review.htmlReport', (sessionId) => {
+    const session = repos.sessions.get(sessionId);
+    if (!session) throw new Error('Session not found');
+    return require('../services/review/checklists').buildHtmlReport({
+      session,
+      annotations: repos.annotations.bySession(sessionId),
+      project: session.projectId ? repos.projects.get(session.projectId) : null,
+      settings: repos.settings.get(),
+    });
+  });
+
+  on('caos:update.check', () => require('../services/updater').checkForUpdates());
+  on('caos:update.install', () => require('../services/updater').quitAndInstall());
+
+  on('caos:enterprise.status', () => require('../services/enterprise').enterpriseStatus(repos));
+  on('caos:enterprise.sso', (cfg) => require('../services/enterprise').setSsoConfig(repos, cfg || {}));
+  on('caos:enterprise.marketplace', () => require('../services/enterprise').listMarketplace());
+  on('caos:enterprise.schema', () => require('../services/enterprise').openSchema());
 
   // --- recordings ---
   on('caos:recordings.list', (projectId) => repos.recordings.list(projectId));
@@ -294,7 +388,26 @@ function register({ repos, paths, getWindow }) {
     const session = repos.sessions.get(sessionId);
     const annotations = repos.annotations.bySession(sessionId);
     const project = resolveProject(session);
-    const { file, cwd, length } = writeRequest({ session, annotations, project, appDir: repos.dir, consoleLog: extras && extras.consoleLog });
+    let content;
+    if (extras && extras.templateId) {
+      const recording = extras.recordingId ? repos.recordings.get(extras.recordingId) : null;
+      content = require('../services/agent/templates').applyTemplate(extras.templateId, {
+        session,
+        annotations,
+        project,
+        consoleErrors: extras && extras.consoleLog,
+        recording,
+      });
+    }
+    const { file, cwd, length } = writeRequest({
+      session,
+      annotations,
+      project,
+      appDir: repos.dir,
+      consoleLog: extras && extras.consoleLog,
+      content,
+    });
+    try { require('../services/analytics').track(repos, 'handoff_success', { templated: !!content }); } catch (_e) { /* ignore */ }
     return { file, cwd, length, command: (repos.settings.get().agentCommand || '').trim() };
   });
   on('caos:agent.run', async (sessionId, filePath) => {
@@ -346,6 +459,29 @@ function register({ repos, paths, getWindow }) {
         mobile: false,
       });
       overrode = true;
+      // Soften sticky/fixed chrome so full-page shots don't stamp the same
+      // header onto every band of a long document.
+      try {
+        await wc.executeJavaScript(`(() => {
+          if (window.__braiwserFixedRestore) return;
+          const nodes = Array.from(document.querySelectorAll('*'));
+          const changed = [];
+          for (const el of nodes) {
+            const cs = getComputedStyle(el);
+            if (cs.position === 'fixed' || cs.position === 'sticky') {
+              changed.push({ el, position: el.style.position, top: el.style.top });
+              el.style.position = 'absolute';
+            }
+          }
+          window.__braiwserFixedRestore = () => {
+            for (const c of changed) {
+              c.el.style.position = c.position;
+              c.el.style.top = c.top;
+            }
+            delete window.__braiwserFixedRestore;
+          };
+        })()`, true);
+      } catch (_e) { /* ignore */ }
       await new Promise((r) => setTimeout(r, 140)); // let it lay out at the new size
       const shot = await dbg.sendCommand('Page.captureScreenshot', { format: 'png' });
       return {
@@ -365,6 +501,7 @@ function register({ repos, paths, getWindow }) {
         return { ok: false, error: String((e && e.message) || e) };
       }
     } finally {
+      try { await wc.executeJavaScript('window.__braiwserFixedRestore && window.__braiwserFixedRestore()', true); } catch (_e) { /* ignore */ }
       if (overrode) { try { await dbg.sendCommand('Emulation.clearDeviceMetricsOverride'); } catch (_e) { /* ignore */ } }
       try { if (attached) dbg.detach(); } catch (_e) { /* ignore */ }
     }

@@ -1,6 +1,6 @@
 {
   "name": "braiwser",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Braiwser — an annotation-first inspector browser for agentic UI review and testing. Open any web project, click any element, leave notes, audit accessibility, record journeys, and hand the whole review to a coding agent.",
   "main": "src/main/main.js",
@@ -10,17 +10,30 @@
     "start": "electron .",
     "dev": "electron . --dev",
     "check": "node scripts/check.js",
-    "e2e": "CAOS_E2E=1 electron . --no-sandbox",
+    "e2e": "node scripts/e2e.js",
     "test": "npm run check && npm run e2e",
     "dist": "electron-builder",
-    "dist:dir": "electron-builder --dir"
+    "dist:dir": "electron-builder --dir",
+    "release": "electron-builder --publish always"
   },
   "build": {
     "appId": "com.braiwser.app",
     "productName": "Braiwser",
-    "files": ["src/**/*", "package.json"],
+    "files": ["src/**/*", "package.json", "schema/**/*"],
     "directories": { "output": "dist" },
-    "mac": { "category": "public.app-category.developer-tools", "target": ["dmg", "zip"] },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Flyvendedk799",
+        "repo": "Braiwser"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": ["dmg", "zip"],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false
+    },
     "win": { "target": ["nsis"] },
     "linux": { "target": ["AppImage"] }
   },
@@ -29,6 +42,7 @@
     "electron-builder": "^25.1.8"
   },
   "dependencies": {
-    "@flyvendedk799/ai-auth": "github:Flyvendedk799/ai-auth"
+    "@flyvendedk799/ai-auth": "github:Flyvendedk799/ai-auth",
+    "electron-updater": "^6.3.9"
   }
 }

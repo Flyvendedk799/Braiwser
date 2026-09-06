@@ -155,11 +155,35 @@ export function createNotesPanel(config, actions) {
 
     const card = h('div', {
       class: `note ${resolved ? 'resolved' : ''} ${isSelected ? 'selected' : ''}`,
+      draggable: true,
       on: {
         click: (e) => {
           // Ignore clicks on interactive children — they have their own handlers.
-          if (e.target.closest('.note-actions, .note-edit, .prio-select, .note-check')) return;
+          if (e.target.closest('.note-actions, .note-edit, .prio-select, .note-check, .vis-select')) return;
           actions.locate(a);
+        },
+        dragstart: (e) => {
+          e.dataTransfer.setData('text/braiwser-note', a.id);
+          e.dataTransfer.effectAllowed = 'move';
+          card.classList.add('dragging');
+        },
+        dragend: () => card.classList.remove('dragging'),
+        dragover: (e) => {
+          e.preventDefault();
+          card.classList.add('drag-over');
+        },
+        dragleave: () => card.classList.remove('drag-over'),
+        drop: (e) => {
+          e.preventDefault();
+          card.classList.remove('drag-over');
+          const fromId = e.dataTransfer.getData('text/braiwser-note');
+          if (!fromId || fromId === a.id || !actions.reorder) return;
+          const ids = filtered().map((n) => n.id);
+          const from = ids.indexOf(fromId);
+          const to = ids.indexOf(a.id);
+          if (from < 0 || to < 0) return;
+          ids.splice(to, 0, ids.splice(from, 1)[0]);
+          actions.reorder(ids);
         },
       },
     });
@@ -226,11 +250,22 @@ export function createNotesPanel(config, actions) {
     prioSelect.value = prio;
     prioSelect.addEventListener('change', () => actions.setPriority(a, prioSelect.value));
 
+    const vis = a.visibility === 'client' ? 'client' : 'internal';
+    const visSelect = h('select', { class: 'vis-select', 'aria-label': 'Visibility' }, [
+      h('option', { value: 'internal', text: 'Internal' }),
+      h('option', { value: 'client', text: 'Client-facing' }),
+    ]);
+    visSelect.value = vis;
+    visSelect.addEventListener('change', () => {
+      if (actions.setVisibility) actions.setVisibility(a, visSelect.value);
+    });
+
     const currentUrl = actions.currentUrl ? actions.currentUrl() : null;
     const offPage = !!(currentUrl && a.url && a.url !== currentUrl);
 
     const foot = h('div', { class: 'note-foot' }, [
       prioSelect,
+      visSelect,
       a.viewport && a.viewport.label && a.viewport.label !== 'Fit to window'
         ? h('span', { class: 'note-kind', title: `Captured at ${a.viewport.w}×${a.viewport.h}`, text: a.viewport.label })
         : null,
@@ -260,7 +295,13 @@ export function createNotesPanel(config, actions) {
         : items.length + ' of ' + annotations.length
       : '';
     if (!annotations.length) {
-      list.appendChild(placeholder('inspect', 'No notes yet', 'Toggle Inspect or Draw, then click an element on the page to capture it and leave a note. Or run a page audit and promote its findings.'));
+      const persona = (actions.getPersona && actions.getPersona()) || 'agent';
+      const sub = persona === 'reviewer'
+        ? 'Run a page audit and promote findings, or inspect an element to leave a note.'
+        : persona === 'agency'
+          ? 'Capture client-facing findings, then export a client pack or HTML report.'
+          : 'Toggle Inspect or Draw, then click an element. When ready, copy the agent prompt or hand off.';
+      list.appendChild(placeholder('inspect', 'No notes yet', sub));
       return;
     }
     if (!items.length) {

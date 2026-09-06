@@ -16,7 +16,9 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { JsonCollection, JsonDocument } = require('./db');
-const { DEFAULT_SETTINGS, DEVICE_PRESETS, THEMES } = require('../config');
+const { migrateStore } = require('./schema');
+const { STORE_DIR } = require('../migrate');
+const { DEFAULT_SETTINGS, DEVICE_PRESETS, THEMES, PERSONAS } = require('../config');
 
 // Four ways to pay for a call, two wires. `claude-code` and `codex` are
 // subscriptions already signed in on the machine; the other two are metered API
@@ -46,6 +48,7 @@ function migrateModels(models) {
 }
 const DEVICE_IDS = DEVICE_PRESETS.map((d) => d.id);
 const THEME_IDS = THEMES.map((t) => t.id);
+const PERSONA_IDS = PERSONAS.map((p) => p.id);
 
 function normalizeSettings(raw = {}) {
   const base = { ...DEFAULT_SETTINGS, ...raw };
@@ -65,9 +68,26 @@ function normalizeSettings(raw = {}) {
     onboardingComplete: !!base.onboardingComplete,
     restoreAnnotationsOnLoad: base.restoreAnnotationsOnLoad !== false,
     replayDelayMs: Number.isFinite(Number(base.replayDelayMs)) ? Math.max(0, Number(base.replayDelayMs)) : DEFAULT_SETTINGS.replayDelayMs,
+    aiTimeoutMs: Number.isFinite(Number(base.aiTimeoutMs)) ? Math.max(5000, Number(base.aiTimeoutMs)) : DEFAULT_SETTINGS.aiTimeoutMs,
     theme: THEME_IDS.includes(base.theme) ? base.theme : DEFAULT_SETTINGS.theme,
     device: DEVICE_IDS.includes(base.device) ? base.device : DEFAULT_SETTINGS.device,
     deviceLandscape: !!base.deviceLandscape,
+    persona: PERSONA_IDS.includes(base.persona) ? base.persona : DEFAULT_SETTINGS.persona,
+    analyticsOptIn: !!base.analyticsOptIn,
+    crashReportsOptIn: !!base.crashReportsOptIn,
+    licenseKey: typeof base.licenseKey === 'string' ? base.licenseKey : '',
+    agency: {
+      ...DEFAULT_SETTINGS.agency,
+      ...(base.agency && typeof base.agency === 'object' ? base.agency : {}),
+    },
+    sync: {
+      ...DEFAULT_SETTINGS.sync,
+      ...(base.sync && typeof base.sync === 'object' ? base.sync : {}),
+    },
+    integrations: {
+      ...DEFAULT_SETTINGS.integrations,
+      ...(base.integrations && typeof base.integrations === 'object' ? base.integrations : {}),
+    },
   };
 }
 
@@ -103,12 +123,19 @@ function sanitizeSettingsPatch(patch, current) {
   if (Object.prototype.hasOwnProperty.call(patch, 'replayDelayMs')) {
     clean.replayDelayMs = Math.max(0, Number.parseInt(patch.replayDelayMs, 10) || 0);
   }
+  if (Object.prototype.hasOwnProperty.call(patch, 'aiTimeoutMs')) {
+    clean.aiTimeoutMs = Math.max(5000, Number.parseInt(patch.aiTimeoutMs, 10) || DEFAULT_SETTINGS.aiTimeoutMs);
+  }
   if (Object.prototype.hasOwnProperty.call(patch, 'restoreAnnotationsOnLoad')) {
     clean.restoreAnnotationsOnLoad = patch.restoreAnnotationsOnLoad !== false;
   }
   if (typeof patch.theme === 'string' && THEME_IDS.includes(patch.theme)) clean.theme = patch.theme;
   if (typeof patch.device === 'string' && DEVICE_IDS.includes(patch.device)) clean.device = patch.device;
   if (Object.prototype.hasOwnProperty.call(patch, 'deviceLandscape')) clean.deviceLandscape = !!patch.deviceLandscape;
+  if (typeof patch.persona === 'string' && PERSONA_IDS.includes(patch.persona)) clean.persona = patch.persona;
+  if (Object.prototype.hasOwnProperty.call(patch, 'analyticsOptIn')) clean.analyticsOptIn = !!patch.analyticsOptIn;
+  if (Object.prototype.hasOwnProperty.call(patch, 'crashReportsOptIn')) clean.crashReportsOptIn = !!patch.crashReportsOptIn;
+  if (typeof patch.licenseKey === 'string') clean.licenseKey = patch.licenseKey.trim().slice(0, 256);
   if (typeof patch.agentCommand === 'string') clean.agentCommand = patch.agentCommand.trim().slice(0, 2000);
   if (Array.isArray(patch.openTabs)) {
     clean.openTabs = patch.openTabs.filter((url) => typeof url === 'string' && url.length <= 4096).slice(0, 30);
@@ -122,13 +149,28 @@ function sanitizeSettingsPatch(patch, current) {
   if (Object.prototype.hasOwnProperty.call(patch, 'activeTabIndex')) {
     clean.activeTabIndex = Math.max(0, Number.parseInt(patch.activeTabIndex, 10) || 0);
   }
+  if (patch.agency && typeof patch.agency === 'object' && !Array.isArray(patch.agency)) {
+    clean.agency = { ...(current.agency || {}) };
+    if (typeof patch.agency.name === 'string') clean.agency.name = cleanText(patch.agency.name, 120);
+    if (typeof patch.agency.logoDataUrl === 'string') clean.agency.logoDataUrl = patch.agency.logoDataUrl.slice(0, 500000);
+  }
+  if (patch.sync && typeof patch.sync === 'object' && !Array.isArray(patch.sync)) {
+    clean.sync = { ...(current.sync || {}) };
+    if (Object.prototype.hasOwnProperty.call(patch.sync, 'enabled')) clean.sync.enabled = !!patch.sync.enabled;
+    if (typeof patch.sync.accountEmail === 'string') clean.sync.accountEmail = cleanText(patch.sync.accountEmail, 200);
+    if (typeof patch.sync.workspaceId === 'string') clean.sync.workspaceId = cleanText(patch.sync.workspaceId, 80);
+  }
+  if (patch.integrations && typeof patch.integrations === 'object' && !Array.isArray(patch.integrations)) {
+    clean.integrations = { ...(current.integrations || {}), ...patch.integrations };
+  }
 
   return clean;
 }
 
 function createRepositories(userDataDir) {
-  const dir = path.join(userDataDir, 'caos');
+  const dir = path.join(userDataDir, STORE_DIR);
   fs.mkdirSync(dir, { recursive: true });
+  const schema = migrateStore(dir);
 
   const projectsC = new JsonCollection(dir, 'projects');
   const sessionsC = new JsonCollection(dir, 'sessions');
@@ -136,8 +178,14 @@ function createRepositories(userDataDir) {
   const recordingsC = new JsonCollection(dir, 'recordings');
   const historyC = new JsonCollection(dir, 'history');
   const bookmarksC = new JsonCollection(dir, 'bookmarks');
+  const commentsC = new JsonCollection(dir, 'comments');
+  const workspacesC = new JsonCollection(dir, 'workspaces');
+  const analyticsC = new JsonCollection(dir, 'analytics');
+  const auditLogC = new JsonCollection(dir, 'audit-log');
   const settingsD = new JsonDocument(dir, 'settings', DEFAULT_SETTINGS);
   const secretsD = new JsonDocument(dir, 'secrets', {});
+  const licenseD = new JsonDocument(dir, 'license', { key: '', activatedAt: null, tier: 'free' });
+  const syncQueueC = new JsonCollection(dir, 'sync-queue');
 
   const now = () => new Date().toISOString();
   const id = () => crypto.randomUUID();
@@ -171,7 +219,12 @@ function createRepositories(userDataDir) {
   };
 
   const annotations = {
-    bySession: (sessionId) => annotationsC.find((a) => a.sessionId === sessionId).sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '')),
+    bySession: (sessionId) => annotationsC.find((a) => a.sessionId === sessionId).sort((a, b) => {
+      const ao = Number.isFinite(a.sortOrder) ? a.sortOrder : Number.MAX_SAFE_INTEGER;
+      const bo = Number.isFinite(b.sortOrder) ? b.sortOrder : Number.MAX_SAFE_INTEGER;
+      if (ao !== bo) return ao - bo;
+      return (a.createdAt || '').localeCompare(b.createdAt || '');
+    }),
     bySessionUrl: (sessionId, url) => annotationsC.find((a) => a.sessionId === sessionId && a.url === url),
     countsBySession: () => {
       const counts = {};
@@ -180,6 +233,7 @@ function createRepositories(userDataDir) {
     },
     get: (i) => annotationsC.get(i),
     create: (a) => {
+      const existing = annotationsC.find((x) => x.sessionId === a.sessionId);
       const doc = {
         id: a.id || id(),
         sessionId: a.sessionId,
@@ -191,12 +245,12 @@ function createRepositories(userDataDir) {
         title: a.title || '',
         status: a.status || 'open',
         priority: a.priority || 'normal',
+        visibility: a.visibility === 'client' ? 'client' : 'internal',
+        sortOrder: Number.isFinite(a.sortOrder) ? a.sortOrder : existing.length,
         createdAt: a.ts || now(),
         updatedAt: now(),
       };
-      if (a.edit) doc.edit = a.edit; // rearrange edits carry their CSS/reorder payload
-      // The viewport a note was captured at matters for responsive review, so
-      // it travels with the annotation into every export.
+      if (a.edit) doc.edit = a.edit;
       if (a.viewport && typeof a.viewport === 'object') doc.viewport = a.viewport;
       const saved = annotationsC.insert(doc);
       if (a.sessionId) sessionsC.update(a.sessionId, { updatedAt: now() });
@@ -204,6 +258,14 @@ function createRepositories(userDataDir) {
     },
     update: (i, patch) => annotationsC.update(i, { ...patch, updatedAt: now() }),
     remove: (i) => annotationsC.remove(i),
+    reorder: (sessionId, orderedIds) => {
+      if (!Array.isArray(orderedIds)) return annotations.bySession(sessionId);
+      orderedIds.forEach((aid, index) => {
+        const row = annotationsC.get(aid);
+        if (row && row.sessionId === sessionId) annotationsC.update(aid, { sortOrder: index, updatedAt: now() });
+      });
+      return annotations.bySession(sessionId);
+    },
   };
 
   const recordings = {
@@ -266,7 +328,75 @@ function createRepositories(userDataDir) {
   // one-time migration can drain it and blank it.
   const secrets = { legacy: secretsD };
 
-  return { dir, projects, sessions, annotations, recordings, history, bookmarks, settings, secrets };
+  const license = {
+    get: () => licenseD.data(),
+    set: (patch) => licenseD.merge(patch || {}),
+  };
+
+  const comments = {
+    byAnnotation: (annotationId) => commentsC.find((c) => c.annotationId === annotationId).sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '')),
+    bySession: (sessionId) => commentsC.find((c) => c.sessionId === sessionId).sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '')),
+    create: ({ sessionId, annotationId, author, body }) =>
+      commentsC.insert({ id: id(), sessionId, annotationId, author: author || 'You', body: body || '', createdAt: now() }),
+    remove: (i) => commentsC.remove(i),
+  };
+
+  const workspaces = {
+    list: () => workspacesC.all(),
+    get: (i) => workspacesC.get(i),
+    create: ({ name, role }) =>
+      workspacesC.insert({
+        id: id(),
+        name: name || 'Workspace',
+        role: role || 'owner',
+        members: [{ email: '', role: 'owner', joinedAt: now() }],
+        createdAt: now(),
+      }),
+    update: (i, patch) => workspacesC.update(i, patch),
+    remove: (i) => workspacesC.remove(i),
+  };
+
+  const analytics = {
+    track: (event, props = {}) => {
+      const settings = normalizeSettings(settingsD.data());
+      if (!settings.analyticsOptIn) return null;
+      return analyticsC.insert({ id: id(), event, props, at: now() });
+    },
+    list: (limit = 200) => analyticsC.all().slice(-limit),
+    clear: () => { analyticsC.removeWhere(() => true); return true; },
+  };
+
+  const auditLog = {
+    append: (action, detail = {}) => auditLogC.insert({ id: id(), action, detail, at: now() }),
+    list: (limit = 200) => auditLogC.all().slice(-limit),
+    clear: () => { auditLogC.removeWhere(() => true); return true; },
+  };
+
+  const syncQueue = {
+    enqueue: (op) => syncQueueC.insert({ id: id(), ...op, createdAt: now(), status: 'pending' }),
+    list: () => syncQueueC.all(),
+    mark: (i, status) => syncQueueC.update(i, { status }),
+    clear: () => { syncQueueC.removeWhere(() => true); return true; },
+  };
+
+  return {
+    dir,
+    schema,
+    projects,
+    sessions,
+    annotations,
+    recordings,
+    history,
+    bookmarks,
+    settings,
+    secrets,
+    license,
+    comments,
+    workspaces,
+    analytics,
+    auditLog,
+    syncQueue,
+  };
 }
 
 module.exports = { createRepositories };

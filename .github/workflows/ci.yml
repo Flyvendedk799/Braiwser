@@ -65,4 +65,4 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           xvfb-run -a --server-args="-screen 0 1600x1200x24" \
-            env CAOS_E2E=1 ./dist/linux-unpacked/braiwser --no-sandbox
+            env BRAIWSER_E2E=1 CAOS_E2E=1 ./dist/linux-unpacked/braiwser --no-sandbox

@@ -26,13 +26,13 @@ function cwdFor(project, dir) {
 
 // Writes the prompt file; returns its absolute path, the cwd a command would run
 // in, and the content length (so callers can verify without re-reading).
-function writeRequest({ session, annotations, project, appDir, consoleLog }) {
+function writeRequest({ session, annotations, project, appDir, consoleLog, content }) {
   const dir = requestDir(project, appDir);
   fs.mkdirSync(dir, { recursive: true });
-  const content = toPrompt(session || {}, annotations || [], consoleLog);
+  const body = content != null ? String(content) : toPrompt(session || {}, annotations || [], consoleLog);
   const file = path.join(dir, `request-${stamp()}.md`);
-  fs.writeFileSync(file, content, 'utf8');
-  return { file, cwd: cwdFor(project, dir), length: content.length };
+  fs.writeFileSync(file, body, 'utf8');
+  return { file, cwd: cwdFor(project, dir), length: body.length };
 }
 
 // Spawns the agent command (via the shell so templated command lines work).

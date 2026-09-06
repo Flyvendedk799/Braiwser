@@ -10,9 +10,10 @@ const API_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
 
 // { headers, model, system, user } -> Promise<string>
-async function complete({ headers, model, system, user }) {
+async function complete({ headers, model, system, user, timeoutMs }) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 120000); // 120s cap
+  const ms = Math.max(5000, Number(timeoutMs) || 120000);
+  const timer = setTimeout(() => controller.abort(), ms);
   let res;
   try {
     res = await fetch(API_URL, {
@@ -31,7 +32,7 @@ async function complete({ headers, model, system, user }) {
       signal: controller.signal,
     });
   } catch (err) {
-    if (err && err.name === 'AbortError') throw new Error('Claude request timed out after 120s');
+    if (err && err.name === 'AbortError') throw new Error(`Claude request timed out after ${Math.round(ms / 1000)}s`);
     throw err;
   } finally {
     clearTimeout(timer);

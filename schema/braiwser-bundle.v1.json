@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://braiwser.app/schema/braiwser-bundle.v1.json",
+  "title": "Braiwser project bundle",
+  "description": "Portable interchange format for Braiwser projects, sessions, annotations, and recordings.",
+  "type": "object",
+  "required": ["format", "version", "project"],
+  "properties": {
+    "format": { "const": "braiwser-bundle" },
+    "version": { "type": "integer", "minimum": 1 },
+    "project": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "path": { "type": "string" },
+        "kind": { "enum": ["local", "url"] }
+      }
+    },
+    "sessions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "projectId": { "type": "string" },
+          "name": { "type": "string" },
+          "url": { "type": "string" },
+          "title": { "type": "string" }
+        }
+      }
+    },
+    "annotations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "sessionId": { "type": "string" },
+          "kind": { "enum": ["element", "region", "edit"] },
+          "action": { "type": "string" },
+          "note": { "type": "string" },
+          "status": { "enum": ["open", "resolved"] },
+          "priority": { "enum": ["low", "normal", "high", "critical"] },
+          "visibility": { "enum": ["internal", "client"] },
+          "sortOrder": { "type": "number" },
+          "target": { "type": "object" },
+          "viewport": { "type": "object" },
+          "url": { "type": "string" }
+        }
+      }
+    },
+    "recordings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "projectId": { "type": "string" },
+          "name": { "type": "string" },
+          "startUrl": { "type": "string" },
+          "steps": { "type": "array" }
+        }
+      }
+    }
+  }
+}
