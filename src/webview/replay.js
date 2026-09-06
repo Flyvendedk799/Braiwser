@@ -1,10 +1,15 @@
 // Braiwser — replay.js
 // Re-executes recorded steps against the live page. 'navigate' steps are owned
 // by the host (it changes the webview src), so they are a no-op here.
+//
+// Replay is paced to look human: a visible cursor moves to the target, clicks
+// flash, short text is typed, and the host adds inter-step delays from the
+// timestamps captured at record time.
 
 'use strict';
 
 const anchor = require('./anchor');
+const cursor = require('./cursor');
 
 function wait(ms) {
   return new Promise((res) => setTimeout(res, ms));
@@ -70,15 +75,25 @@ function scrollIntoView(el) {
   }
 }
 
-function fireMouse(el, type) {
+function pointFor(el, step) {
+  const r = el.getBoundingClientRect();
+  const cx = Math.round(r.left + r.width / 2);
+  const cy = Math.round(r.top + r.height / 2);
+  const px = step && step.position && Number.isFinite(step.position.x) ? step.position.x : cx;
+  const py = step && step.position && Number.isFinite(step.position.y) ? step.position.y : cy;
+  // If the recorded point drifted off the element (layout shift), fall back to center.
+  const onEl = px >= r.left - 4 && px <= r.right + 4 && py >= r.top - 4 && py <= r.bottom + 4;
+  return onEl ? { x: Math.round(px), y: Math.round(py) } : { x: cx, y: cy };
+}
+
+function fireMouse(el, type, point) {
   try {
-    const r = el.getBoundingClientRect();
     const evt = new MouseEvent(type, {
       bubbles: true,
       cancelable: true,
       view: window,
-      clientX: Math.round(r.left + r.width / 2),
-      clientY: Math.round(r.top + r.height / 2),
+      clientX: point.x,
+      clientY: point.y,
     });
     el.dispatchEvent(evt);
   } catch (_e) {
@@ -152,8 +167,28 @@ function evaluateAssert(step) {
   }
 }
 
-async function executeStep(step) {
+async function typeValue(el, value, { fast } = {}) {
+  const text = value == null ? '' : String(value);
+  // Keep e2e / snappy replays instant; film / normal replays type short strings.
+  if (fast || text.length === 0 || text.length > 48 || el.secret) {
+    el.value = text;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return;
+  }
+  el.value = '';
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  for (let i = 0; i < text.length; i++) {
+    el.value = text.slice(0, i + 1);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    await wait(28 + Math.floor(Math.random() * 36));
+  }
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+async function executeStep(step, opts = {}) {
   if (!step || !step.type) return { ok: false, error: 'no step' };
+  const fast = !!opts.fast;
 
   // Navigation is handled by the host (changes webview location).
   if (step.type === 'navigate') return { ok: true };
@@ -162,6 +197,7 @@ async function executeStep(step) {
 
   if (step.type === 'scroll') {
     try {
+      cursor.show();
       await smoothScrollTo(step.x || 0, step.y || 0);
       return { ok: true };
     } catch (e) {
@@ -176,17 +212,28 @@ async function executeStep(step) {
 
   try {
     await scrollIntoView(el);
-    await wait(60);
-    anchor.highlight(el, { duration: 700, color: '#3ddc97' });
+    await wait(fast ? 20 : 120);
+    const point = pointFor(el, step);
+    if (!fast) {
+      cursor.show();
+      await cursor.moveTo(point.x, point.y);
+      await wait(140);
+    } else {
+      cursor.setPosition(point.x, point.y, { instant: true });
+      cursor.show();
+    }
+    anchor.highlight(el, { duration: fast ? 200 : 700, color: '#3ddc97' });
 
     if (step.type === 'click') {
-      fireMouse(el, 'mousedown');
-      fireMouse(el, 'mouseup');
+      if (!fast) await cursor.clickFlash(point.x, point.y);
+      fireMouse(el, 'mousedown', point);
+      fireMouse(el, 'mouseup', point);
       if (typeof el.click === 'function') {
         el.click();
       } else {
-        fireMouse(el, 'click');
+        fireMouse(el, 'click', point);
       }
+      if (!fast) await wait(220);
       return { ok: true };
     }
 
@@ -199,11 +246,12 @@ async function executeStep(step) {
       }
       if (tag === 'input' && (el.type === 'checkbox' || el.type === 'radio')) {
         el.checked = !!step.value;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
       } else {
-        el.value = step.value == null ? '' : step.value;
+        await typeValue(el, step.secret ? '' : step.value, { fast });
       }
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
+      if (!fast) await wait(180);
       return { ok: true };
     }
 
@@ -217,6 +265,7 @@ async function executeStep(step) {
       const base = { bubbles: true, cancelable: true, key, code: key };
       el.dispatchEvent(new KeyboardEvent('keydown', base));
       el.dispatchEvent(new KeyboardEvent('keyup', base));
+      if (!fast) await wait(160);
       return { ok: true };
     }
 
@@ -226,4 +275,4 @@ async function executeStep(step) {
   }
 }
 
-module.exports = { executeStep };
+module.exports = { executeStep, cursor };

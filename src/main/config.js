@@ -231,7 +231,7 @@ const DEFAULT_SETTINGS = {
     codex: 'gpt-5',
     openai: 'gpt-5',
   },
-  replayDelayMs: 600,
+  replayDelayMs: 800,
   aiTimeoutMs: 120000,
   analyticsOptIn: false,
   crashReportsOptIn: false,

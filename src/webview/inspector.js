@@ -2816,11 +2816,24 @@ const audit = require('./audit');
     const p = payload || {};
     let r;
     try {
-      r = await replay.executeStep(p.step);
+      const opts = p.opts || {};
+      if (!opts.fast) {
+        try { replay.cursor.show(); } catch (_e) { /* ignore */ }
+      }
+      r = await replay.executeStep(p.step, opts);
     } catch (err) {
       r = { ok: false, error: String((err && err.message) || err) };
     }
     ipcRenderer.sendToHost('caos:replay-ack', { index: p.index, ok: !!r.ok, error: r.error, actual: r.actual });
+  });
+
+  ipcRenderer.on('caos:replay-cursor', (_e, payload) => {
+    try {
+      if (payload && payload.show === false) replay.cursor.hide();
+      else replay.cursor.show();
+    } catch (_err) {
+      /* ignore */
+    }
   });
 
   // Run the offline accessibility / quality audit over the live page and hand

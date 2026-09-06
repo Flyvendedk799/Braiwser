@@ -671,7 +671,20 @@ function setupTabWebview(tab) {
         setMode('off');
         break;
       case 'caos:rec-step':
-        if (isActive() && state.recordingBuffer) state.recordingBuffer.steps.push(payload);
+        if (isActive() && state.recordingBuffer) {
+          const steps = state.recordingBuffer.steps;
+          // Coalesced typing: replace the previous input on the same field so
+          // replay shows one typed value instead of flickering every keystroke.
+          if (payload && payload.replaceLast && payload.type === 'input' && steps.length) {
+            const prev = steps[steps.length - 1];
+            if (prev && prev.type === 'input' && prev.selector === payload.selector) {
+              steps[steps.length - 1] = payload;
+              break;
+            }
+          }
+          if (payload) delete payload.replaceLast;
+          steps.push(payload);
+        }
         break;
       case 'caos:replay-ack': {
         if (!isActive()) break; // only the tab replay runs on may answer
@@ -1474,9 +1487,9 @@ async function exportRecordingVideo(rec) {
   const startedAt = Date.now();
   toast('Filming the replay…', 'info', 2000);
   try {
-    await replaySelected();
+    await replaySelected({ forVideo: true });
   } finally {
-    await new Promise((r) => setTimeout(r, 400)); // let the last frames land
+    await new Promise((r) => setTimeout(r, 600)); // let the last frames land
     // Flush the tail, then wait for the muxer to finalise — for MP4 this is when
     // the moov atom (duration + seek index) is written, so cutting it short here
     // is exactly what produces an unseekable file.
@@ -1524,12 +1537,37 @@ function blobToBase64(blob) {
   });
 }
 
-async function replaySelected() {
+function parseStepTs(step) {
+  if (!step || !step.ts) return NaN;
+  if (typeof step.ts === 'number') return step.ts;
+  const ms = Date.parse(step.ts);
+  return Number.isFinite(ms) ? ms : NaN;
+}
+
+// Inter-step pause. Prefer the real gaps captured at record time so the film
+// matches what the reviewer did; fall back to settings.replayDelayMs.
+// `fast` (e2e / delay < 100) keeps the fixed short pause so the suite stays snappy.
+function pauseAfterStep(prev, next, { baseDelay, forVideo, fast }) {
+  if (fast) return Math.max(0, baseDelay);
+  const floor = forVideo ? Math.max(baseDelay, 900) : Math.max(baseDelay, 450);
+  const ceiling = forVideo ? 3500 : 2500;
+  const a = parseStepTs(prev);
+  const b = parseStepTs(next);
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) return floor;
+  return Math.max(floor, Math.min(ceiling, b - a));
+}
+
+async function replaySelected(opts = {}) {
   const rec = state.selectedRecording;
   if (!rec || state.replaying || state.recordingBuffer) return;
   const full = (await caos.recordings.get(rec.id)) || rec;
   const steps = full.steps || [];
   if (!steps.length) { toast('Recording has no steps', 'warn'); return; }
+
+  const forVideo = !!opts.forVideo;
+  const baseDelay = state.settings.replayDelayMs ?? 600;
+  // E2E deliberately drops the delay to tens of ms — keep that path instant.
+  const fast = !forVideo && baseDelay < 100;
 
   state.replaying = true;
   syncToolbar();
@@ -1537,8 +1575,8 @@ async function replaySelected() {
   overlayFill.parentElement.style.display = '';
   overlayCancelBtn.textContent = 'Cancel';
   overlayCancelBtn.onclick = cancelReplay;
+  sendWv('caos:replay-cursor', { show: true });
 
-  const delay = state.settings.replayDelayMs ?? 600;
   const results = [];
   try {
     for (let i = 0; i < steps.length; i++) {
@@ -1555,16 +1593,19 @@ async function replaySelected() {
         const ok = compareStr(step.op || 'contains', state.currentUrl || '', step.expected);
         res = { ok, actual: state.currentUrl || '', error: ok ? '' : `url "${(state.currentUrl || '').slice(0, 48)}" ${step.op || 'contains'} "${step.expected}" failed` };
       } else {
-        res = await replayStep(step, i);
+        res = await replayStep(step, i, { fast, forVideo });
       }
       const label = step.type === 'assert' ? `assert:${step.kind}` : step.type;
       results.push({ i, type: label, selector: step.selector || step.url || step.expected || '', ok: !!res.ok, error: res.error || '', actual: res.actual });
       if (!state.replaying) break;
-      await sleep(delay);
+      const next = steps[i + 1];
+      if (next) await sleep(pauseAfterStep(step, next, { baseDelay, forVideo, fast }));
+      else if (forVideo) await sleep(Math.max(baseDelay, 700));
     }
   } catch (e) {
     toast('Replay error: ' + (e && e.message ? e.message : e), 'error');
   } finally {
+    sendWv('caos:replay-cursor', { show: false });
     finishReplay();
   }
 
@@ -1725,13 +1766,15 @@ function navigateAndWait(url) {
   });
 }
 
-function replayStep(step, index) {
+function replayStep(step, index, opts = {}) {
   return new Promise((resolve) => {
     let settled = false;
     const done = (res) => { if (!settled) { settled = true; replayWaiters.delete(index); resolve(res || { ok: false, error: 'timeout' }); } };
     replayWaiters.set(index, { resolve: (p) => done(p) });
-    sendWv('caos:replay-step', { step, index });
-    setTimeout(() => done({ ok: false, error: 'no response (timeout)' }), 5000); // per-step timeout
+    sendWv('caos:replay-step', { step, index, opts: { fast: !!opts.fast, forVideo: !!opts.forVideo } });
+    // Typing + cursor travel can exceed the old 5s budget on long fields.
+    const timeoutMs = opts.fast ? 5000 : 20000;
+    setTimeout(() => done({ ok: false, error: 'no response (timeout)' }), timeoutMs);
   });
 }
 

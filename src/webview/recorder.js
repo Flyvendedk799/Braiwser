@@ -2,15 +2,21 @@
 // Captures real user interactions on the page as a step list and streams them
 // out via the onStep callback. Capture-phase, never preventDefault — the page
 // must behave totally normally while recording.
+//
+// Consecutive text inputs on the same field are coalesced into one step so
+// replay does not flicker through every keystroke. A synthetic cursor follows
+// the pointer so the filmed guest page (which has no OS cursor) still shows it.
 
 'use strict';
 
 const anchor = require('./anchor');
+const cursor = require('./cursor');
 
 let active = false;
 let cb = null;
 let lastScroll = 0;
 let scrollSettle = null; // trailing emit, so the resting position is recorded
+let lastInput = null; // { selector, step } — coalesced text entry
 const listeners = []; // { target, type, fn, opts }
 
 function isOwnUI(el) {
@@ -33,6 +39,10 @@ function emit(step) {
   } catch (_e) {
     /* swallow — recording must never break the page */
   }
+}
+
+function flushInput() {
+  lastInput = null;
 }
 
 // What the step touched, in words — the written exports read "Click “Log in”
@@ -61,6 +71,7 @@ function add(target, type, fn) {
 
 function onClick(e) {
   if (isOwnUI(e.target)) return;
+  flushInput();
   emit({
     type: 'click',
     selector: anchor.cssPath(e.target),
@@ -85,19 +96,38 @@ function onInputEvt(e) {
   } catch (_e) {
     value = undefined;
   }
-  emit({
+  const selector = anchor.cssPath(t);
+  const step = {
     type: 'input',
-    selector: anchor.cssPath(t),
+    selector,
     value,
     // A password's characters have no place in a debugging artefact.
     secret: tag === 'input' && t.type === 'password',
     ...describeTarget(t),
-  });
+  };
+
+  // Checkbox / radio / select: each change is a distinct action.
+  const coalesce =
+    tag !== 'select' &&
+    !(tag === 'input' && (t.type === 'checkbox' || t.type === 'radio'));
+
+  if (coalesce && lastInput && lastInput.selector === selector && typeof cb === 'function') {
+    // Update the in-flight step the host already has: emit a replace marker.
+    step.ts = now();
+    step.replaceLast = true;
+    lastInput.step = step;
+    try { cb(step); } catch (_e) { /* ignore */ }
+    return;
+  }
+
+  lastInput = coalesce ? { selector, step } : null;
+  emit(step);
 }
 
 function onKeyDown(e) {
   if (isOwnUI(e.target)) return;
   if (e.key !== 'Enter') return;
+  flushInput();
   emit({
     type: 'key',
     selector: anchor.cssPath(e.target),
@@ -107,6 +137,7 @@ function onKeyDown(e) {
 }
 
 function emitScroll() {
+  flushInput();
   emit({
     type: 'scroll',
     x: window.scrollX || window.pageXOffset || 0,
@@ -130,6 +161,8 @@ function start(onStep) {
   cb = onStep;
   active = true;
   lastScroll = 0;
+  lastInput = null;
+  cursor.followPointer(true);
   add(document, 'click', onClick);
   add(document, 'input', onInputEvt);
   add(document, 'change', onInputEvt);
@@ -139,8 +172,10 @@ function start(onStep) {
 
 function stop() {
   clearTimeout(scrollSettle);
+  flushInput();
   active = false;
   cb = null;
+  cursor.followPointer(false);
   while (listeners.length) {
     const l = listeners.pop();
     try {
