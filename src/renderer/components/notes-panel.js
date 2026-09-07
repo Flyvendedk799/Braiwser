@@ -41,7 +41,19 @@ export function createNotesPanel(config, actions) {
   const tally = h('span', { class: 'filter-tally' });
   const nextRail = h('div', { class: 'next-rail', hidden: 'hidden' });
   const list = h('div', { class: 'notes-list' });
-  const root = h('div', { class: 'tab-body', dataset: { tab: 'notes' } }, [searchRow, nextRail, bulkBar, filters, list]);
+  const dropLine = h('div', { class: 'note-drop-line' });
+  const root = h('div', { class: 'tab-body', dataset: { tab: 'notes' } }, [searchRow, nextRail, bulkBar, filters, list, dropLine]);
+
+  function hideDropLine() { dropLine.style.display = 'none'; }
+
+  function placeDropLine(card, e) {
+    const rect = card.getBoundingClientRect();
+    const before = e.clientY < rect.top + rect.height / 2;
+    dropLine.style.display = 'block';
+    dropLine.style.left = rect.left + 'px';
+    dropLine.style.width = rect.width + 'px';
+    dropLine.style.top = (before ? rect.top : rect.bottom) + 'px';
+  }
 
   function buildFilters() {
     clear(filters);
@@ -169,15 +181,17 @@ export function createNotesPanel(config, actions) {
           e.dataTransfer.effectAllowed = 'move';
           card.classList.add('dragging');
         },
-        dragend: () => card.classList.remove('dragging'),
+        dragend: () => { card.classList.remove('dragging'); hideDropLine(); },
         dragover: (e) => {
           e.preventDefault();
           card.classList.add('drag-over');
+          placeDropLine(card, e);
         },
         dragleave: () => card.classList.remove('drag-over'),
         drop: (e) => {
           e.preventDefault();
           card.classList.remove('drag-over');
+          hideDropLine();
           const fromId = e.dataTransfer.getData('text/braiwser-note');
           if (!fromId || fromId === a.id || !actions.reorder) return;
           const ids = filtered().map((n) => n.id);
@@ -303,7 +317,6 @@ export function createNotesPanel(config, actions) {
       if (persona === 'reviewer' && actions.startChecklist) {
         ph.appendChild(h('button', {
           class: 'btn btn-sm btn-primary',
-          style: { marginTop: '12px', alignSelf: 'center' },
           text: 'Start accessibility pass',
           on: { click: () => actions.startChecklist('a11y-pass') },
         }));
@@ -344,7 +357,7 @@ export function createNotesPanel(config, actions) {
   }
 
   function placeholder(ic, title, sub) {
-    return h('div', { class: 'placeholder' }, [
+    return h('div', { class: 'placeholder empty-state' }, [
       h('div', { class: 'ph-icon', html: icon(ic, 30) }),
       h('div', { class: 'ph-title', text: title }),
       h('div', { class: 'ph-sub', text: sub }),

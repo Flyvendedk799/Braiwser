@@ -6,21 +6,24 @@ const STEPS = [
   {
     id: 'inspect',
     title: 'Inspect what’s wrong',
-    body: 'Inspect is on. Click the faded Buy now button on the sample page.',
+    sample: 'Inspect is on. Click the faded Buy now button on the sample page.',
+    generic: 'Inspect is on. Click the primary button — or any element that looks wrong.',
     target: '[data-coach="inspect"]',
     fallback: '.stage',
   },
   {
     id: 'note',
     title: 'Save the note',
-    body: 'Write one sentence about the fix, pick an action tag, and save. That note is what the agent will see.',
+    sample: 'Write one sentence about the fix, pick an action tag, and save. That note is what the agent will see.',
+    generic: 'Write one sentence about the fix, pick an action tag, and save. That note is what the agent will see.',
     target: '.panel [data-tab="notes"]',
     fallback: '.panel',
   },
   {
     id: 'ship',
     title: 'Ship it',
-    body: 'Copy the agent prompt, or hand off to your coding agent. That’s the whole loop.',
+    sample: 'Copy the agent prompt, or hand off to your coding agent. That’s the whole loop.',
+    generic: 'Copy the agent prompt, or hand off to your coding agent. That’s the whole loop.',
     target: '[data-coach="ship"]',
     fallback: '.panel-footer',
   },
@@ -29,21 +32,34 @@ const STEPS = [
 export function createCoachmarks(actions) {
   let step = 0;
   let visible = false;
+  let prevFocus = null;
   const spot = h('div', { class: 'coach-spot' });
-  const title = h('div', { class: 'coach-title' });
-  const body = h('div', { class: 'coach-body' });
+  const title = h('div', { class: 'coach-title', id: 'caos-coach-title' });
+  const body = h('div', { class: 'coach-body', id: 'caos-coach-body' });
   const stepLabel = h('div', { class: 'coach-step' });
-  const card = h('div', { class: 'coach-card' }, [
+  const nextBtn = h('button', { class: 'btn btn-sm btn-primary', text: 'Next', on: { click: () => next() } });
+  const card = h('div', {
+    class: 'coach-card',
+    role: 'dialog',
+    'aria-modal': 'true',
+    'aria-labelledby': 'caos-coach-title',
+    'aria-describedby': 'caos-coach-body',
+    tabindex: '-1',
+  }, [
     stepLabel,
     title,
     body,
     h('div', { class: 'coach-acts' }, [
       h('button', { class: 'btn btn-sm btn-ghost', text: 'Skip', on: { click: () => dismiss(true) } }),
-      h('button', { class: 'btn btn-sm btn-primary', text: 'Next', on: { click: () => next() } }),
+      nextBtn,
     ]),
   ]);
   const root = h('div', { class: 'coach-overlay', hidden: 'hidden' }, [spot, card]);
   document.body.appendChild(root);
+
+  function isSample() {
+    return !!(actions.isSample && actions.isSample());
+  }
 
   function layout() {
     if (!visible) return;
@@ -63,21 +79,29 @@ export function createCoachmarks(actions) {
     card.style.left = Math.max(12, left) + 'px';
     card.style.top = top + 'px';
     title.textContent = spec.title;
-    body.textContent = spec.body;
+    body.textContent = isSample() ? spec.sample : spec.generic;
     stepLabel.textContent = `Step ${step + 1} of ${STEPS.length}`;
+    nextBtn.textContent = step >= STEPS.length - 1 ? 'Done' : 'Next';
   }
 
   function show(index) {
     step = Math.max(0, Math.min(STEPS.length - 1, index == null ? 0 : index));
     visible = true;
+    prevFocus = document.activeElement;
     root.removeAttribute('hidden');
     layout();
-    requestAnimationFrame(layout);
+    requestAnimationFrame(() => {
+      layout();
+      try { card.focus(); } catch (_e) { /* ignore */ }
+    });
+    if (actions.onStep) actions.onStep(STEPS[step].id, step);
   }
 
   function hide() {
     visible = false;
     root.setAttribute('hidden', 'hidden');
+    try { if (prevFocus && prevFocus.focus) prevFocus.focus(); } catch (_e) { /* ignore */ }
+    prevFocus = null;
   }
 
   function next() {
@@ -88,6 +112,7 @@ export function createCoachmarks(actions) {
     step += 1;
     layout();
     if (actions.onStep) actions.onStep(STEPS[step].id, step);
+    try { card.focus(); } catch (_e) { /* ignore */ }
   }
 
   function advance(event) {
@@ -101,6 +126,32 @@ export function createCoachmarks(actions) {
     if (actions.onComplete) actions.onComplete({ skipped: !!skipped, step: STEPS[step].id });
   }
 
+  function onOverlayPointer(e) {
+    if (!visible) return;
+    if (card.contains(e.target)) return;
+    const r = spot.getBoundingClientRect();
+    const inside = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+    if (inside) {
+      // Let the click reach the spotlighted control (Inspect, Notes, Ship).
+      root.style.pointerEvents = 'none';
+      setTimeout(() => { if (visible) root.style.pointerEvents = 'auto'; }, 0);
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
+  function onKey(e) {
+    if (!visible) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      dismiss(true);
+    }
+  }
+
+  root.addEventListener('pointerdown', onOverlayPointer, true);
+  document.addEventListener('keydown', onKey, true);
   window.addEventListener('resize', () => { if (visible) layout(); });
 
   return {

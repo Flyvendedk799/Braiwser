@@ -30,10 +30,17 @@
     input { display: block; width: 100%; padding: 8px; margin: 8px 0 12px; font: 14px system-ui, sans-serif; }
     .ghost { color: transparent; height: 14px; }
     footer { padding: 16px 32px; font-size: 12px; color: #999; }
+    .sample-chip {
+      position: sticky; top: 0; z-index: 2;
+      margin: 0; padding: 8px 32px;
+      font: 600 12px system-ui, sans-serif;
+      color: #5a3a12; background: #fff4d6; border-bottom: 1px solid #f0d48a;
+    }
     @media (max-width: 720px) { main { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
+  <p class="sample-chip" role="status">Sample page — notes and audit findings are planted</p>
   <header>
     <div class="eyebrow" data-testid="eyebrow">Limited drop</div>
     <h2>Weekend market tote</h2>

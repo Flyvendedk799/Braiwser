@@ -20,8 +20,14 @@ export function createToolbar(actions) {
     },
   });
 
-  const lock = h('span', { class: 'lock', html: icon('file', 14) });
-  const bookmarkBtn = h('button', { class: 'star-btn', title: 'Bookmark this page', 'aria-label': 'Bookmark this page', text: '☆', on: { click: actions.toggleBookmark } });
+  const lock = h('span', { class: 'lock', html: icon('file', 14), title: 'Local file' });
+  const bookmarkBtn = h('button', {
+    class: 'star-btn',
+    title: 'Bookmark this page',
+    'aria-label': 'Bookmark this page',
+    html: icon('star', 16),
+    on: { click: actions.toggleBookmark },
+  });
 
   const btn = (cfg) =>
     h('button', {
@@ -106,7 +112,7 @@ export function createToolbar(actions) {
   let hiddenToolIds = [];
 
   const moreBtn = btn({
-    icon: 'chevron',
+    icon: 'more',
     label: 'More',
     title: 'More tools',
     onClick: (e) => {
@@ -159,7 +165,7 @@ export function createToolbar(actions) {
     redoBtn.disabled = !redoCount;
     undoBtn.title = undoCount ? `Undo ${undoCount} page edit${undoCount === 1 ? '' : 's'} (${MOD}⇧Z)` : 'Nothing to undo';
     redoBtn.title = redoCount ? `Redo ${redoCount} undone edit${redoCount === 1 ? '' : 's'} (${MOD}⇧Y)` : 'Nothing to redo';
-    bookmarkBtn.textContent = bookmarked ? '★' : '☆';
+    bookmarkBtn.innerHTML = icon(bookmarked ? 'star-fill' : 'star', 16);
     bookmarkBtn.classList.toggle('on', !!bookmarked);
     inspectBtn.classList.toggle('active', mode === 'inspect');
     editBtn.classList.toggle('active', mode === 'edit');
@@ -208,8 +214,8 @@ export function createToolbar(actions) {
 
   function updateLock(url) {
     lock.classList.remove('insecure');
-    if (/^https:/i.test(url)) { lock.textContent = '🔒'; lock.title = 'Secure (https)'; }
-    else if (/^http:/i.test(url)) { lock.textContent = '⚠'; lock.title = 'Not secure (http)'; lock.classList.add('insecure'); }
+    if (/^https:/i.test(url)) { lock.innerHTML = icon('lock', 14); lock.title = 'Secure (https)'; }
+    else if (/^http:/i.test(url)) { lock.innerHTML = icon('unlock', 14); lock.title = 'Not secure (http)'; lock.classList.add('insecure'); }
     else { lock.innerHTML = icon('file', 14); lock.title = 'Local file'; }
   }
 

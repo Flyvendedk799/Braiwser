@@ -78,11 +78,17 @@ const ICONS = {
   keyboard: 'M4 6h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1zM7 10h.01M11 10h.01M15 10h.01M8 14h8',
   download: 'M12 3v12M7 11l5 5 5-5M4 21h16',
   upload: 'M12 21V9M7 13l5-5 5 5M4 3h16',
+  lock: 'M7 11V7a5 5 0 0 1 10 0v4M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z',
+  unlock: 'M7 11V7a5 5 0 0 1 9.9-1M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z',
+  star: 'M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z',
+  warn: 'M12 9v4M12 17h.01M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z',
 };
 
 export function icon(name, size = 16) {
   if (name === 'record') return `<svg class="icon" width="${size}" height="${size}" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6" fill="currentColor"/></svg>`;
   if (name === 'stop') return `<svg class="icon" width="${size}" height="${size}" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg>`;
+  if (name === 'more') return `<svg class="icon" width="${size}" height="${size}" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>`;
+  if (name === 'star-fill') return `<svg class="icon" width="${size}" height="${size}" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>`;
   const d = ICONS[name] || '';
   return `<svg class="icon" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${d.split('M').filter(Boolean).map((seg) => `<path d="M${seg}"/>`).join('')}</svg>`;
 }
@@ -98,7 +104,8 @@ function ensureToastHost() {
 
 export function toast(message, kind = 'info', ms = 2600) {
   const host = ensureToastHost();
-  const node = h('div', { class: `toast toast-${kind}` }, [
+  const role = kind === 'error' ? 'alert' : 'status';
+  const node = h('div', { class: `toast toast-${kind}`, role, 'aria-live': kind === 'error' ? 'assertive' : 'polite' }, [
     h('span', { class: 'toast-dot' }),
     h('span', { class: 'toast-msg', text: message }),
   ]);
@@ -118,9 +125,11 @@ export function toast(message, kind = 'info', ms = 2600) {
 
 // ---- Modal -----------------------------------------------------------------
 // modal({ title, body:Node, actions:[{label,kind,onClick}], onClose }) -> { close }
+let modalSeq = 0;
 export function modal({ title, body, actions = [], onClose, width = 460 } = {}) {
   const backdrop = h('div', { class: 'modal-backdrop' });
   const prevFocus = document.activeElement; // restore on close
+  const titleId = 'caos-modal-title-' + (++modalSeq);
   const close = () => {
     backdrop.classList.remove('show');
     setTimeout(() => backdrop.remove(), 200);
@@ -141,6 +150,7 @@ export function modal({ title, body, actions = [], onClose, width = 460 } = {}) 
   };
 
   const footer = h('div', { class: 'modal-footer' });
+  const actionButtons = [];
   for (const a of actions) {
     const btn = h('button', {
       class: `btn ${a.kind === 'primary' ? 'btn-primary' : a.kind === 'danger' ? 'btn-danger' : 'btn-ghost'}`,
@@ -155,12 +165,19 @@ export function modal({ title, body, actions = [], onClose, width = 460 } = {}) 
         },
       },
     });
+    actionButtons.push(btn);
     footer.appendChild(btn);
   }
 
-  const card = h('div', { class: 'modal-card', style: { width: width + 'px' } }, [
+  const card = h('div', {
+    class: 'modal-card',
+    role: 'dialog',
+    'aria-modal': 'true',
+    'aria-labelledby': titleId,
+    style: { width: width + 'px' },
+  }, [
     h('div', { class: 'modal-head' }, [
-      h('div', { class: 'modal-title', text: title || '' }),
+      h('div', { class: 'modal-title', id: titleId, text: title || '' }),
       h('button', { class: 'icon-btn modal-x', title: 'Close', 'aria-label': 'Close', html: icon('close', 16), on: { click: close } }),
     ]),
     h('div', { class: 'modal-body' }, [body]),
@@ -179,21 +196,47 @@ export function modal({ title, body, actions = [], onClose, width = 460 } = {}) 
     const f = card.querySelector('input, textarea, select') || card.querySelector('.modal-footer button:last-child') || card.querySelector('button');
     if (f) try { f.focus(); } catch (_e) { /* ignore */ }
   });
-  return { close, card };
+  return { close, card, actionButtons };
 }
 
 // Lightweight popover menu anchored under an element. items: [{label, onClick}].
 export function menu(anchorEl, items) {
-  const m = h('div', { class: 'popover-menu' });
+  const m = h('div', { class: 'popover-menu', role: 'menu' });
+  const prevFocus = document.activeElement;
+  const buttons = [];
+  let idx = 0;
   const close = () => {
     m.remove();
     document.removeEventListener('mousedown', onDoc, true);
     document.removeEventListener('keydown', onKey, true);
+    try { if (anchorEl && anchorEl.focus) anchorEl.focus(); else if (prevFocus && prevFocus.focus) prevFocus.focus(); } catch (_e) { /* ignore */ }
   };
   const onDoc = (e) => { if (!m.contains(e.target)) close(); };
-  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  const focusItem = (i) => {
+    if (!buttons.length) return;
+    idx = (i + buttons.length) % buttons.length;
+    buttons[idx].focus();
+  };
+  const onKey = (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); focusItem(idx + 1); return; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); focusItem(idx - 1); return; }
+    if (e.key === 'Home') { e.preventDefault(); focusItem(0); return; }
+    if (e.key === 'End') { e.preventDefault(); focusItem(buttons.length - 1); return; }
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      if (buttons[idx]) buttons[idx].click();
+    }
+  };
   for (const it of items) {
-    m.appendChild(h('button', { class: 'pm-item', text: it.label, on: { click: () => { close(); if (it.onClick) it.onClick(); } } }));
+    const b = h('button', {
+      class: 'pm-item',
+      role: 'menuitem',
+      text: it.label,
+      on: { click: () => { close(); if (it.onClick) it.onClick(); } },
+    });
+    buttons.push(b);
+    m.appendChild(b);
   }
   document.body.appendChild(m);
   const r = anchorEl.getBoundingClientRect();
@@ -202,6 +245,7 @@ export function menu(anchorEl, items) {
   setTimeout(() => {
     document.addEventListener('mousedown', onDoc, true);
     document.addEventListener('keydown', onKey, true);
+    if (buttons[0]) buttons[0].focus();
   }, 0);
   return { close };
 }

@@ -14,7 +14,7 @@ import { createAuditPanel } from './components/audit-panel.js';
 import { openOnboardingModal, openSettingsModal } from './components/settings-modal.js';
 import { createTabStrip } from './components/tabs.js';
 import { compositeAnnotations } from './lib/screenshots.js';
-import { personaCopy, chromeForPersona, isWelcomeUrl } from './lib/persona.js';
+import { personaCopy, chromeForPersona, isWelcomeUrl, isPlaygroundUrl } from './lib/persona.js';
 import { createCoachmarks } from './components/coachmarks.js';
 import { createVerifyPanel } from './components/verify-panel.js';
 import { openHandoffModal } from './components/handoff-modal.js';
@@ -122,6 +122,7 @@ async function boot() {
       auditPanel: () => auditPanel, notesPanel: () => notesPanel,
       exportRecordingAs, importBundleText,
       copyExport, verifySession, openSamplePage, exportClientPack, syncPersonaChrome,
+      openOnboarding, coachmarks: () => coachmarks,
     };
     import('./lib/e2e.js')
       .then((m) => m.run(internals))
@@ -249,12 +250,16 @@ function buildShell() {
   });
   syncProfileUi();
 
-  const tabs = h('div', { class: 'tabs' });
+  const tabs = h('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Review panels' });
   ['notes', 'style', 'audit', 'ai', 'verify'].forEach((id) => {
     const labels = { notes: 'Notes', style: 'Style', audit: 'Audit', ai: 'AI', verify: 'Verify' };
     const showPill = id === 'notes' || id === 'audit';
     const btn = h('button', {
       class: `tab ${id === state.activeTab ? 'active' : ''}`,
+      role: 'tab',
+      id: 'tab-' + id,
+      'aria-selected': id === state.activeTab ? 'true' : 'false',
+      'aria-controls': 'panel-' + id,
       html: `<span>${labels[id]}</span>${showPill ? '<span class="pill">0</span>' : ''}`,
       on: { click: () => switchTab(id) },
     });
@@ -278,6 +283,13 @@ function buildShell() {
   ]);
 
   verifyPanel = createVerifyPanel({ run: () => verifySession() });
+  [notesPanel, stylePanel, auditPanel, aiPanel, verifyPanel].forEach((p, i) => {
+    const id = ['notes', 'style', 'audit', 'ai', 'verify'][i];
+    if (!p || !p.root) return;
+    p.root.id = 'panel-' + id;
+    p.root.setAttribute('role', 'tabpanel');
+    p.root.setAttribute('aria-labelledby', 'tab-' + id);
+  });
   const panel = h('aside', { class: 'panel' }, [tabs, notesPanel.root, stylePanel.root, auditPanel.root, aiPanel.root, verifyPanel.root, footer]);
 
   // ---- Stage (tab strip + webview host) ----
@@ -303,6 +315,10 @@ function buildShell() {
   setLibraryOpen(state.libraryOpen);
   syncPersonaChrome();
   coachmarks = createCoachmarks({
+    isSample: () => isPlaygroundUrl(state.currentUrl),
+    onStep: (id) => {
+      if (id === 'note') switchTab('notes');
+    },
     onComplete: ({ skipped }) => {
       caos.settings.set({ coachComplete: true }).then((next) => { if (next) state.settings = next; });
       if (skipped) toast('Coach skipped — Help → Try Sample Page anytime', 'info');
@@ -345,7 +361,11 @@ function switchTab(id) {
   const panels = { notes: notesPanel, style: stylePanel, audit: auditPanel, ai: aiPanel, verify: verifyPanel };
   if (!panels[id]) return;
   state.activeTab = id;
-  Object.entries(tabButtons).forEach(([k, b]) => b.classList.toggle('active', k === id));
+  Object.entries(tabButtons).forEach(([k, b]) => {
+    const on = k === id;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
   Object.values(panels).forEach((p) => p && p.root && p.root.classList.remove('active'));
   panels[id].root.classList.add('active');
 }
@@ -367,6 +387,7 @@ function setupShortcuts() {
     const t = e.target;
     const editable = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
     if (editable || document.querySelector('.modal-backdrop')) return;
+    if (coachmarks && coachmarks.isVisible()) return;
     if (state.mode !== 'off') setMode('off');
   });
 }
@@ -455,6 +476,7 @@ function resolvedTheme() {
 
 function applyTheme() {
   document.documentElement.dataset.theme = resolvedTheme();
+  paintGuestTheme();
 }
 
 async function setTheme(id) {
@@ -784,6 +806,7 @@ function onNavigated(tab, url) {
     if (hash === 'open-folder') { openFolder(); return; }
     if (hash === 'open-file') { openFile(); return; }
     if (hash === 'sample') { openSamplePage({ inspect: true }); return; }
+    paintGuestTheme();
   }
   // Record real navigations in history (skip the welcome page).
   if (url && !isWelcomeUrl(url)) {
@@ -883,7 +906,24 @@ function syncToolbar() {
     undoCount: state.editStacks.undo,
     redoCount: state.editStacks.redo,
   });
+  if (verifyPanel && verifyPanel.setPageReady) {
+    verifyPanel.setPageReady(hasReviewablePage());
+  }
   syncStatus();
+}
+
+function hasReviewablePage() {
+  const url = state.currentUrl || '';
+  return !!(url && !isWelcomeUrl(url));
+}
+
+function paintGuestTheme() {
+  const theme = document.documentElement.dataset.theme || 'dark';
+  const js = 'document.documentElement.setAttribute("data-theme",' + JSON.stringify(theme) + ');document.documentElement.style.colorScheme=' + JSON.stringify(theme) + ';';
+  for (const t of state.tabs || []) {
+    if (!t.wv || !isWelcomeUrl(t.url)) continue;
+    try { t.wv.executeJavaScript(js); } catch (_e) { /* not ready */ }
+  }
 }
 
 const MOD = navigator.platform.toLowerCase().includes('mac') ? '⌘' : 'Ctrl';
@@ -2187,8 +2227,9 @@ async function openOnboarding() {
     settings: settingsView(),
     providers: { ...state.providers },
     actions: profileActions(),
-    onComplete: ({ persona }) => {
+    onComplete: ({ persona, skipped }) => {
       syncPersonaChrome();
+      if (skipped) return;
       openSamplePage({ inspect: true, startCoach: true, persona });
     },
   });

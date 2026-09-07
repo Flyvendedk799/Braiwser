@@ -136,7 +136,7 @@ export function createAuditPanel(config, actions) {
   }
 
   function placeholder(ic, title, sub) {
-    return h('div', { class: 'placeholder' }, [
+    return h('div', { class: 'placeholder empty-state' }, [
       h('div', { class: 'ph-icon', html: icon(ic, 30) }),
       h('div', { class: 'ph-title', text: title }),
       h('div', { class: 'ph-sub', text: sub }),

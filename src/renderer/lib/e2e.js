@@ -1626,7 +1626,39 @@ export async function run(I) {
 
       I.runCommand('panel.verify');
       check('verify panel command switches the tab', I.state.activeTab === 'verify', I.state.activeTab);
+      const verifyBtn = document.querySelector('.verify-bar .btn-primary');
+      check('verify CTA is enabled on a loaded page', !!(verifyBtn && !verifyBtn.disabled));
       I.runCommand('panel.notes');
+      check('note visibility select is present', !!document.querySelector('.vis-select'));
+      check('right tabs expose tab roles', document.querySelectorAll('.panel .tab[role="tab"]').length === 5, String(document.querySelectorAll('.panel .tab[role="tab"]').length));
+      check('side tabs expose tab roles', document.querySelectorAll('.side-tab[role="tab"]').length === 2);
+
+      const welcomeReady = waitDomReady();
+      I.navigateTo(I.state.config.welcomeUrl);
+      await welcomeReady;
+      await sleep(250);
+      check('verify CTA is disabled on the welcome page', !!(verifyBtn && verifyBtn.disabled));
+
+      if (typeof I.openOnboarding === 'function') {
+        await I.openOnboarding();
+        await sleep(200);
+        const skip = document.querySelector('[data-testid="onboarding-skip"]');
+        const sample = document.querySelector('[data-testid="onboarding-sample"]');
+        check('onboarding skip is distinct from open sample', !!(skip && sample));
+        if (skip) skip.click();
+        await sleep(400);
+        const coachApi = I.coachmarks && I.coachmarks();
+        check('skip does not start the coach', !(coachApi && coachApi.isVisible()));
+        if (coachApi) {
+          coachApi.show(0);
+          await sleep(60);
+          check('coach is a dialog', !!document.querySelector('.coach-card[role="dialog"]'));
+          check('coach first step action is Next', (document.querySelector('.coach-acts .btn-primary') || {}).textContent === 'Next');
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          await sleep(60);
+          check('Escape dismisses the coach', !coachApi.isVisible());
+        }
+      }
 
       const pgReady = waitDomReady();
       I.navigateTo(I.state.config.playgroundUrl);
@@ -1636,6 +1668,9 @@ export async function run(I) {
       check('sample playground exposes the Buy now hook', buy);
       const contrast = await guest("!!document.querySelector('[data-testid=\"contrast-hero\"]')");
       check('sample playground plants a contrast issue', contrast);
+      const chip = await guest("!!document.querySelector('.sample-chip')");
+      check('sample playground shows a planted-issue chip', chip);
+      check('verify CTA is enabled on the sample page', !!(verifyBtn && !verifyBtn.disabled));
     }
 
     // --- cleanup ---
