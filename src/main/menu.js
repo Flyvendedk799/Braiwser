@@ -83,6 +83,8 @@ function buildTemplate({ getWindow, devices, themes }) {
         ],
       },
       cmd('Hand Off to Coding Agent…', 'agent.handoff', 'CmdOrCtrl+Shift+H'),
+      cmd('Verify Session', 'review.verify', 'CmdOrCtrl+Shift+V'),
+      cmd('Try Sample Page', 'nav.sample'),
       { type: 'separator' },
       cmd('Export Project Bundle…', 'bundle.export'),
       cmd('Import Project Bundle…', 'bundle.import'),
@@ -112,6 +114,7 @@ function buildTemplate({ getWindow, devices, themes }) {
       cmd('Style Panel', 'panel.style', 'CmdOrCtrl+2'),
       cmd('Audit Panel', 'panel.audit', 'CmdOrCtrl+3'),
       cmd('AI Panel', 'panel.ai', 'CmdOrCtrl+4'),
+      cmd('Verify Panel', 'panel.verify', 'CmdOrCtrl+5'),
       { type: 'separator' },
       { label: 'Theme', submenu: themeItems },
       { label: 'Device Viewport', submenu: deviceItems },
@@ -172,6 +175,7 @@ function buildTemplate({ getWindow, devices, themes }) {
     submenu: [
       cmd('Keyboard Shortcuts', 'help.shortcuts', 'CmdOrCtrl+/'),
       cmd('Getting Started', 'help.welcome'),
+      cmd('Try Sample Page', 'nav.sample'),
       { type: 'separator' },
       {
         label: 'Braiwser on GitHub',

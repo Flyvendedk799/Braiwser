@@ -66,6 +66,8 @@ function normalizeSettings(raw = {}) {
       ? migrateProvider(base.aiProvider)
       : DEFAULT_SETTINGS.aiProvider,
     onboardingComplete: !!base.onboardingComplete,
+    coachComplete: !!base.coachComplete,
+    nextActionDone: !!base.nextActionDone,
     restoreAnnotationsOnLoad: base.restoreAnnotationsOnLoad !== false,
     replayDelayMs: Number.isFinite(Number(base.replayDelayMs)) ? Math.max(0, Number(base.replayDelayMs)) : DEFAULT_SETTINGS.replayDelayMs,
     aiTimeoutMs: Number.isFinite(Number(base.aiTimeoutMs)) ? Math.max(5000, Number(base.aiTimeoutMs)) : DEFAULT_SETTINGS.aiTimeoutMs,
@@ -102,6 +104,12 @@ function sanitizeSettingsPatch(patch, current) {
 
   if (Object.prototype.hasOwnProperty.call(patch, 'onboardingComplete')) {
     clean.onboardingComplete = !!patch.onboardingComplete;
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'coachComplete')) {
+    clean.coachComplete = !!patch.coachComplete;
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'nextActionDone')) {
+    clean.nextActionDone = !!patch.nextActionDone;
   }
   if (patch.profile && typeof patch.profile === 'object' && !Array.isArray(patch.profile)) {
     clean.profile = { ...(current.profile || {}) };

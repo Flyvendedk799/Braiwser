@@ -51,6 +51,7 @@ const api = {
     run: (sessionId, filePath) => invoke('caos:agent.run', sessionId, filePath),
     templates: () => invoke('caos:agent.templates'),
     presets: () => invoke('caos:agent.presets'),
+    detect: () => invoke('caos:agent.detect'),
     templatedPrompt: (payload) => invoke('caos:agent.templatedPrompt', payload),
     onOutput: (cb) => {
       const listener = (_e, chunk) => cb(chunk);
@@ -190,6 +191,8 @@ const api = {
     applyChecklist: (id, sessionId) => invoke('caos:review.applyChecklist', id, sessionId),
     clientPack: (sessionId) => invoke('caos:review.clientPack', sessionId),
     htmlReport: (sessionId) => invoke('caos:review.htmlReport', sessionId),
+    verifySave: (sessionId, payload) => invoke('caos:review.verifySave', sessionId, payload),
+    verifyList: (sessionId) => invoke('caos:review.verifyList', sessionId),
   },
 
   update: {

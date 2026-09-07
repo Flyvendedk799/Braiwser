@@ -109,7 +109,7 @@ export async function run(I) {
       // The app has five tools; the status bar is what tells you which one is on
       // and what it expects you to do with it.
       const statusText = () => (document.querySelector('.statusbar .status-text') || {}).textContent || '';
-      check('a status bar explains the current tool', /pick one above|No tool active/i.test(statusText()), statusText());
+      check('a status bar explains the current tool', /pick one above|No tool active|Inspect issues|hand off|audit|client/i.test(statusText()), statusText());
       I.setMode('inspect');
       await sleep(150);
       check('…and follows the tool you turn on', /Inspect —/.test(statusText()), statusText());
@@ -868,7 +868,7 @@ export async function run(I) {
       libBtn.click();
       await sleep(120);
       check('and folds them away again', getComputedStyle(document.querySelector('.side-library')).display === 'none');
-      check('right panel is Notes + Style + Audit + AI (no Inspector tab)', Array.from(document.querySelectorAll('.panel .tab')).map((t) => t.textContent.replace(/\d+$/, '')).join(',') === 'Notes,Style,Audit,AI', Array.from(document.querySelectorAll('.panel .tab')).map((t) => t.textContent).join(','));
+      check('right panel is Notes + Style + Audit + AI + Verify', Array.from(document.querySelectorAll('.panel .tab')).map((t) => t.textContent.replace(/\d+$/, '')).join(',') === 'Notes,Style,Audit,AI,Verify', Array.from(document.querySelectorAll('.panel .tab')).map((t) => t.textContent).join(','));
 
       // The page's own structure, named the way a person would name it.
       document.querySelector('.sec-icon-btn').click();
@@ -1590,6 +1590,52 @@ export async function run(I) {
       check('sync status is readable offline', !!(sync && typeof sync.enabled === 'boolean'));
       const funnel = await api.analytics.funnel();
       check('analytics funnel is readable', !!(funnel && typeof funnel.total === 'number'));
+    }
+
+    // --- 26. Aha loop: sample page, persona chrome, presets, verify persist ---
+    {
+      check('playgroundUrl is configured', /playground\.html/.test(I.state.config.playgroundUrl || ''), I.state.config.playgroundUrl);
+      const detected = await caos.agent.detect();
+      check('agent detect returns presets', Array.isArray(detected) && detected.length >= 3, String(detected && detected.length));
+      check('agent detect includes claude preset', detected.some((p) => p.id === 'claude' && p.command));
+      const presets = await caos.agent.presets();
+      check('agent presets match detect ids', Array.isArray(presets) && presets.some((p) => p.id === 'claude'));
+
+      I.state.settings.persona = 'agent';
+      I.syncPersonaChrome();
+      const drawBtn = document.querySelector('[data-act=draw]');
+      check('agent persona parks Draw in More tools', !!(drawBtn && drawBtn.classList.contains('tb-overflow')));
+      I.state.settings.persona = 'reviewer';
+      I.syncPersonaChrome();
+      const auditBtn = document.querySelector('[data-act=audit]');
+      check('reviewer persona keeps Audit on the strip', !!(auditBtn && !auditBtn.classList.contains('tb-overflow')));
+      I.state.settings.persona = 'agent';
+      I.syncPersonaChrome();
+
+      const prompt = await caos.export.build('prompt', session.id);
+      check('agent prompt export is non-empty', !!(prompt && prompt.content && prompt.content.length > 40), prompt && String(prompt.content.length));
+
+      const savedVerify = await caos.review.verifySave(session.id, {
+        notes: { open: 1, total: 1 },
+        before: { audit: { total: 6, counts: { serious: 4, moderate: 2 } } },
+        after: { audit: { total: 2, counts: { serious: 2 } } },
+      });
+      check('verify run stores an audit delta', !!(savedVerify && savedVerify.ok && savedVerify.run && savedVerify.run.delta && savedVerify.run.delta.audit === -4), JSON.stringify(savedVerify && savedVerify.run && savedVerify.run.delta));
+      const listed = await caos.review.verifyList(session.id);
+      check('verify list returns the saved run', Array.isArray(listed) && listed.length >= 1, String(listed && listed.length));
+
+      I.runCommand('panel.verify');
+      check('verify panel command switches the tab', I.state.activeTab === 'verify', I.state.activeTab);
+      I.runCommand('panel.notes');
+
+      const pgReady = waitDomReady();
+      I.navigateTo(I.state.config.playgroundUrl);
+      await pgReady;
+      await sleep(300);
+      const buy = await guest("!!document.querySelector('[data-testid=\"buy-now\"]')");
+      check('sample playground exposes the Buy now hook', buy);
+      const contrast = await guest("!!document.querySelector('[data-testid=\"contrast-hero\"]')");
+      check('sample playground plants a contrast issue', contrast);
     }
 
     // --- cleanup ---

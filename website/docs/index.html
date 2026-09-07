@@ -16,7 +16,7 @@
   </header>
   <section class="section">
     <h2>Documentation</h2>
-    <p class="section-lede">Install, connect AI credentials, hand off to an agent, export Playwright, and understand the privacy model.</p>
+    <p class="section-lede">Install, try the sample page, connect AI credentials if you want, hand off to an agent, verify the fix, export Playwright, and understand the privacy model.</p>
     <div class="icp">
       <article>
         <h3>Install</h3>
@@ -28,7 +28,11 @@
       </article>
       <article>
         <h3>Agent hand-off</h3>
-        <p>Copy prompt or Hand off. Templates: Fix UI, Accessibility, Responsive, Regression. Configure <code>agentCommand</code> with <code>{promptPath}</code>.</p>
+        <p>Copy prompt or Hand off. If <code>claude</code>, <code>cursor-agent</code>, or <code>codex</code> is on PATH, pick it from the preset row. Templates: Fix UI, Accessibility, Responsive, Regression.</p>
+      </article>
+      <article>
+        <h3>Verify</h3>
+        <p>After a hand-off, Verify session re-runs the page audit and the selected journey, then stores a before/after (audit delta, pass/fail, screenshots) on the session.</p>
       </article>
       <article>
         <h3>Playwright export</h3>
@@ -40,7 +44,7 @@
       </article>
       <article>
         <h3>Sync &amp; team</h3>
-        <p>Optional. Sign in under Settings to queue encrypted project snapshots. Team workspaces add comments and invites.</p>
+        <p>Experimental. Sign-in under Settings queues encrypted snapshots locally — there is no hosted sync endpoint yet.</p>
       </article>
     </div>
   </section>

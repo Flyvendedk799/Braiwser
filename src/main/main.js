@@ -162,6 +162,7 @@ app.whenReady().then(() => {
   const paths = {
     inspector: path.join(__dirname, '..', 'webview', 'inspector.js'),
     welcome: path.join(__dirname, '..', 'renderer', 'welcome.html'),
+    playground: path.join(__dirname, '..', 'renderer', 'sample', 'playground.html'),
     audit: path.join(__dirname, '..', 'webview', 'audit.js'),
   };
   registerIpc({ repos, paths, getWindow: () => mainWindow });

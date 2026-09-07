@@ -2,7 +2,7 @@
 // screenshot, AI, settings. It renders once and exposes an update() to reflect
 // state (active mode, recording, nav availability). All actions are delegated
 // back to the controller via the `actions` callback bag.
-import { h, icon, clear } from '../lib/dom.js';
+import { h, icon, clear, menu } from '../lib/dom.js';
 
 export function createToolbar(actions) {
   const suggestions = h('datalist', { id: 'caos-address-suggestions' });
@@ -45,16 +45,25 @@ export function createToolbar(actions) {
   // The three page tools are one segmented control: they are mutually
   // exclusive, and which one is on has to be readable at a glance.
   const MOD = navigator.platform.toLowerCase().includes('mac') ? '⌘' : 'Ctrl';
-  const inspectBtn = btn({ icon: 'inspect', label: 'Inspect', title: `Inspect element — capture a note and view its layout hierarchy (click an element) · ${MOD}⇧E`, onClick: () => actions.toggleMode('inspect') });
+  const inspectBtn = btn({ icon: 'inspect', label: 'Inspect', class: 'tb-inspect', title: `Inspect element — capture a note and view its layout hierarchy (click an element) · ${MOD}⇧E`, onClick: () => actions.toggleMode('inspect') });
+  inspectBtn.setAttribute('data-act', 'inspect');
+  inspectBtn.setAttribute('data-coach', 'inspect');
   const drawBtn = btn({ icon: 'draw', label: 'Draw', title: `Drag on the page to circle an area, then add a note · ${MOD}⇧D`, onClick: () => actions.toggleMode('draw') });
+  drawBtn.setAttribute('data-act', 'draw');
   const editBtn = btn({ icon: 'edit', label: 'Edit', title: `Edit content and style — click an element to change its copy, type, colour, spacing and size (double-click text in Inspect to jump straight here) · ${MOD}⇧T`, onClick: () => actions.toggleMode('edit') });
+  editBtn.setAttribute('data-act', 'edit');
   const arrangeBtn = btn({ icon: 'move', label: 'Rearrange', title: `Rearrange the layout — drag any element to move it (into any container), click again to go deeper, Alt-drag to free-move, handles to resize, plus smart re-layout. Every edit is captured as a note. · ${MOD}⇧M`, onClick: () => actions.toggleMode('arrange') });
+  arrangeBtn.setAttribute('data-act', 'arrange');
   const assertBtn = btn({ icon: 'check', label: 'Assert', title: 'Add an assertion to the recording (click an element)', onClick: () => actions.toggleMode('assert') });
+  assertBtn.setAttribute('data-act', 'assert');
 
   const recBtn = btn({ icon: 'record', class: 'rec', label: 'Record', title: 'Record a user journey', onClick: actions.toggleRecord });
+  recBtn.setAttribute('data-act', 'record');
   const replayBtn = btn({ icon: 'replay', label: 'Replay', title: 'Replay the selected recording', onClick: actions.replay });
+  replayBtn.setAttribute('data-act', 'replay');
 
   const auditBtn = btn({ icon: 'audit', label: 'Audit', title: 'Run an offline accessibility & UI-quality audit of this page', onClick: actions.runAudit });
+  auditBtn.setAttribute('data-act', 'audit');
 
   const deviceBtn = h('button', {
     class: 'icon-btn has-label device-btn',
@@ -70,6 +79,46 @@ export function createToolbar(actions) {
 
   const openFileBtn = btn({ icon: 'file', label: 'File', title: 'Open a local file', onClick: actions.openFile });
   const openFolderBtn = btn({ icon: 'folder', label: 'Folder', title: 'Open a local folder', onClick: actions.openFolder });
+  deviceBtn.setAttribute('data-act', 'device');
+  aiBtn.setAttribute('data-act', 'ai');
+
+  const MORE_ITEMS = [
+    { id: 'draw', label: 'Draw', el: drawBtn },
+    { id: 'edit', label: 'Edit', el: editBtn },
+    { id: 'arrange', label: 'Rearrange', el: arrangeBtn },
+    { id: 'assert', label: 'Assert', el: assertBtn },
+    { id: 'record', label: 'Record', el: recBtn },
+    { id: 'replay', label: 'Replay', el: replayBtn },
+    { id: 'audit', label: 'Audit', el: auditBtn },
+  ];
+  const toolEls = {
+    inspect: inspectBtn,
+    draw: drawBtn,
+    edit: editBtn,
+    arrange: arrangeBtn,
+    assert: assertBtn,
+    record: recBtn,
+    replay: replayBtn,
+    audit: auditBtn,
+    device: deviceBtn,
+    ai: aiBtn,
+  };
+  let hiddenToolIds = [];
+
+  const moreBtn = btn({
+    icon: 'chevron',
+    label: 'More',
+    title: 'More tools',
+    onClick: (e) => {
+      const items = MORE_ITEMS.filter((it) => hiddenToolIds.includes(it.id)).map((it) => ({
+        label: it.label,
+        onClick: () => it.el.click(),
+      }));
+      if (!items.length) return;
+      menu(e.currentTarget || moreBtn, items);
+    },
+  });
+  moreBtn.setAttribute('data-act', 'more');
 
   const root = h('header', { class: 'toolbar' }, [
     h('div', { class: 'tb-group' }, [backBtn, fwdBtn, reloadBtn]),
@@ -81,10 +130,24 @@ export function createToolbar(actions) {
     h('div', { class: 'tb-group tb-seg' }, [inspectBtn, drawBtn, editBtn, arrangeBtn]),
     h('div', { class: 'tb-group' }, [auditBtn]),
     h('div', { class: 'tb-sep' }),
-    h('div', { class: 'tb-group' }, [recBtn, replayBtn, assertBtn]),
+    h('div', { class: 'tb-group' }, [recBtn, replayBtn, assertBtn, moreBtn]),
     h('div', { class: 'tb-sep' }),
     h('div', { class: 'tb-group' }, [deviceBtn, shotBtn, aiBtn, settingsBtn]),
   ]);
+
+  function applyChrome(chrome) {
+    const tools = (chrome && chrome.tools) || [];
+    hiddenToolIds = (chrome && chrome.more) || [];
+    Object.entries(toolEls).forEach(([id, el]) => {
+      const primary = !hiddenToolIds.includes(id);
+      el.classList.toggle('tb-overflow', !primary && id !== 'inspect');
+      if (id === 'inspect') el.classList.remove('tb-overflow');
+      if (tools.length && id !== 'inspect' && id !== 'device' && id !== 'ai') {
+        el.classList.toggle('tb-overflow', hiddenToolIds.includes(id));
+      }
+    });
+    moreBtn.classList.toggle('tb-hidden', !hiddenToolIds.length);
+  }
 
   function update(state) {
     const { mode, recording, currentUrl, canGoBack, canGoForward, hasRecording, replaying, bookmarked, loading, aiProvider, providerReady, profileName, undoCount, redoCount, recordingName, recordingSteps, device, auditing } = state;
@@ -130,6 +193,17 @@ export function createToolbar(actions) {
     if (document.activeElement !== addressInput && currentUrl != null) {
       addressInput.value = prettyUrl(currentUrl);
     }
+    if (state.chrome) applyChrome(state.chrome);
+    const overflowActive = hiddenToolIds.some((id) => {
+      if (id === 'draw') return mode === 'draw';
+      if (id === 'edit') return mode === 'edit';
+      if (id === 'arrange') return mode === 'arrange';
+      if (id === 'assert') return mode === 'assert';
+      if (id === 'record') return !!recording;
+      if (id === 'audit') return !!auditing;
+      return false;
+    });
+    moreBtn.classList.toggle('active', overflowActive);
   }
 
   function updateLock(url) {
@@ -160,7 +234,7 @@ export function createToolbar(actions) {
     }
   }
 
-  return { root, update, setAddress, setSuggestions, focusAddress, deviceAnchor: () => deviceBtn };
+  return { root, update, setAddress, setSuggestions, focusAddress, deviceAnchor: () => deviceBtn, applyChrome };
 }
 
 function profileTooltip({ aiProvider, providerReady, profileName }) {
@@ -181,6 +255,7 @@ function prettyUrl(url) {
     try {
       const p = decodeURIComponent(new URL(url).pathname);
       if (/welcome\.html$/.test(p)) return '';
+      if (/playground\.html$/.test(p)) return 'Sample page';
       return p;
     } catch (_e) {
       return url;

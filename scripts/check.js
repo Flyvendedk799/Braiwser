@@ -56,7 +56,7 @@ if (pkg && !fs.existsSync(path.join(root, pkg.main))) {
 }
 
 // 3. Paths the main process publishes to the renderer over caos:config.
-for (const rel of ['src/webview/inspector.js', 'src/renderer/welcome.html', 'src/renderer/index.html']) {
+for (const rel of ['src/webview/inspector.js', 'src/renderer/welcome.html', 'src/renderer/index.html', 'src/renderer/sample/playground.html']) {
   if (!fs.existsSync(path.join(root, rel))) fail(`missing required file: ${rel}`);
 }
 

@@ -51,6 +51,7 @@ function register({ repos, paths, getWindow }) {
     siteUrl: 'https://braiwser.app',
     inspectorPath: pathToFileURL(paths.inspector).href,
     welcomeUrl: pathToFileURL(paths.welcome).href,
+    playgroundUrl: pathToFileURL(paths.playground).href,
   }));
 
   // Current effective system theme, for settings.theme === 'system'.
@@ -165,6 +166,7 @@ function register({ repos, paths, getWindow }) {
 
   on('caos:agent.templates', () => require('../services/agent/templates').listTemplates());
   on('caos:agent.presets', () => require('../services/agent/templates').AGENT_PRESETS);
+  on('caos:agent.detect', () => require('../services/agent/detect').detectAgents());
   on('caos:agent.templatedPrompt', (payload) => {
     const session = repos.sessions.get(payload && payload.sessionId);
     const annotations = session ? repos.annotations.bySession(session.id) : [];
@@ -206,6 +208,8 @@ function register({ repos, paths, getWindow }) {
       settings: repos.settings.get(),
     });
   });
+  on('caos:review.verifySave', (sessionId, payload) => require('../services/review/verify').saveRun(repos, sessionId, payload || {}));
+  on('caos:review.verifyList', (sessionId) => require('../services/review/verify').listRuns(repos, sessionId));
 
   on('caos:update.check', () => require('../services/updater').checkForUpdates());
   on('caos:update.install', () => require('../services/updater').quitAndInstall());

@@ -14,6 +14,10 @@ import { createAuditPanel } from './components/audit-panel.js';
 import { openOnboardingModal, openSettingsModal } from './components/settings-modal.js';
 import { createTabStrip } from './components/tabs.js';
 import { compositeAnnotations } from './lib/screenshots.js';
+import { personaCopy, chromeForPersona, isWelcomeUrl } from './lib/persona.js';
+import { createCoachmarks } from './components/coachmarks.js';
+import { createVerifyPanel } from './components/verify-panel.js';
+import { openHandoffModal } from './components/handoff-modal.js';
 
 const caos = window.braiwser || window.caos;
 
@@ -47,14 +51,21 @@ const state = {
   bookmarks: [],
   systemTheme: 'dark',
   auditing: false,
+  lastAudit: null,
+  agentPresets: [],
+  nextActionArmed: false,
 };
 
 let wv; // the ACTIVE tab's <webview>
-let toolbar, sidebar, notesPanel, sectionsPanel, layersPanel, stylePanel, aiPanel, auditPanel, tabStrip, webviewHost;
+let toolbar, sidebar, notesPanel, sectionsPanel, layersPanel, stylePanel, aiPanel, auditPanel, verifyPanel, tabStrip, webviewHost;
 let statusLeft, statusRight;
 let deviceBadge;
 let tabButtons = {};
 let stageOverlay, overlayLabel, overlayFill, overlayCancelBtn;
+let coachmarks = null;
+let footerPrimaryBtn = null;
+let footerHint = null;
+let auditWaiter = null;
 const replayWaiters = new Map(); // index -> {resolve}
 let pendingDomReady = null;
 let tabSeq = 0;
@@ -66,6 +77,7 @@ async function boot() {
   state.config = await caos.config();
   state.settings = await caos.settings.get();
   state.providers = await caos.secrets.providers();
+  try { state.agentPresets = await caos.agent.detect(); } catch (_e) { state.agentPresets = []; }
   // The harness boots from a known sidebar, the same way it ignores saved tabs.
   if (!caos.e2e) {
     if (state.settings.sideTab === 'layers' || state.settings.sideTab === 'sections') state.sideTab = state.settings.sideTab;
@@ -109,6 +121,7 @@ async function boot() {
       runCommand, runAudit, setDevice, applyTheme, currentDevice,
       auditPanel: () => auditPanel, notesPanel: () => notesPanel,
       exportRecordingAs, importBundleText,
+      copyExport, verifySession, openSamplePage, exportClientPack, syncPersonaChrome,
     };
     import('./lib/e2e.js')
       .then((m) => m.run(internals))
@@ -202,6 +215,7 @@ function buildShell() {
     bulkRemove: bulkRemoveAnnotations,
     onCount: (total) => { setTabCount('notes', total); syncStatus(); },
     getPersona: () => (state.settings && state.settings.persona) || 'agent',
+    startChecklist: (id) => applyChecklist(id),
     reorder: async (orderedIds) => {
       if (!state.currentSession) return;
       state.annotations = await caos.annotations.reorder(state.currentSession.id, orderedIds);
@@ -236,8 +250,8 @@ function buildShell() {
   syncProfileUi();
 
   const tabs = h('div', { class: 'tabs' });
-  ['notes', 'style', 'audit', 'ai'].forEach((id) => {
-    const labels = { notes: 'Notes', style: 'Style', audit: 'Audit', ai: 'AI' };
+  ['notes', 'style', 'audit', 'ai', 'verify'].forEach((id) => {
+    const labels = { notes: 'Notes', style: 'Style', audit: 'Audit', ai: 'AI', verify: 'Verify' };
     const showPill = id === 'notes' || id === 'audit';
     const btn = h('button', {
       class: `tab ${id === state.activeTab ? 'active' : ''}`,
@@ -248,20 +262,23 @@ function buildShell() {
     tabs.appendChild(btn);
   });
 
+  footerHint = h('span', { class: 'pf-label', text: 'Export' });
+  footerPrimaryBtn = h('button', { class: 'btn btn-sm btn-primary', 'data-coach': 'ship', text: 'Hand off → Agent', title: 'Hand off this session to a coding agent', on: { click: () => runPersonaPrimary() } });
   const footer = h('div', { class: 'panel-footer' }, [
     h('div', { class: 'pf-row' }, [
-      h('span', { class: 'pf-label', text: 'Export' }),
+      footerHint,
       exportBtn('Markdown', 'markdown'),
       exportBtn('Prompt', 'prompt'),
       exportBtn('JSON', 'json'),
     ]),
-    h('div', { class: 'pf-row' }, [
+    h('div', { class: 'pf-row', 'data-coach': 'ship' }, [
       h('button', { class: 'btn btn-sm', text: 'Copy prompt', title: 'Copy the agent prompt to the clipboard', on: { click: () => copyExport('prompt') } }),
-      h('button', { class: 'btn btn-sm btn-primary', text: 'Hand off → Agent', title: 'Hand off this session to a coding agent', on: { click: handoffToAgent } }),
+      footerPrimaryBtn,
     ]),
   ]);
 
-  const panel = h('aside', { class: 'panel' }, [tabs, notesPanel.root, stylePanel.root, auditPanel.root, aiPanel.root, footer]);
+  verifyPanel = createVerifyPanel({ run: () => verifySession() });
+  const panel = h('aside', { class: 'panel' }, [tabs, notesPanel.root, stylePanel.root, auditPanel.root, aiPanel.root, verifyPanel.root, footer]);
 
   // ---- Stage (tab strip + webview host) ----
   tabStrip = createTabStrip({ newTab: () => createTab(state.config.welcomeUrl), selectTab: setActiveTab, closeTab: closeTab });
@@ -284,6 +301,13 @@ function buildShell() {
   switchTab(state.activeTab);
   setSideTab(state.sideTab);
   setLibraryOpen(state.libraryOpen);
+  syncPersonaChrome();
+  coachmarks = createCoachmarks({
+    onComplete: ({ skipped }) => {
+      caos.settings.set({ coachComplete: true }).then((next) => { if (next) state.settings = next; });
+      if (skipped) toast('Coach skipped — Help → Try Sample Page anytime', 'info');
+    },
+  });
 }
 
 // ---- left sidebar -----------------------------------------------------------
@@ -318,11 +342,11 @@ function exportBtn(label, format) {
 }
 
 function switchTab(id) {
-  const panels = { notes: notesPanel, style: stylePanel, audit: auditPanel, ai: aiPanel };
+  const panels = { notes: notesPanel, style: stylePanel, audit: auditPanel, ai: aiPanel, verify: verifyPanel };
   if (!panels[id]) return;
   state.activeTab = id;
   Object.entries(tabButtons).forEach(([k, b]) => b.classList.toggle('active', k === id));
-  Object.values(panels).forEach((p) => p.root.classList.remove('active'));
+  Object.values(panels).forEach((p) => p && p.root && p.root.classList.remove('active'));
   panels[id].root.classList.add('active');
 }
 
@@ -361,7 +385,9 @@ const COMMANDS = {
   'export.prompt': () => doExport('prompt'),
   'export.json': () => doExport('json'),
   'export.copyPrompt': () => copyExport('prompt'),
+  'export.clientPack': () => exportClientPack(),
   'agent.handoff': () => handoffToAgent(),
+  'review.verify': () => verifySession(),
   'bundle.export': () => exportProjectBundle(state.currentProject),
   'bundle.import': () => importProjectBundle(),
   'settings.open': () => openSettings(),
@@ -371,6 +397,7 @@ const COMMANDS = {
   'panel.style': () => switchTab('style'),
   'panel.audit': () => switchTab('audit'),
   'panel.ai': () => switchTab('ai'),
+  'panel.verify': () => switchTab('verify'),
 
   'view.theme': (id) => setTheme(id),
   'view.device': (id) => setDevice(id),
@@ -385,6 +412,7 @@ const COMMANDS = {
   'nav.reload': () => { const t = activeTab(); if (!wv) return; try { t && t.loading ? wv.stop() : wv.reload(); } catch (_e) { /* ignore */ } },
   'nav.address': () => toolbar.focusAddress(),
   'nav.home': () => navigateTo(state.config.welcomeUrl),
+  'nav.sample': () => openSamplePage({ inspect: true }),
   'nav.bookmark': () => toggleBookmark(),
 
   'mode.inspect': () => setMode('inspect'),
@@ -751,8 +779,14 @@ function setupTabWebview(tab) {
 
 function onNavigated(tab, url) {
   tab.url = url;
+  if (isWelcomeUrl(url)) {
+    const hash = String(url).split('#')[1] || '';
+    if (hash === 'open-folder') { openFolder(); return; }
+    if (hash === 'open-file') { openFile(); return; }
+    if (hash === 'sample') { openSamplePage({ inspect: true }); return; }
+  }
   // Record real navigations in history (skip the welcome page).
-  if (url && !/welcome\.html$/.test(url)) {
+  if (url && !isWelcomeUrl(url)) {
     caos.history.record({ url, title: tab.title }).then(() => { if (state.activeTabId === tab.id) refreshHistory(); });
   }
   renderTabs();
@@ -842,6 +876,7 @@ function syncToolbar() {
     loading: !!(activeTab() && activeTab().loading),
     device: currentDevice(),
     auditing: state.auditing,
+    chrome: chromeForPersona((state.settings && state.settings.persona) || 'agent'),
     aiProvider,
     providerReady: !!(aiProvider && state.providers && state.providers[aiProvider] && state.providers[aiProvider].ready),
     profileName: state.settings && state.settings.profile && state.settings.profile.displayName,
@@ -882,6 +917,10 @@ const TOOL_HINTS = {
 function syncStatus() {
   if (!statusLeft) return;
   let hint = TOOL_HINTS[state.mode] || TOOL_HINTS.off;
+  if (state.mode === 'off' && !state.recordingBuffer && !state.replaying) {
+    const copy = personaCopy((state.settings && state.settings.persona) || 'agent', state.config && state.config.personas);
+    if (copy.tip) hint = { dot: 'off', text: copy.tip };
+  }
   if (state.recordingBuffer) {
     hint = { dot: 'rec', text: 'Recording — every click, input and scroll is captured · press Stop when you are done' };
   } else if (state.replaying) {
@@ -943,6 +982,7 @@ async function captureAnnotation(raw) {
     sessionId: session.id,
     url: raw.url || state.currentUrl,
     title: raw.title || state.currentTitle,
+    visibility: raw.visibility || chromeForPersona((state.settings && state.settings.persona) || 'agent').defaultVisibility,
     viewport: raw.viewport || { id: d.id, label: d.label, w: d.w || (wv ? wv.clientWidth : 0), h: d.h || (wv ? wv.clientHeight : 0) },
   };
   let saved;
@@ -956,6 +996,8 @@ async function captureAnnotation(raw) {
   notesPanel.setAnnotations(state.annotations);
   bumpSessionCount(session.id, 1);
   refreshPins();
+  if (state.annotations.length === 1) armNextAction();
+  if (coachmarks && coachmarks.isVisible()) coachmarks.advance('note-saved');
   return saved;
 }
 
@@ -1185,6 +1227,9 @@ async function openSession(session) {
   notesPanel.setAnnotations(state.annotations);
   renderSidebar();
   switchTab('notes');
+  if (verifyPanel && Array.isArray(session.verifyRuns) && session.verifyRuns.length) {
+    verifyPanel.setRun(session.verifyRuns[session.verifyRuns.length - 1]);
+  }
   if (session.url && session.url !== state.currentUrl) {
     navigateTo(session.url);
   } else {
@@ -1816,26 +1861,31 @@ const AUDIT_TIMEOUT_MS = 15000;
 let auditTimer = null;
 
 function runAudit() {
-  if (!wv) { toast('Open a page first', 'warn'); return; }
-  if (state.auditing) return;
-  if (/welcome\.html$/.test(state.currentUrl || '')) { toast('Open a real page to audit', 'warn'); return; }
+  if (!wv) { toast('Open a page first', 'warn'); return Promise.resolve(null); }
+  if (state.auditing) return Promise.resolve(null);
+  if (/welcome\.html$/.test(state.currentUrl || '') || isWelcomeUrl(state.currentUrl)) { toast('Open a real page to audit', 'warn'); return Promise.resolve(null); }
   state.auditing = true;
   switchTab('audit');
   auditPanel.setRunning(true);
   syncToolbar();
   sendWv('caos:run-audit');
   clearTimeout(auditTimer);
-  auditTimer = setTimeout(() => {
-    if (!state.auditing) return;
-    onAuditResult({ error: 'The page did not answer the audit in time. Reload it and try again.', findings: [], counts: {}, total: 0 });
-  }, AUDIT_TIMEOUT_MS);
+  return new Promise((resolve) => {
+    auditWaiter = resolve;
+    auditTimer = setTimeout(() => {
+      if (!state.auditing) return;
+      onAuditResult({ error: 'The page did not answer the audit in time. Reload it and try again.', findings: [], counts: {}, total: 0 });
+    }, AUDIT_TIMEOUT_MS);
+  });
 }
 
 function onAuditResult(report) {
   clearTimeout(auditTimer);
   state.auditing = false;
+  state.lastAudit = report || null;
   syncToolbar();
   auditPanel.setReport(report);
+  if (auditWaiter) { const done = auditWaiter; auditWaiter = null; done(report); }
   if (!report || report.error) return;
   if (!report.total) toast('Audit passed — no issues found', 'success');
   else toast(`Audit found ${report.total} issue${report.total === 1 ? '' : 's'}`, report.counts && report.counts.critical ? 'error' : 'warn');
@@ -2058,6 +2108,8 @@ async function copyExport(format) {
     const result = await caos.export.build(format, state.currentSession.id, { consoleLog: tabConsole() });
     if (!result || !result.content) { toast('Nothing to copy', 'warn'); return; }
     await copyText(result.content, 'Prompt copied to clipboard');
+    markShipped();
+    return result;
   } catch (e) {
     toast('Copy failed: ' + (e && e.message ? e.message : e), 'error');
   }
@@ -2087,48 +2139,34 @@ async function handoffToAgent() {
     toast('Hand-off failed: ' + (e && e.message ? e.message : e), 'error');
     return;
   }
-  const { file, command } = res;
+  const { file } = res;
+  let command = (res && res.command) || (state.settings && state.settings.agentCommand) || '';
+  let presets = state.agentPresets;
+  try { presets = await caos.agent.detect(); state.agentPresets = presets; } catch (_e) { /* keep */ }
 
-  const outPre = h('pre', { class: 'agent-output' });
-  outPre.style.display = command ? 'block' : 'none';
-  const body = h('div', {}, [
-    h('div', { style: { color: 'var(--dim)', marginBottom: '6px' }, text: 'Wrote change-request prompt to:' }),
-    h('div', { class: 'mono', style: { wordBreak: 'break-all', marginBottom: '10px', color: 'var(--text)' }, text: file }),
-    command
-      ? h('div', { class: 'field-hint', style: { margin: '0 0 8px' }, html: 'Agent command: <code>' + esc(command) + '</code>' })
-      : h('div', { class: 'field-hint', style: { margin: '0 0 8px' }, text: 'No agent command configured — set one in Settings to run an agent on this request automatically.' }),
-    outPre,
-  ]);
-
-  let unsub = null;
-  let running = false;
-  const actions = [
-    { label: 'Reveal', kind: 'ghost', onClick: () => { caos.fs.reveal(file); return true; } },
-  ];
-  if (command) {
-    actions.push({
-      label: 'Run agent',
-      kind: 'primary',
-      onClick: async () => {
-        if (running) return true;
-        running = true;
-        outPre.textContent = '$ ' + command + '\n\n';
-        unsub = caos.agent.onOutput((chunk) => { outPre.textContent += chunk; outPre.scrollTop = outPre.scrollHeight; });
-        const r = await caos.agent.run(state.currentSession.id, file);
-        if (unsub) { unsub(); unsub = null; }
-        running = false;
-        const tag = r.ok ? 'done' : 'exit ' + (r.exitCode ?? '?') + (r.error ? ' — ' + r.error : '');
-        outPre.textContent += '\n[' + tag + ']\n';
-        outPre.scrollTop = outPre.scrollHeight;
-        toast(r.ok ? 'Agent finished' : 'Agent exited with errors', r.ok ? 'success' : 'error');
-        return true; // keep the modal open to show output
-      },
-    });
-  }
-  actions.push({ label: 'Close', kind: command ? 'ghost' : 'primary' });
-
-  modal({ title: 'Hand off to agent', width: 600, body, actions, onClose: () => { if (unsub) unsub(); } });
+  markShipped();
   toast('Request written', 'success');
+  openHandoffModal({
+    file,
+    command,
+    presets,
+    onSetCommand: async (cmd) => {
+      command = cmd;
+      const next = await caos.settings.set({ agentCommand: cmd });
+      if (next) state.settings = next;
+    },
+    onReveal: (path) => caos.fs.reveal(path),
+    onCopy: () => copyExport('prompt'),
+    onVerify: () => verifySession(),
+    onRun: async ({ file: promptFile, onChunk }) => {
+      const unsub = caos.agent.onOutput((chunk) => onChunk && onChunk(chunk));
+      try {
+        return await caos.agent.run(state.currentSession.id, promptFile);
+      } finally {
+        if (unsub) unsub();
+      }
+    },
+  });
 }
 
 // ============================================================ SETTINGS
@@ -2149,11 +2187,16 @@ async function openOnboarding() {
     settings: settingsView(),
     providers: { ...state.providers },
     actions: profileActions(),
+    onComplete: ({ persona }) => {
+      syncPersonaChrome();
+      openSamplePage({ inspect: true, startCoach: true, persona });
+    },
   });
 }
 
 async function openSettings() {
   state.providers = await caos.secrets.providers();
+  try { state.agentPresets = await caos.agent.detect(); } catch (_e) { /* ignore */ }
   openSettingsModal({
     settings: settingsView(),
     providers: { ...state.providers },
@@ -2169,6 +2212,7 @@ function profileActions() {
       // Appearance and viewport changes must land immediately, not on restart.
       if (patch && Object.prototype.hasOwnProperty.call(patch, 'theme')) applyTheme();
       if (patch && (patch.device !== undefined || patch.deviceLandscape !== undefined)) applyDevice();
+      if (patch && patch.persona) syncPersonaChrome();
       syncProfileUi();
       return settingsView();
     },
@@ -2205,12 +2249,154 @@ function profileActions() {
     activateLicense: (key) => caos.license.activate(key),
     syncSignIn: (email) => caos.sync.signIn(email),
     syncSignOut: () => caos.sync.signOut(),
+    agentPresets: state.agentPresets || [],
   };
 }
 
 function syncProfileUi() {
   if (aiPanel && aiPanel.setProfile) aiPanel.setProfile(state.settings, state.providers);
   if (toolbar) syncToolbar();
+  syncPersonaChrome();
+}
+
+function currentPersona() {
+  return (state.settings && state.settings.persona) || 'agent';
+}
+
+function syncPersonaChrome() {
+  if (!toolbar) return;
+  const chrome = chromeForPersona(currentPersona());
+  toolbar.applyChrome(chrome);
+  if (tabButtons) {
+    Object.entries(tabButtons).forEach(([id, btn]) => {
+      const emphasized = chrome.tabs.includes(id);
+      btn.classList.toggle('tab-muted', !emphasized && id !== 'notes');
+    });
+  }
+  if (footerPrimaryBtn) {
+    const copy = personaCopy(currentPersona(), state.config && state.config.personas);
+    footerPrimaryBtn.textContent = copy.primary.label;
+    footerPrimaryBtn.title = copy.tip || copy.primary.label;
+  }
+}
+
+function runPersonaPrimary() {
+  const copy = personaCopy(currentPersona(), state.config && state.config.personas);
+  const cmd = copy.primary && copy.primary.command;
+  if (cmd) runCommand(cmd);
+}
+
+function openSamplePage({ inspect = false, startCoach = false } = {}) {
+  const url = state.config && state.config.playgroundUrl;
+  if (!url) { toast('Sample page is missing', 'error'); return; }
+  navigateTo(url);
+  if (inspect) setTimeout(() => { if (state.mode !== 'inspect') setMode('inspect'); }, 350);
+  if (startCoach && !caos.e2e && !(state.settings && state.settings.coachComplete)) {
+    setTimeout(() => { if (coachmarks) coachmarks.show(0); }, 500);
+  }
+}
+
+function armNextAction() {
+  if (caos.e2e) return;
+  if (state.settings && state.settings.nextActionDone) return;
+  if (coachmarks && coachmarks.isVisible()) return;
+  state.nextActionArmed = true;
+  if (notesPanel && notesPanel.setNextAction) {
+    notesPanel.setNextAction({
+      show: true,
+      persona: currentPersona(),
+      onAction: (id) => {
+        if (id === 'copy') copyExport('prompt');
+        else if (id === 'handoff') handoffToAgent();
+        else if (id === 'audit') runAudit();
+        else if (id === 'client-pack') exportClientPack();
+      },
+      onDismiss: () => markShipped(),
+    });
+  }
+}
+
+function markShipped() {
+  state.nextActionArmed = false;
+  if (notesPanel && notesPanel.setNextAction) notesPanel.setNextAction({ show: false });
+  if (coachmarks && coachmarks.isVisible()) coachmarks.advance('shipped');
+  if (!caos.e2e) caos.settings.set({ nextActionDone: true }).then((next) => { if (next) state.settings = next; });
+}
+
+async function exportClientPack() {
+  if (!state.currentSession) { toast('Open or start a session first', 'warn'); return; }
+  try {
+    const pack = await caos.review.clientPack(state.currentSession.id);
+    const name = ((pack && pack.title) || 'client-pack').replace(/[^\w.-]+/g, '-').slice(0, 60) + '.md';
+    const saved = await caos.fs.save({ defaultName: name, content: (pack && pack.markdown) || '' });
+    if (saved) {
+      toast('Client pack exported', 'success');
+      markShipped();
+    }
+    return pack;
+  } catch (e) {
+    toast('Client pack failed: ' + (e && e.message ? e.message : e), 'error');
+  }
+}
+
+async function applyChecklist(id) {
+  const session = await ensureSession();
+  const res = await caos.review.applyChecklist(id, session.id);
+  state.annotations = await caos.annotations.bySession(session.id);
+  notesPanel.setAnnotations(state.annotations);
+  if (res && res.created && res.created.length) {
+    bumpSessionCount(session.id, res.created.length);
+    toast('Checklist added as notes', 'success');
+  }
+}
+
+async function captureViewportShot() {
+  try {
+    if (!wv) return '';
+    const img = await wv.capturePage();
+    return img && img.toDataURL ? img.toDataURL() : '';
+  } catch (_e) {
+    return '';
+  }
+}
+
+async function verifySession() {
+  if (!state.currentSession) { toast('Open or start a session first', 'warn'); return null; }
+  if (verifyPanel) verifyPanel.setRunning(true);
+  switchTab('verify');
+  const notesOpen = state.annotations.filter((a) => (a.status || 'open') !== 'resolved').length;
+  const beforeAudit = state.lastAudit || (auditPanel && auditPanel.getReport && auditPanel.getReport()) || { total: 0, counts: {} };
+  const beforeShot = await captureViewportShot();
+  const rec = state.selectedRecording;
+  const beforeJourney = rec && rec.lastRun
+    ? { id: rec.id, name: rec.name, passed: rec.lastRun.passed, failed: rec.lastRun.failed, total: rec.lastRun.total, at: rec.lastRun.at }
+    : null;
+
+  const afterAudit = await runAudit();
+  let afterJourney = beforeJourney;
+  if (rec) {
+    const report = await replaySelected();
+    if (report) afterJourney = { id: rec.id, name: rec.name, passed: report.passed, failed: report.failed, total: report.total, at: report.at };
+  }
+  const afterShot = await captureViewportShot();
+  let saved;
+  try {
+    saved = await caos.review.verifySave(state.currentSession.id, {
+      notes: { open: notesOpen, total: state.annotations.length },
+      before: { audit: beforeAudit, journey: beforeJourney, screenshot: beforeShot },
+      after: { audit: afterAudit || { total: 0, counts: {} }, journey: afterJourney, screenshot: afterShot },
+    });
+  } catch (e) {
+    toast('Could not save verify run: ' + (e && e.message ? e.message : e), 'error');
+    if (verifyPanel) verifyPanel.setRunning(false);
+    return null;
+  }
+  if (verifyPanel) {
+    verifyPanel.setRunning(false);
+    if (saved && saved.run) verifyPanel.setRun(saved.run);
+  }
+  if (saved && saved.ok) toast('Verify run saved', 'success');
+  return saved;
 }
 
 // ============================================================ HELPERS

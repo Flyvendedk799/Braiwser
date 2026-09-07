@@ -3,6 +3,7 @@
 // (inline-editable), status toggle, priority, locate, and delete — plus a
 // checkbox so several notes can be triaged in one go.
 import { h, icon, clear, timeAgo, esc } from '../lib/dom.js';
+import { emptyNotesMessage } from '../lib/persona.js';
 
 export function createNotesPanel(config, actions) {
   const actionMap = {};
@@ -38,8 +39,9 @@ export function createNotesPanel(config, actions) {
   const bulkBar = h('div', { class: 'bulk-bar' });
   const filters = h('div', { class: 'filters' });
   const tally = h('span', { class: 'filter-tally' });
+  const nextRail = h('div', { class: 'next-rail', hidden: 'hidden' });
   const list = h('div', { class: 'notes-list' });
-  const root = h('div', { class: 'tab-body', dataset: { tab: 'notes' } }, [searchRow, bulkBar, filters, list]);
+  const root = h('div', { class: 'tab-body', dataset: { tab: 'notes' } }, [searchRow, nextRail, bulkBar, filters, list]);
 
   function buildFilters() {
     clear(filters);
@@ -296,12 +298,17 @@ export function createNotesPanel(config, actions) {
       : '';
     if (!annotations.length) {
       const persona = (actions.getPersona && actions.getPersona()) || 'agent';
-      const sub = persona === 'reviewer'
-        ? 'Run a page audit and promote findings, or inspect an element to leave a note.'
-        : persona === 'agency'
-          ? 'Capture client-facing findings, then export a client pack or HTML report.'
-          : 'Toggle Inspect or Draw, then click an element. When ready, copy the agent prompt or hand off.';
-      list.appendChild(placeholder('inspect', 'No notes yet', sub));
+      const sub = emptyNotesMessage(persona);
+      const ph = placeholder('inspect', 'No notes yet', sub);
+      if (persona === 'reviewer' && actions.startChecklist) {
+        ph.appendChild(h('button', {
+          class: 'btn btn-sm btn-primary',
+          style: { marginTop: '12px', alignSelf: 'center' },
+          text: 'Start accessibility pass',
+          on: { click: () => actions.startChecklist('a11y-pass') },
+        }));
+      }
+      list.appendChild(ph);
       return;
     }
     if (!items.length) {
@@ -310,6 +317,30 @@ export function createNotesPanel(config, actions) {
     }
     // Index is by full annotation order (matches restored pin numbers).
     items.forEach((a) => list.appendChild(noteCard(a, annotations.indexOf(a))));
+  }
+
+  function setNextAction(opts) {
+    const show = !!(opts && opts.show);
+    nextRail.toggleAttribute('hidden', !show);
+    clear(nextRail);
+    if (!show) return;
+    const persona = (opts.persona || (actions.getPersona && actions.getPersona()) || 'agent');
+    nextRail.appendChild(h('div', { class: 'next-rail-copy' }, [
+      h('strong', { text: 'First note captured.' }),
+      h('span', { text: ' Ship it while the issue is still in your head.' }),
+    ]));
+    const acts = h('div', { class: 'next-rail-acts' });
+    const mk = (id, label, primary) => h('button', {
+      class: `btn btn-sm ${primary ? 'btn-primary' : ''}`,
+      text: label,
+      on: { click: () => opts.onAction && opts.onAction(id) },
+    });
+    acts.appendChild(mk('copy', 'Copy prompt', false));
+    acts.appendChild(mk('handoff', 'Hand off', persona === 'agent'));
+    acts.appendChild(mk('audit', 'Run audit', persona === 'reviewer'));
+    acts.appendChild(mk('client-pack', 'Client pack', persona === 'agency'));
+    acts.appendChild(h('button', { class: 'btn btn-sm btn-ghost', text: 'Dismiss', on: { click: () => opts.onDismiss && opts.onDismiss() } }));
+    nextRail.appendChild(acts);
   }
 
   function placeholder(ic, title, sub) {
@@ -340,5 +371,5 @@ export function createNotesPanel(config, actions) {
   // tab was blank until the first session was opened.
   render();
 
-  return { root, setAnnotations, render, focusSearch, selectedIds: () => Array.from(selected) };
+  return { root, setAnnotations, render, focusSearch, selectedIds: () => Array.from(selected), setNextAction };
 }

@@ -3,10 +3,10 @@
 **An annotation-first inspector browser for reviewing web UIs and handing precise
 change requests to a coding agent.**
 
-Open any local project or URL, click the elements that need work, leave notes,
-audit accessibility, review every breakpoint, record journeys as real tests — then
-export the whole review as Markdown, an agent prompt, or a Playwright spec, or run
-your coding agent on it without leaving the app.
+Open the sample page (or any local project / URL), click what’s wrong, leave a
+note, and copy an agent prompt — usually in under two minutes. Then audit
+accessibility, review breakpoints, record journeys as tests, and **verify** the
+fix by re-running the audit and journey against a before/after report.
 
 Think Chrome DevTools' element picker fused with a sticky-note layer, an
 accessibility auditor and a journey recorder, purpose-built for turning "this looks
@@ -260,12 +260,13 @@ The subscription paths read the login the CLI already wrote and never disturb it
 the file is re-read on every call, so signing out of `claude` is noticed at once,
 and a token is only refreshed once it has actually expired.
 
-On first launch, onboarding asks for a local profile name, a default provider,
-model ids, and — for the metered providers only — an API key. Change any of it
-later from **Profile** in the toolbar or **Settings** (`⌘,`). The model field
-offers known-good ids and still accepts free text, so a model released after this
-build is usable immediately. The AI tab shows which provider is active and whether
-it is connected.
+On first launch, pick Agent / Reviewer / Agency. Braiwser opens a **sample page**
+with planted issues — inspect the broken Buy now button, save a note, copy the
+prompt or hand off. Connect AI later from **Profile** / **Settings** (`⌘,`) if you
+want; local synthesis already works with nothing configured. The toolbar shows
+the tools for your persona; everything else stays in **More tools** and the native
+menu. After a hand-off, **Verify session** re-runs the audit and journey and stores
+a before/after on the session.
 
 Without a key, AI tasks fall back to local synthesis so the app stays fully useful
 offline.

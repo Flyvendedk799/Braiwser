@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+Aha loop, then prove the fix.
+
+- Sample playground + welcome launcher (open folder / file / URL / try the sample).
+- Slim first-run: pick a persona, skip AI keys, land on the sample page with Inspect and a 3-step coach.
+- Persona actually shapes the toolbar, tabs, and footer primary action; extras live in More tools.
+- Detect `claude` / `cursor-agent` / `codex` on PATH; preset picker in Settings and the hand-off modal.
+- Next-action rail after the first note (copy prompt, hand off, audit, client pack).
+- **Verify session**: re-audit + optional journey replay, persist a before/after (including screenshots) on the session.
+- Optional cloud sync in Settings is labeled experimental.
+
 ## 1.1.0
 
 Productization release: MVP → full end-to-end product foundations for solo
