@@ -3,13 +3,14 @@ import { h, icon, clear } from '../lib/dom.js';
 
 export function createVerifyPanel(actions) {
   const meta = h('div', { class: 'verify-meta' });
-  const empty = h('div', { class: 'placeholder' }, [
+  const empty = h('div', { class: 'placeholder empty-state' }, [
     h('div', { class: 'ph-icon', html: icon('check', 30) }),
     h('div', { class: 'ph-title', text: 'Prove the fix' }),
     h('div', { class: 'ph-sub', text: 'After you hand off, re-run the audit and journey. Verify stores a before/after on this session.' }),
   ]);
   const runBtn = h('button', {
     class: 'btn btn-sm btn-primary',
+    disabled: true,
     html: icon('check', 14) + '<span>Verify session</span>',
     on: { click: () => actions.run && actions.run() },
   });
@@ -19,11 +20,22 @@ export function createVerifyPanel(actions) {
 
   let run = null;
   let running = false;
+  let pageReady = false;
+
+  function syncBtn() {
+    runBtn.disabled = running || !pageReady;
+    runBtn.querySelector('span').textContent = running ? 'Verifying…' : 'Verify session';
+    runBtn.setAttribute('aria-busy', running ? 'true' : 'false');
+  }
 
   function setRunning(on) {
     running = !!on;
-    runBtn.disabled = running;
-    runBtn.querySelector('span').textContent = running ? 'Verifying…' : 'Verify session';
+    syncBtn();
+  }
+
+  function setPageReady(on) {
+    pageReady = !!on;
+    syncBtn();
   }
 
   function setRun(next) {
@@ -86,5 +98,5 @@ export function createVerifyPanel(actions) {
   }
 
   render();
-  return { root, setRun, setRunning, getRun: () => run };
+  return { root, setRun, setRunning, setPageReady, getRun: () => run };
 }

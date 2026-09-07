@@ -74,6 +74,9 @@ function normalizeSettings(raw = {}) {
     theme: THEME_IDS.includes(base.theme) ? base.theme : DEFAULT_SETTINGS.theme,
     device: DEVICE_IDS.includes(base.device) ? base.device : DEFAULT_SETTINGS.device,
     deviceLandscape: !!base.deviceLandscape,
+    leftView: base.leftView === 'page' ? 'page' : 'workspace',
+    leftCollapsed: !!base.leftCollapsed,
+    rightCollapsed: !!base.rightCollapsed,
     persona: PERSONA_IDS.includes(base.persona) ? base.persona : DEFAULT_SETTINGS.persona,
     analyticsOptIn: !!base.analyticsOptIn,
     crashReportsOptIn: !!base.crashReportsOptIn,
@@ -151,9 +154,9 @@ function sanitizeSettingsPatch(patch, current) {
   if (typeof patch.sideTab === 'string') {
     clean.sideTab = patch.sideTab === 'layers' ? 'layers' : 'sections';
   }
-  if (Object.prototype.hasOwnProperty.call(patch, 'libraryOpen')) {
-    clean.libraryOpen = !!patch.libraryOpen;
-  }
+  if (typeof patch.leftView === 'string') clean.leftView = patch.leftView === 'page' ? 'page' : 'workspace';
+  if (Object.prototype.hasOwnProperty.call(patch, 'leftCollapsed')) clean.leftCollapsed = !!patch.leftCollapsed;
+  if (Object.prototype.hasOwnProperty.call(patch, 'rightCollapsed')) clean.rightCollapsed = !!patch.rightCollapsed;
   if (Object.prototype.hasOwnProperty.call(patch, 'activeTabIndex')) {
     clean.activeTabIndex = Math.max(0, Number.parseInt(patch.activeTabIndex, 10) || 0);
   }

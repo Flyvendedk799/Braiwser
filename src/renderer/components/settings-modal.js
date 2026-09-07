@@ -65,6 +65,10 @@ export function openSettingsModal({ settings, providers, actions }) {
   const models = { ...(settings.models || {}) };
 
   const body = h('div', {});
+  const general = h('section', { class: 'settings-section' }, [h('h3', { class: 'settings-h', text: 'General' })]);
+  const agentSec = h('section', { class: 'settings-section' }, [h('h3', { class: 'settings-h', text: 'Agent' })]);
+  const privacy = h('section', { class: 'settings-section' }, [h('h3', { class: 'settings-h', text: 'Privacy' })]);
+  const advanced = h('section', { class: 'settings-section' }, [h('h3', { class: 'settings-h', text: 'Advanced' })]);
 
   // ---- Appearance ----
   const themes = (settings.availableThemes || []).length
@@ -86,9 +90,9 @@ export function openSettingsModal({ settings, providers, actions }) {
     themeCards[t.id] = card;
     themeGroup.appendChild(card);
   });
-  body.appendChild(field('Appearance', themeGroup, 'Applies to the whole app immediately. “Match system” follows your OS setting.'));
+  general.appendChild(field('Appearance', themeGroup, 'Applies to the whole app immediately. “Match system” follows your OS setting.'));
 
-  body.appendChild(
+  general.appendChild(
     h('div', { class: 'profile-callout' }, [
       h('div', {}, [
         h('div', { class: 'profile-kicker', text: 'Local profile' }),
@@ -98,7 +102,7 @@ export function openSettingsModal({ settings, providers, actions }) {
       h('span', { class: 'profile-provider-pill', text: providerLabel(provider) }),
     ])
   );
-  const profileTitle = body.querySelector('.profile-title');
+  const profileTitle = general.querySelector('.profile-title');
 
   const nameInput = h('input', {
     class: 'input',
@@ -111,7 +115,7 @@ export function openSettingsModal({ settings, providers, actions }) {
     profileTitle.textContent = profile.displayName || 'You';
     persist({ profile: { ...profile } });
   });
-  body.appendChild(field('Profile name', nameInput, 'Optional, used only to label this local workspace.'));
+  general.appendChild(field('Profile name', nameInput, 'Optional, used only to label this local workspace.'));
 
   // ---- Provider radio cards ----
   const radioGroup = h('div', { class: 'radio-group' });
@@ -128,14 +132,14 @@ export function openSettingsModal({ settings, providers, actions }) {
       provider = p;
       Object.values(cards).forEach((c) => c.card.classList.remove('sel'));
       card.classList.add('sel');
-      body.querySelector('.profile-provider-pill').textContent = providerLabel(provider);
+      general.querySelector('.profile-provider-pill').textContent = providerLabel(provider);
       persist({ aiProvider: provider });
     });
     cards[p] = { card, badge };
     radioGroup.appendChild(card);
   });
 
-  body.appendChild(field('AI Provider', radioGroup, 'Who pays for an AI task. A subscription needs no key — if the `claude` or `codex` CLI is signed in on this machine, it is already usable.'));
+  agentSec.appendChild(field('AI Provider', radioGroup, 'Who pays for an AI task. A subscription needs no key — if the `claude` or `codex` CLI is signed in on this machine, it is already usable.'));
 
   // Repaint every badge and status line from a fresh readiness map. Connecting a
   // subscription changes a row the user is not looking at, so re-rendering only
@@ -168,7 +172,7 @@ export function openSettingsModal({ settings, providers, actions }) {
       : keyRow(p, { providers, actions, repaint }));
     rows.push(status);
 
-    body.appendChild(field(`${providerLabel(p)} — model and credential`, h('div', {}, rows)));
+    agentSec.appendChild(field(`${providerLabel(p)} — model and credential`, h('div', {}, rows)));
   });
 
   // ---- Replay delay ----
@@ -178,7 +182,7 @@ export function openSettingsModal({ settings, providers, actions }) {
     delayInput.value = String(v);
     persist({ replayDelayMs: v });
   });
-  body.appendChild(field('Replay delay (ms)', delayInput, 'Minimum pause between steps. Replay also honours the real gaps from recording (capped), so journeys stay watchable. Video export uses a higher floor automatically.'));
+  advanced.appendChild(field('Replay delay (ms)', delayInput, 'Minimum pause between steps. Replay also honours the real gaps from recording (capped), so journeys stay watchable. Video export uses a higher floor automatically.'));
 
   const timeoutInput = h('input', { class: 'input', type: 'number', min: '5', step: '5', value: String(Math.round((settings.aiTimeoutMs || 120000) / 1000)) });
   timeoutInput.addEventListener('change', () => {
@@ -186,7 +190,7 @@ export function openSettingsModal({ settings, providers, actions }) {
     timeoutInput.value = String(secs);
     persist({ aiTimeoutMs: secs * 1000 });
   });
-  body.appendChild(field('AI timeout (seconds)', timeoutInput, 'Abort a provider call after this many seconds.'));
+  advanced.appendChild(field('AI timeout (seconds)', timeoutInput, 'Abort a provider call after this many seconds.'));
 
   const personas = settings.personas || [
     { id: 'agent', label: 'Agent builder' },
@@ -198,11 +202,11 @@ export function openSettingsModal({ settings, providers, actions }) {
   ));
   personaSelect.value = settings.persona || 'agent';
   personaSelect.addEventListener('change', () => persist({ persona: personaSelect.value }));
-  body.appendChild(field('Workflow persona', personaSelect, 'Tunes empty states and tips. Features stay the same.'));
+  general.appendChild(field('Workflow persona', personaSelect, 'Tunes empty states and tips. Features stay the same.'));
 
   const agencyName = h('input', { class: 'input', type: 'text', value: (settings.agency && settings.agency.name) || '', placeholder: 'Studio or agency name' });
   agencyName.addEventListener('change', () => persist({ agency: { ...(settings.agency || {}), name: agencyName.value.trim() } }));
-  body.appendChild(field('Agency / studio name', agencyName, 'Used on client packs and HTML reports.'));
+  general.appendChild(field('Agency / studio name', agencyName, 'Used on client packs and HTML reports.'));
 
   const licenseInput = h('input', { class: 'input mono', type: 'text', value: settings.licenseKey || '', placeholder: 'BRW1.… Pro license key' });
   const licenseStatus = h('div', { class: 'field-hint', text: 'Free tier active until a Pro key is activated.' });
@@ -229,16 +233,16 @@ export function openSettingsModal({ settings, providers, actions }) {
       },
     }),
   ]);
-  body.appendChild(field('Pro license', licenseRow, null));
-  body.appendChild(licenseStatus);
+  advanced.appendChild(field('Pro license', licenseRow, null));
+  advanced.appendChild(licenseStatus);
 
   const analyticsToggle = h('input', { type: 'checkbox', checked: !!settings.analyticsOptIn });
   analyticsToggle.addEventListener('change', () => persist({ analyticsOptIn: analyticsToggle.checked }));
-  body.appendChild(field('Anonymous product analytics', analyticsToggle, 'Opt-in only. Events stay local unless you later enable a sync endpoint.'));
+  privacy.appendChild(switchField('Anonymous product analytics', 'Opt-in only. Events stay local unless you later enable a sync endpoint.', analyticsToggle));
 
   const crashToggle = h('input', { type: 'checkbox', checked: !!settings.crashReportsOptIn });
   crashToggle.addEventListener('change', () => persist({ crashReportsOptIn: crashToggle.checked }));
-  body.appendChild(field('Crash breadcrumbs', crashToggle, 'Opt-in. Stores local crash notes to include in diagnostics you choose to share.'));
+  privacy.appendChild(switchField('Crash breadcrumbs', 'Opt-in. Stores local crash notes to include in diagnostics you choose to share.', crashToggle));
 
   const syncEmail = h('input', { class: 'input', type: 'email', value: (settings.sync && settings.sync.accountEmail) || '', placeholder: 'you@company.com' });
   const syncRow = h('div', { class: 'provider-setup-row' }, [
@@ -266,7 +270,7 @@ export function openSettingsModal({ settings, providers, actions }) {
       },
     }),
   ]);
-  body.appendChild(field('Optional cloud sync (experimental)', syncRow, 'Local-first. Sign-in queues encrypted snapshots — there is no hosted sync endpoint yet.'));
+  advanced.appendChild(field('Optional cloud sync (experimental)', syncRow, 'Local-first. Sign-in queues encrypted snapshots — there is no hosted sync endpoint yet.'));
 
   // ---- Agent hand-off command ----
   const agentInput = h('input', { class: 'input mono', type: 'text', value: settings.agentCommand || '', placeholder: 'e.g. claude -p "Apply the changes in {promptPath}"' });
@@ -287,7 +291,7 @@ export function openSettingsModal({ settings, providers, actions }) {
       },
     }));
   });
-  body.appendChild(field('Agent command (hand-off)', h('div', {}, [presetRow, agentInput]), 'Optional. Runs in the project folder when you hand off a session. Placeholders: {promptPath}, {projectPath}. Leave empty to only write the request file. Presets fill the command if that CLI is on your PATH.'));
+  agentSec.appendChild(field('Agent command (hand-off)', h('div', {}, [presetRow, agentInput]), 'Optional. Runs in the project folder when you hand off a session. Placeholders: {promptPath}, {projectPath}. Leave empty to only write the request file. Presets fill the command if that CLI is on your PATH.'));
 
   // ---- Restore annotations toggle ----
   const toggle = h('input', { type: 'checkbox', checked: settings.restoreAnnotationsOnLoad !== false });
@@ -299,7 +303,12 @@ export function openSettingsModal({ settings, providers, actions }) {
     ]),
     h('label', { class: 'switch' }, [toggle, h('span', { class: 'track' })]),
   ]);
-  body.appendChild(h('div', { class: 'field' }, [toggleRow]));
+  privacy.appendChild(h('div', { class: 'field' }, [toggleRow]));
+
+  body.appendChild(general);
+  body.appendChild(agentSec);
+  body.appendChild(privacy);
+  body.appendChild(advanced);
 
   async function persist(patch) {
     const next = await actions.setSettings(patch);
@@ -357,15 +366,16 @@ export function openOnboardingModal({ settings, actions, onComplete }) {
   });
   body.appendChild(field('Profile name', nameInput, 'Optional. This app keeps one local profile on this device.'));
 
-  async function finish() {
+  async function finish(skipped) {
     profile.displayName = nameInput.value.trim();
     await actions.setSettings({
       profile: { ...profile },
       persona,
       onboardingComplete: true,
     });
-    toast('Let’s capture one issue', 'success');
-    if (onComplete) onComplete({ persona });
+    if (skipped) toast('Open the sample page from Help whenever you want a tour', 'info');
+    else toast('Let’s capture one issue', 'success');
+    if (onComplete) onComplete({ persona, skipped: !!skipped });
   }
 
   modal({
@@ -373,10 +383,14 @@ export function openOnboardingModal({ settings, actions, onComplete }) {
     width: 560,
     body,
     actions: [
-      { label: 'Skip', kind: 'ghost', onClick: () => finish() },
-      { label: 'Open sample page', kind: 'primary', onClick: () => finish() },
+      { label: 'Skip', kind: 'ghost', onClick: () => finish(true) },
+      { label: 'Open sample page', kind: 'primary', onClick: () => finish(false) },
     ],
   });
+  const skipBtn = Array.from(document.querySelectorAll('.modal-footer button')).find((b) => b.textContent === 'Skip');
+  const sampleBtn = Array.from(document.querySelectorAll('.modal-footer button')).find((b) => b.textContent === 'Open sample page');
+  if (skipBtn) skipBtn.setAttribute('data-testid', 'onboarding-skip');
+  if (sampleBtn) sampleBtn.setAttribute('data-testid', 'onboarding-sample');
 }
 
 function field(label, control, hint) {
@@ -384,6 +398,18 @@ function field(label, control, hint) {
     h('label', { class: 'field-label', text: label }),
     control,
     hint ? h('div', { class: 'field-hint', text: hint }) : null,
+  ]);
+}
+
+function switchField(label, hint, input) {
+  return h('div', { class: 'field' }, [
+    h('div', { class: 'toggle-row' }, [
+      h('div', {}, [
+        h('div', { style: { fontWeight: '600', marginBottom: '3px' }, text: label }),
+        hint ? h('div', { class: 'field-hint', style: { margin: '0' }, text: hint }) : null,
+      ]),
+      h('label', { class: 'switch' }, [input, h('span', { class: 'track' })]),
+    ]),
   ]);
 }
 

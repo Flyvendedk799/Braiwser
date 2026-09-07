@@ -65,14 +65,17 @@ Page edits — copy, style, reorder, re-parent, resize, hide, re-layout — shar
 **undo / redo** history in the header (`⌘⇧Z` / `⌘⇧Y`). Undoing also retracts the
 note the edit filed; redoing brings it back.
 
-### Sections & Layers
+### Workspace + Page / Review + Ship
 
-The left sidebar is the page. **Sections** lists it as a tree named the way you would
-name it (heading text, id, landmark): click a row to select and scroll to the element,
-drag it to reorder, and use the eye to hide it. **Layers** zooms in on the selected
-element's container and stacking order. Both record their changes as edit notes, and
-both are keyboard-operable. Projects, sessions, recordings, bookmarks and history fold
-away behind the **Library** button at the bottom.
+The two sidebars have distinct jobs. The left sidebar owns **where and what**:
+**Workspace** keeps projects, sessions, journeys, bookmarks and history visible, while
+**Page** holds Sections and Layers for the live document. Selecting an element brings
+Page forward automatically. Sections names the tree the way you would (heading text,
+id, landmark); Layers zooms into the selected container and stacking order.
+
+The right sidebar owns **what to do about it**: Notes, Style, Audit, AI and Verify,
+plus the final export / hand-off actions. Both sidebars collapse independently so the
+page can take the full canvas without losing quick expand controls.
 
 ### Audit `⌘⇧U`
 
@@ -260,13 +263,13 @@ The subscription paths read the login the CLI already wrote and never disturb it
 the file is re-read on every call, so signing out of `claude` is noticed at once,
 and a token is only refreshed once it has actually expired.
 
-On first launch, pick Agent / Reviewer / Agency. Braiwser opens a **sample page**
-with planted issues — inspect the broken Buy now button, save a note, copy the
-prompt or hand off. Connect AI later from **Profile** / **Settings** (`⌘,`) if you
-want; local synthesis already works with nothing configured. The toolbar shows
-the tools for your persona; everything else stays in **More tools** and the native
-menu. After a hand-off, **Verify session** re-runs the audit and journey and stores
-a before/after on the session.
+On first launch, pick Agent / Reviewer / Agency. **Open sample page** lands on a
+planted shop with Inspect and a 3-step coach. **Skip** leaves you on the launcher
+without the tour — Help → Try Sample Page anytime. Connect AI later from
+**Profile** / **Settings** (`⌘,`) if you want; local synthesis already works with
+nothing configured. The toolbar shows the tools for your persona; everything else
+stays in **More tools** and the native menu. After a hand-off, **Verify session**
+re-runs the audit and journey and stores a before/after on the session.
 
 Without a key, AI tasks fall back to local synthesis so the app stays fully useful
 offline.

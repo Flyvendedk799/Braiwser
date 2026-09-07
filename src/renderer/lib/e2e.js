@@ -849,26 +849,30 @@ export async function run(I) {
     const flat = JSON.stringify(tree || {});
     check('dom-tree contains #cta', /"cta"/.test(flat));
 
-    // --- 4b. Sidebar: Sections / Layers tabs + the folded-away library ---
+    // --- 4b. Sidebar: Workspace navigation + Page structure ---
     {
       const sideRows = () => Array.from(document.querySelectorAll('.sec-row'));
       const nameOf = (r) => r.querySelector('.sec-name').textContent;
       const rowNamed = (n) => sideRows().find((r) => nameOf(r) === n);
 
-      check('sidebar shows the Sections tab', I.state.sideTab === 'sections' && !!document.querySelector('.side-tab.active'), I.state.sideTab);
-      const libBtn = document.querySelector('.side-library-btn');
-      check('library sits behind one button', !!libBtn, libBtn && libBtn.textContent);
-      const libHidden = getComputedStyle(document.querySelector('.side-library')).display === 'none';
-      check('sessions + history are folded away by default', libHidden);
-      libBtn.click();
-      await sleep(120);
-      const libShown = getComputedStyle(document.querySelector('.side-library')).display !== 'none';
+      I.setLeftView('workspace');
+      await sleep(80);
+      check('left sidebar starts as a useful workspace', I.state.leftView === 'workspace' && getComputedStyle(document.querySelector('.side-library')).display !== 'none', I.state.leftView);
       const heads = Array.from(document.querySelectorAll('.side-library .side-head h3')).map((x) => x.textContent);
-      check('the button expands sessions + history', libShown && heads.includes('Sessions') && heads.includes('History'), heads.join(','));
-      libBtn.click();
+      check('workspace exposes projects, sessions, journeys, bookmarks and history', ['Projects', 'Sessions', 'Recordings', 'Bookmarks', 'History'].every((x) => heads.includes(x)), heads.join(','));
+      check('workspace shows current context', !!document.querySelector('.workspace-context-title'));
+      I.setLeftView('page');
       await sleep(120);
-      check('and folds them away again', getComputedStyle(document.querySelector('.side-library')).display === 'none');
+      check('sidebar shows the Sections tab', I.state.sideTab === 'sections' && !!document.querySelector('.side-tab.active'), I.state.sideTab);
       check('right panel is Notes + Style + Audit + AI + Verify', Array.from(document.querySelectorAll('.panel .tab')).map((t) => t.textContent.replace(/\d+$/, '')).join(',') === 'Notes,Style,Audit,AI,Verify', Array.from(document.querySelectorAll('.panel .tab')).map((t) => t.textContent).join(','));
+      I.setSidebarCollapsed('left', true);
+      I.setSidebarCollapsed('right', true);
+      await sleep(80);
+      check('both sidebars collapse independently', document.querySelector('.body').classList.contains('left-collapsed') && document.querySelector('.body').classList.contains('right-collapsed'));
+      check('collapsed rails keep their expand actions', !!document.querySelector('.side-expand') && !!document.querySelector('.panel-expand'));
+      I.setSidebarCollapsed('left', false);
+      I.setSidebarCollapsed('right', false);
+      await sleep(80);
 
       // The page's own structure, named the way a person would name it.
       document.querySelector('.sec-icon-btn').click();
@@ -1042,15 +1046,12 @@ export async function run(I) {
       const mine = (await caos.recordings.list(project.id)).find((r) => r.name === 'Findable Journey');
       check('the recording is saved', !!mine, mine && mine.steps.length + ' steps');
       check('…and selected, so Replay is live', !!I.state.selectedRecording && I.state.selectedRecording.id === (mine || {}).id, I.state.selectedRecording && I.state.selectedRecording.name);
-      check('…the Library drawer opens on it', I.state.libraryOpen === true && getComputedStyle(document.querySelector('.side-library')).display !== 'none');
+      check('…Workspace opens on it', I.state.leftView === 'workspace' && getComputedStyle(document.querySelector('.side-library')).display !== 'none');
       const row = mine && document.querySelector('.side-library [data-row-id="' + mine.id + '"]');
       check('…the row is right there', !!row, row && row.textContent);
-      check('…the drawer button counts what is inside', /recording/.test((document.querySelector('.lib-pill') || {}).textContent || ''), (document.querySelector('.lib-pill') || {}).textContent);
+      check('…the workspace context counts journeys', /journey/.test((document.querySelector('.workspace-context-meta') || {}).textContent || ''), (document.querySelector('.workspace-context-meta') || {}).textContent);
       const replayTitle = (document.querySelector('.toolbar .icon-btn[title^="Replay"]') || {}).title || '';
       check('…and the toolbar says what Replay would play', /Findable Journey/.test(replayTitle), replayTitle);
-      // put the sidebar back
-      document.querySelector('.side-library-btn').click();
-      await sleep(150);
       if (mine) await caos.recordings.remove(mine.id);
       await I.refreshRecordings();
       I.selectRecording(recording);
@@ -1626,7 +1627,39 @@ export async function run(I) {
 
       I.runCommand('panel.verify');
       check('verify panel command switches the tab', I.state.activeTab === 'verify', I.state.activeTab);
+      const verifyBtn = document.querySelector('.verify-bar .btn-primary');
+      check('verify CTA is enabled on a loaded page', !!(verifyBtn && !verifyBtn.disabled));
       I.runCommand('panel.notes');
+      check('note visibility select is present', !!document.querySelector('.vis-select'));
+      check('right tabs expose tab roles', document.querySelectorAll('.panel .tab[role="tab"]').length === 5, String(document.querySelectorAll('.panel .tab[role="tab"]').length));
+      check('side tabs expose tab roles', document.querySelectorAll('.side-tab[role="tab"]').length === 2);
+
+      const welcomeReady = waitDomReady();
+      I.navigateTo(I.state.config.welcomeUrl);
+      await welcomeReady;
+      await sleep(250);
+      check('verify CTA is disabled on the welcome page', !!(verifyBtn && verifyBtn.disabled));
+
+      if (typeof I.openOnboarding === 'function') {
+        await I.openOnboarding();
+        await sleep(200);
+        const skip = document.querySelector('[data-testid="onboarding-skip"]');
+        const sample = document.querySelector('[data-testid="onboarding-sample"]');
+        check('onboarding skip is distinct from open sample', !!(skip && sample));
+        if (skip) skip.click();
+        await sleep(400);
+        const coachApi = I.coachmarks && I.coachmarks();
+        check('skip does not start the coach', !(coachApi && coachApi.isVisible()));
+        if (coachApi) {
+          coachApi.show(0);
+          await sleep(60);
+          check('coach is a dialog', !!document.querySelector('.coach-card[role="dialog"]'));
+          check('coach first step action is Next', (document.querySelector('.coach-acts .btn-primary') || {}).textContent === 'Next');
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          await sleep(60);
+          check('Escape dismisses the coach', !coachApi.isVisible());
+        }
+      }
 
       const pgReady = waitDomReady();
       I.navigateTo(I.state.config.playgroundUrl);
@@ -1636,6 +1669,9 @@ export async function run(I) {
       check('sample playground exposes the Buy now hook', buy);
       const contrast = await guest("!!document.querySelector('[data-testid=\"contrast-hero\"]')");
       check('sample playground plants a contrast issue', contrast);
+      const chip = await guest("!!document.querySelector('.sample-chip')");
+      check('sample playground shows a planted-issue chip', chip);
+      check('verify CTA is enabled on the sample page', !!(verifyBtn && !verifyBtn.disabled));
     }
 
     // --- cleanup ---

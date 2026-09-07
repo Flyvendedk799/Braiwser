@@ -51,12 +51,13 @@ export function openHandoffModal({
     h('div', { style: { color: 'var(--dim)', marginBottom: '6px' }, text: 'Wrote change-request prompt to:' }),
     h('div', { class: 'mono', style: { wordBreak: 'break-all', marginBottom: '10px', color: 'var(--text)' }, text: file }),
     hint,
-    list.length ? h('div', { class: 'preset-row', style: { marginBottom: '10px' } }, [presetRow]) : null,
+    list.length ? presetRow : null,
     outPre,
   ]);
 
   let unsub = null;
   let running = false;
+  let dlg;
   const actions = [
     { label: 'Reveal', kind: 'ghost', onClick: () => { if (onReveal) onReveal(file); return true; } },
     { label: 'Copy prompt', kind: 'ghost', onClick: async () => { if (onCopy) await onCopy(); return true; } },
@@ -68,13 +69,21 @@ export function openHandoffModal({
       if (!command) { toast('Pick an agent preset first, or copy the prompt', 'warn'); return true; }
       if (running) return true;
       running = true;
+      const runBtn = (dlg.actionButtons || []).find((b) => /Run agent/.test(b.textContent));
+      if (runBtn) { runBtn.disabled = true; runBtn.setAttribute('aria-busy', 'true'); }
+      if (dlg.card) dlg.card.setAttribute('aria-busy', 'true');
       outPre.style.display = 'block';
       outPre.textContent = '$ ' + command + '\n\n';
-      const result = await onRun({ command, file, onChunk: (chunk) => { outPre.textContent += chunk; outPre.scrollTop = outPre.scrollHeight; } });
-      running = false;
-      const tag = result && result.ok ? 'done' : 'exit ' + ((result && result.exitCode) ?? '?') + (result && result.error ? ' — ' + result.error : '');
-      outPre.textContent += '\n[' + tag + ']\n';
-      toast(result && result.ok ? 'Agent finished' : 'Agent exited with errors', result && result.ok ? 'success' : 'error');
+      try {
+        const result = await onRun({ command, file, onChunk: (chunk) => { outPre.textContent += chunk; outPre.scrollTop = outPre.scrollHeight; } });
+        const tag = result && result.ok ? 'done' : 'exit ' + ((result && result.exitCode) ?? '?') + (result && result.error ? ' — ' + result.error : '');
+        outPre.textContent += '\n[' + tag + ']\n';
+        toast(result && result.ok ? 'Agent finished' : 'Agent exited with errors', result && result.ok ? 'success' : 'error');
+      } finally {
+        running = false;
+        if (runBtn) { runBtn.disabled = false; runBtn.removeAttribute('aria-busy'); }
+        if (dlg.card) dlg.card.removeAttribute('aria-busy');
+      }
       return true;
     },
   });
@@ -87,5 +96,5 @@ export function openHandoffModal({
   }
   actions.push({ label: 'Close', kind: 'ghost' });
 
-  modal({ title: 'Hand off to agent', width: 600, body, actions, onClose: () => { if (unsub) unsub(); } });
+  dlg = modal({ title: 'Hand off to agent', width: 600, body, actions, onClose: () => { if (unsub) unsub(); } });
 }

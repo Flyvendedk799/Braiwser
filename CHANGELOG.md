@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+UI polish pass on the aha-loop shell.
+
+- Left and right rails now have clear jobs: Workspace/Page on the left,
+  Review & Ship on the right. Both collapse independently and persist.
+- Skip onboarding no longer opens the sample page; only **Open sample page** starts Inspect + coach.
+- Coach is a real dialog (Escape, Done, spotlight, Notes on step 2). Welcome, playground, toolbar, and light theme follow the same tokens.
+- Settings grouped into General / Agent / Privacy / Advanced. Verify, notes, and overlays pick up empty states, busy Run, and keyboard menus.
+
 Aha loop, then prove the fix.
 
 - Sample playground + welcome launcher (open folder / file / URL / try the sample).
