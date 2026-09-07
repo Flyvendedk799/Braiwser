@@ -19,13 +19,16 @@ export function createSidebar(actions, panels) {
 
   // ---- page tabs -------------------------------------------------------------
   const tabButtons = {};
-  const tabBar = h('div', { class: 'side-tabs' });
+  const tabBar = h('div', { class: 'side-tabs', role: 'tablist', 'aria-label': 'Page structure' });
   [
     ['sections', 'Sections', 'The page as a tree of sections and layers'],
     ['layers', 'Layers', 'The selected element’s container and stacking order'],
   ].forEach(([id, label, title]) => {
     const b = h('button', {
       class: 'side-tab',
+      role: 'tab',
+      id: 'side-tab-' + id,
+      'aria-selected': 'false',
       text: label,
       title,
       on: { click: () => actions.selectTab(id) },
@@ -124,7 +127,11 @@ export function createSidebar(actions, panels) {
   }
 
   function setTab(id) {
-    Object.entries(tabButtons).forEach(([k, b]) => b.classList.toggle('active', k === id));
+    Object.entries(tabButtons).forEach(([k, b]) => {
+      const on = k === id;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
     panels.sections.classList.toggle('active', id === 'sections');
     panels.layers.classList.toggle('active', id === 'layers');
   }
@@ -220,7 +227,7 @@ export function createSidebar(actions, panels) {
     clear(bookmarksList);
     const bms = bookmarks || [];
     if (!bms.length) {
-      bookmarksList.appendChild(h('div', { class: 'empty', text: 'No bookmarks. Tap the ☆ in the address bar.' }));
+      bookmarksList.appendChild(h('div', { class: 'empty', text: 'No bookmarks. Tap the star in the address bar.' }));
     }
     for (const b of bms) {
       bookmarksList.appendChild(

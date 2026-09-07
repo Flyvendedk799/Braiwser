@@ -5,16 +5,26 @@
   <title>Braiwser</title>
   <style>
     :root {
-      color-scheme: light dark;
+      color-scheme: dark;
       --bg: #0e0f13; --bg2: #11131a; --line: #22262f; --line2: #2a2e3a;
       --text: #e6e9f0; --dim: #9aa2b1; --faint: #6b7280; --accent: #5b8cff;
       --glow1: rgba(91,140,255,0.16); --glow2: rgba(199,146,234,0.10);
+      --focus: #5b8cff;
+    }
+    :root[data-theme='light'] {
+      color-scheme: light;
+      --bg: #f6f7f9; --bg2: #ffffff; --line: #e2e5ea; --line2: #cdd2db;
+      --text: #14171f; --dim: #566071; --faint: #78818f; --accent: #2f6bff;
+      --glow1: rgba(47,107,255,0.10); --glow2: rgba(122,69,201,0.07);
+      --focus: #2f6bff;
     }
     @media (prefers-color-scheme: light) {
-      :root {
+      :root:not([data-theme='dark']) {
+        color-scheme: light;
         --bg: #f6f7f9; --bg2: #ffffff; --line: #e2e5ea; --line2: #cdd2db;
         --text: #14171f; --dim: #566071; --faint: #78818f; --accent: #2f6bff;
         --glow1: rgba(47,107,255,0.10); --glow2: rgba(122,69,201,0.07);
+        --focus: #2f6bff;
       }
     }
     * { box-sizing: border-box; }
@@ -31,15 +41,15 @@
       -webkit-font-smoothing: antialiased;
     }
     .wrap { width: 100%; max-width: 640px; }
-    .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; }
+    .brand { display: flex; align-items: center; gap: 14px; margin-bottom: 28px; }
     .logo {
-      width: 38px; height: 38px; border-radius: 11px;
+      width: 44px; height: 44px; border-radius: 13px;
       background: linear-gradient(135deg, #5b8cff, #c792ea);
-      display: grid; place-items: center; box-shadow: 0 8px 28px rgba(91,140,255,0.4);
+      display: grid; place-items: center; box-shadow: 0 10px 32px rgba(91,140,255,0.42);
     }
     .logo svg { display: block; }
-    .brand-name { font-size: 14px; font-weight: 700; letter-spacing: 0.02em; }
-    .brand-tag { font-size: 12px; color: var(--faint); }
+    .brand-name { font-size: 18px; font-weight: 800; letter-spacing: -0.02em; }
+    .brand-tag { font-size: 13px; color: var(--dim); margin-top: 2px; }
     h1 { font-size: 32px; line-height: 1.12; margin: 0 0 8px; letter-spacing: -0.025em; font-weight: 800; }
     h1 .accent { background: linear-gradient(120deg, #6f9bff, #b07ce8); -webkit-background-clip: text; background-clip: text; color: transparent; }
     .sub { color: var(--dim); font-size: 15.5px; margin: 0 0 28px; line-height: 1.55; max-width: 540px; }
@@ -52,6 +62,11 @@
     }
     a.card:hover, button.card:hover { border-color: var(--line2); }
     a.card.primary { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+    a.card:focus-visible, button.card:focus-visible, .btn:focus-visible, .link:focus-visible,
+    form.go input:focus-visible, form.go button:focus-visible {
+      outline: 2px solid var(--focus);
+      outline-offset: 2px;
+    }
     .n {
       flex: 0 0 28px; height: 28px; border-radius: 9px;
       background: var(--glow1); color: var(--accent);
@@ -80,14 +95,14 @@
 <body>
   <div class="wrap">
     <div class="brand">
-      <div class="logo">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <div class="logo" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="4"/>
         </svg>
       </div>
       <div>
         <div class="brand-name">Braiwser</div>
-        <div class="brand-tag">Note → prompt in two minutes</div>
+        <div class="brand-tag">An annotation-first inspector. Note what’s wrong, ship a prompt.</div>
       </div>
     </div>
 
@@ -100,31 +115,44 @@
         <div><b>Try the sample page</b><span>A small broken shop with contrast, label, and tap-target issues. Inspect the Buy now button, leave a note, copy the prompt.</span></div>
       </a>
       <a class="card" href="#open-folder">
-        <div class="n">⌘</div>
+        <div class="n" data-mod>⌘</div>
         <div><b>Open a local folder</b><span>Uses the entry <code>index.html</code> when it finds one. Same as Folder in the toolbar.</span></div>
       </a>
       <a class="card" href="#open-file">
-        <div class="n">⌘</div>
+        <div class="n" data-mod>⌘</div>
         <div><b>Open a local file</b><span>Any HTML page on disk. Same as File in the toolbar.</span></div>
       </a>
     </div>
 
     <form class="go" action="#" method="get">
       <input id="go-url" type="text" placeholder="Paste a URL or type a domain" aria-label="URL" />
-      <button type="submit">Go</button>
+      <button class="btn" type="submit">Go</button>
     </form>
 
-    <p class="foot">Shortcuts: Inspect <kbd>⌘⇧E</kbd> · Copy prompt <kbd>⌘⇧C</kbd> · Hand off <kbd>⌘⇧H</kbd> · Full list <kbd>⌘/</kbd></p>
+    <p class="foot">Shortcuts: Inspect <kbd data-kbd>⌘⇧E</kbd> · Copy prompt <kbd data-kbd>⌘⇧C</kbd> · Hand off <kbd data-kbd>⌘⇧H</kbd> · Full list <kbd data-kbd>⌘/</kbd></p>
   </div>
   <script>
-    document.querySelector('form.go').addEventListener('submit', (e) => {
-      e.preventDefault();
-      const raw = document.getElementById('go-url').value.trim();
-      if (!raw) return;
-      let url = raw;
-      if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url)) url = 'https://' + url;
-      location.href = url;
-    });
+    (function () {
+      const mac = /Mac|iPhone|iPad/.test(navigator.platform || '');
+      const mod = mac ? '⌘' : 'Ctrl';
+      document.querySelectorAll('[data-mod]').forEach((el) => { el.textContent = mac ? '⌘' : '⌃'; });
+      document.querySelectorAll('kbd[data-kbd]').forEach((el) => {
+        el.textContent = el.textContent.replace(/⌘/g, mod);
+      });
+      function applyTheme(theme) {
+        if (!theme) return;
+        document.documentElement.setAttribute('data-theme', theme);
+        document.documentElement.style.colorScheme = theme;
+      }
+      document.querySelector('form.go').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const raw = document.getElementById('go-url').value.trim();
+        if (!raw) return;
+        let url = raw;
+        if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url)) url = 'https://' + url;
+        location.href = url;
+      });
+    })();
   </script>
 </body>
 </html>
