@@ -1,7 +1,6 @@
-// Left sidebar. Two faces:
-//   • the page — [Sections | Layers] tabs, which is what you work in all day;
-//   • the library — Projects, Sessions, Recordings, Bookmarks and History,
-//     folded away behind one button at the bottom and expanded on demand.
+// Left sidebar. It owns navigation and page structure:
+//   • Workspace — projects, sessions, recordings, bookmarks and history;
+//   • Page — [Sections | Layers] for the live document.
 // Pure-render component: the library re-renders fully from update()'s data, and
 // row interactions are delegated to the controller via the `actions` bag.
 import { h, icon, clear, timeAgo } from '../lib/dom.js';
@@ -16,6 +15,40 @@ export function createSidebar(actions, panels) {
   const clearHistoryBtn = h('button', { class: 'side-add', title: 'Clear history', 'aria-label': 'Clear history', html: icon('trash', 13), on: { click: () => actions.clearHistory && actions.clearHistory() } });
   const importBtn = h('button', { class: 'side-add', title: 'Import a project bundle', 'aria-label': 'Import a project bundle', html: icon('upload', 13), on: { click: () => actions.importBundle && actions.importBundle() } });
   const newProjectBtn = h('button', { class: 'side-add', title: 'New project', 'aria-label': 'New project', html: icon('plus', 14), on: { click: actions.newProject } });
+
+  const contextTitle = h('div', { class: 'workspace-context-title', text: 'No session' });
+  const contextMeta = h('div', { class: 'workspace-context-meta', text: 'Open a page to start reviewing' });
+  const contextCount = h('span', { class: 'workspace-context-count', text: '0 notes' });
+  const context = h('div', { class: 'workspace-context' }, [
+    h('div', { class: 'workspace-context-copy' }, [contextTitle, contextMeta]),
+    contextCount,
+  ]);
+
+  // ---- primary left-rail destinations ---------------------------------------
+  const viewButtons = {};
+  const collapseBtn = h('button', {
+    class: 'side-collapse',
+    title: 'Collapse workspace sidebar',
+    'aria-label': 'Collapse workspace sidebar',
+    html: icon('back', 15),
+    on: { click: () => actions.toggleCollapsed && actions.toggleCollapsed() },
+  });
+  const viewNav = h('div', { class: 'side-view-nav', role: 'tablist', 'aria-label': 'Left sidebar' });
+  [
+    ['workspace', 'folder', 'Workspace'],
+    ['page', 'layers', 'Page'],
+  ].forEach(([id, ic, label]) => {
+    const b = h('button', {
+      class: 'side-view-tab',
+      role: 'tab',
+      'aria-selected': 'false',
+      html: icon(ic, 15) + `<span>${label}</span>`,
+      on: { click: () => actions.selectView && actions.selectView(id) },
+    });
+    viewButtons[id] = b;
+    viewNav.appendChild(b);
+  });
+  const top = h('div', { class: 'side-top' }, [viewNav, collapseBtn]);
 
   // ---- page tabs -------------------------------------------------------------
   const tabButtons = {};
@@ -38,9 +71,11 @@ export function createSidebar(actions, panels) {
   });
 
   const stack = h('div', { class: 'side-stack' }, [panels.sections, panels.layers]);
+  const pageView = h('div', { class: 'side-page' }, [tabBar, stack]);
 
   // ---- library drawer --------------------------------------------------------
   const library = h('div', { class: 'side-library' }, [
+    context,
     section('Projects', projectsList, null, h('div', { class: 'side-head-acts' }, [importBtn, newProjectBtn])),
     section('Sessions', sessionsList, actions.newSession),
     section('Recordings', recordingsList, null),
@@ -48,20 +83,32 @@ export function createSidebar(actions, panels) {
     section('History', historyList, null, clearHistoryBtn),
   ]);
 
-  const libChevron = h('span', { class: 'lib-chevron', html: icon('chevron', 12) });
-  const libMeta = h('span', { class: 'lib-meta' });
-  const libPill = h('span', { class: 'lib-pill' });
-  const libraryBtn = h(
-    'button',
-    {
-      class: 'side-library-btn',
-      title: 'Projects, sessions, recordings, bookmarks and history',
-      on: { click: () => actions.toggleLibrary() },
-    },
-    [libChevron, h('span', { class: 'lib-title', text: 'Library' }), libPill, h('span', { class: 'sec-grow' }), libMeta]
-  );
+  const expandBtn = h('button', {
+    class: 'side-expand',
+    title: 'Expand workspace sidebar',
+    'aria-label': 'Expand workspace sidebar',
+    html: icon('forward', 16),
+    on: { click: () => actions.toggleCollapsed && actions.toggleCollapsed() },
+  });
+  const collapsedRail = h('div', { class: 'side-collapsed-rail' }, [
+    expandBtn,
+    h('button', {
+      class: 'side-rail-btn',
+      title: 'Open workspace',
+      'aria-label': 'Open workspace',
+      html: icon('folder', 16),
+      on: { click: () => { if (actions.selectView) actions.selectView('workspace'); if (actions.toggleCollapsed) actions.toggleCollapsed(false); } },
+    }),
+    h('button', {
+      class: 'side-rail-btn',
+      title: 'Open page structure',
+      'aria-label': 'Open page structure',
+      html: icon('layers', 16),
+      on: { click: () => { if (actions.selectView) actions.selectView('page'); if (actions.toggleCollapsed) actions.toggleCollapsed(false); } },
+    }),
+  ]);
 
-  const root = h('aside', { class: 'sidebar' }, [tabBar, stack, library, libraryBtn]);
+  const root = h('aside', { class: 'sidebar' }, [top, library, pageView, collapsedRail]);
 
   function section(title, list, onAdd, customBtn) {
     const label = 'New ' + title.slice(0, -1).toLowerCase();
@@ -136,22 +183,25 @@ export function createSidebar(actions, panels) {
     panels.layers.classList.toggle('active', id === 'layers');
   }
 
-  function setLibraryOpen(open) {
-    root.classList.toggle('library-open', !!open);
-    libraryBtn.classList.toggle('open', !!open);
-    libraryBtn.title = open ? 'Back to the page' : 'Projects, sessions, recordings, bookmarks and history';
+  function setView(id) {
+    const next = id === 'page' ? 'page' : 'workspace';
+    root.dataset.view = next;
+    Object.entries(viewButtons).forEach(([key, button]) => {
+      const active = key === next;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
   }
 
   function update(state) {
     const { projects, currentProject, sessions, currentSession, recordings, selectedRecording, sessionCounts, history, bookmarks } = state;
 
-    // The button carries the context you lose by folding the library away.
-    const recCount = (recordings || []).length;
-    libPill.textContent = recCount ? recCount + (recCount === 1 ? ' recording' : ' recordings') : '';
-    libPill.style.display = recCount ? '' : 'none';
-    libMeta.textContent = currentSession
-      ? currentSession.name + (currentProject ? ' · ' + currentProject.name : '')
-      : (currentProject && currentProject.name) || 'No session';
+    const currentCount = currentSession && sessionCounts ? sessionCounts[currentSession.id] || 0 : 0;
+    contextTitle.textContent = currentSession ? currentSession.name : (currentProject && currentProject.name) || 'No session';
+    contextMeta.textContent = currentProject
+      ? currentProject.name + ((recordings || []).length ? ` · ${recordings.length} journeys` : '')
+      : 'Open a page to start reviewing';
+    contextCount.textContent = currentCount + (currentCount === 1 ? ' note' : ' notes');
 
     // Projects
     clear(projectsList);
@@ -262,6 +312,7 @@ export function createSidebar(actions, panels) {
   // Point at a row that just appeared — the drawer is no use if you cannot see
   // what landed in it.
   function revealRow(id) {
+    setView('workspace');
     const el = root.querySelector('[data-row-id="' + String(id).replace(/"/g, '') + '"]');
     if (!el) return false;
     if (el.scrollIntoView) el.scrollIntoView({ block: 'center' });
@@ -272,5 +323,5 @@ export function createSidebar(actions, panels) {
     return true;
   }
 
-  return { root, update, setTab, setLibraryOpen, revealRow };
+  return { root, update, setTab, setView, revealRow };
 }

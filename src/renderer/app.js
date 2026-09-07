@@ -41,7 +41,9 @@ const state = {
   sideTab: 'sections', // left sidebar: 'sections' | 'layers'
   editStacks: { undo: 0, redo: 0 }, // page-edit history, reported by the guest
   styleTarget: null, // selector the Style panel is showing
-  libraryOpen: false, // the projects/sessions/history drawer
+  leftView: 'workspace', // workspace navigation | live page structure
+  leftCollapsed: false,
+  rightCollapsed: false,
   sessionCounts: {},
   // Browser tabs (each is its own <webview>); `wv` aliases the active one.
   tabs: [],
@@ -57,7 +59,7 @@ const state = {
 };
 
 let wv; // the ACTIVE tab's <webview>
-let toolbar, sidebar, notesPanel, sectionsPanel, layersPanel, stylePanel, aiPanel, auditPanel, verifyPanel, tabStrip, webviewHost;
+let toolbar, sidebar, notesPanel, sectionsPanel, layersPanel, stylePanel, aiPanel, auditPanel, verifyPanel, tabStrip, webviewHost, shellBody;
 let statusLeft, statusRight;
 let deviceBadge;
 let tabButtons = {};
@@ -78,10 +80,12 @@ async function boot() {
   state.settings = await caos.settings.get();
   state.providers = await caos.secrets.providers();
   try { state.agentPresets = await caos.agent.detect(); } catch (_e) { state.agentPresets = []; }
-  // The harness boots from a known sidebar, the same way it ignores saved tabs.
+  // The harness boots from a known shell, the same way it ignores saved tabs.
   if (!caos.e2e) {
     if (state.settings.sideTab === 'layers' || state.settings.sideTab === 'sections') state.sideTab = state.settings.sideTab;
-    state.libraryOpen = !!state.settings.libraryOpen;
+    state.leftView = state.settings.leftView === 'page' ? 'page' : 'workspace';
+    state.leftCollapsed = !!state.settings.leftCollapsed;
+    state.rightCollapsed = !!state.settings.rightCollapsed;
   }
   state.systemTheme = await caos.system.theme();
   applyTheme();
@@ -123,6 +127,7 @@ async function boot() {
       exportRecordingAs, importBundleText,
       copyExport, verifySession, openSamplePage, exportClientPack, syncPersonaChrome,
       openOnboarding, coachmarks: () => coachmarks,
+      setLeftView, setSidebarCollapsed,
     };
     import('./lib/e2e.js')
       .then((m) => m.run(internals))
@@ -180,7 +185,8 @@ function buildShell() {
 
   sidebar = createSidebar({
     selectTab: setSideTab,
-    toggleLibrary: () => setLibraryOpen(!state.libraryOpen),
+    selectView: setLeftView,
+    toggleCollapsed: (force) => setSidebarCollapsed('left', force),
     newProject: createProject,
     openProject: openProject,
     renameProject: renameProject,
@@ -290,7 +296,41 @@ function buildShell() {
     p.root.setAttribute('role', 'tabpanel');
     p.root.setAttribute('aria-labelledby', 'tab-' + id);
   });
-  const panel = h('aside', { class: 'panel' }, [tabs, notesPanel.root, stylePanel.root, auditPanel.root, aiPanel.root, verifyPanel.root, footer]);
+  const panelCollapse = h('button', {
+    class: 'panel-collapse',
+    title: 'Collapse review sidebar',
+    'aria-label': 'Collapse review sidebar',
+    html: icon('forward', 15),
+    on: { click: () => setSidebarCollapsed('right') },
+  });
+  const panelTop = h('div', { class: 'panel-top' }, [
+    h('span', { class: 'panel-kicker', text: 'Review & ship' }),
+    panelCollapse,
+  ]);
+  const panelCollapsedRail = h('div', { class: 'panel-collapsed-rail' }, [
+    h('button', {
+      class: 'panel-expand',
+      title: 'Expand review sidebar',
+      'aria-label': 'Expand review sidebar',
+      html: icon('back', 16),
+      on: { click: () => setSidebarCollapsed('right', false) },
+    }),
+    h('button', {
+      class: 'side-rail-btn',
+      title: 'Open Notes',
+      'aria-label': 'Open Notes',
+      html: icon('edit', 16),
+      on: { click: () => { switchTab('notes'); setSidebarCollapsed('right', false); } },
+    }),
+    h('button', {
+      class: 'side-rail-btn',
+      title: 'Open Audit',
+      'aria-label': 'Open Audit',
+      html: icon('audit', 16),
+      on: { click: () => { switchTab('audit'); setSidebarCollapsed('right', false); } },
+    }),
+  ]);
+  const panel = h('aside', { class: 'panel' }, [panelTop, tabs, notesPanel.root, stylePanel.root, auditPanel.root, aiPanel.root, verifyPanel.root, footer, panelCollapsedRail]);
 
   // ---- Stage (tab strip + webview host) ----
   tabStrip = createTabStrip({ newTab: () => createTab(state.config.welcomeUrl), selectTab: setActiveTab, closeTab: closeTab });
@@ -305,14 +345,16 @@ function buildShell() {
   deviceBadge = h('div', { class: 'device-badge' });
   const stage = h('div', { class: 'stage' }, [tabStrip.root, webviewHost, deviceBadge, stageOverlay, statusBar]);
 
-  const body = h('div', { class: 'body' }, [sidebar.root, stage, panel]);
+  shellBody = h('div', { class: 'body' }, [sidebar.root, stage, panel]);
   root.appendChild(toolbar.root);
-  root.appendChild(body);
+  root.appendChild(shellBody);
 
   renderSidebar();
   switchTab(state.activeTab);
   setSideTab(state.sideTab);
-  setLibraryOpen(state.libraryOpen);
+  setLeftView(state.leftView, false);
+  setSidebarCollapsed('left', state.leftCollapsed, false);
+  setSidebarCollapsed('right', state.rightCollapsed, false);
   syncPersonaChrome();
   coachmarks = createCoachmarks({
     isSample: () => isPlaygroundUrl(state.currentUrl),
@@ -334,12 +376,19 @@ function setSideTab(id) {
   if (!caos.e2e) caos.settings.set({ sideTab: id });
 }
 
-// persist=false when WE opened it for you (after saving a recording): a drawer
-// you did not ask for should not become the state you boot into.
-function setLibraryOpen(open, persist = true) {
-  state.libraryOpen = !!open;
-  sidebar.setLibraryOpen(state.libraryOpen);
-  if (persist && !caos.e2e) caos.settings.set({ libraryOpen: state.libraryOpen });
+function setLeftView(id, persist = true) {
+  state.leftView = id === 'page' ? 'page' : 'workspace';
+  sidebar.setView(state.leftView);
+  if (state.leftView === 'page' && state.sideTab === 'sections') requestTree();
+  if (persist && !caos.e2e) caos.settings.set({ leftView: state.leftView });
+}
+
+function setSidebarCollapsed(side, force, persist = true) {
+  const key = side === 'right' ? 'rightCollapsed' : 'leftCollapsed';
+  const value = typeof force === 'boolean' ? force : !state[key];
+  state[key] = value;
+  if (shellBody) shellBody.classList.toggle(side === 'right' ? 'right-collapsed' : 'left-collapsed', value);
+  if (persist && !caos.e2e) caos.settings.set({ [key]: value });
 }
 
 // Ask the guest for the page structure. Coalesced, because navigation, edits and
@@ -360,6 +409,7 @@ function exportBtn(label, format) {
 function switchTab(id) {
   const panels = { notes: notesPanel, style: stylePanel, audit: auditPanel, ai: aiPanel, verify: verifyPanel };
   if (!panels[id]) return;
+  if (state.rightCollapsed) setSidebarCollapsed('right', false);
   state.activeTab = id;
   Object.entries(tabButtons).forEach(([k, b]) => {
     const on = k === id;
@@ -782,6 +832,10 @@ function setupTabWebview(tab) {
       case 'caos:layout-picked':
         if (!isActive()) break;
         layersPanel.setLayout(payload);
+        // The left rail is contextual: selecting something on the page brings
+        // its structure forward, while project/session navigation stays in
+        // Workspace.
+        if (!state.leftCollapsed) setLeftView('page');
         // Keep Sections in step with whatever the page says is selected —
         // clicking an element in Inspect mode lands here too.
         {
@@ -1436,12 +1490,12 @@ async function stopRecording() {
     steps: buffer.steps,
   });
   await refreshRecordings();
-  // Recordings live in the Library drawer, which is folded away by default —
-  // saving one used to leave no visible trace at all. Select it (so Replay
-  // lights up), open the drawer, and point at the row.
+  // Recordings live in Workspace. Select it (so Replay lights up), bring the
+  // workspace rail forward, and point at the row.
   if (saved) {
     selectRecording(saved);
-    setLibraryOpen(true, false);
+    setLeftView('workspace', false);
+    setSidebarCollapsed('left', false, false);
     setTimeout(() => sidebar.revealRow(saved.id), 60);
   }
   toast(`Saved “${name}” (${buffer.steps.length} steps) — Library ▸ Recordings`, 'success', 4200);

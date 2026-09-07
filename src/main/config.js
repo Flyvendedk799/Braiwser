@@ -237,10 +237,11 @@ const DEFAULT_SETTINGS = {
   analyticsOptIn: false,
   crashReportsOptIn: false,
   licenseKey: '',
-  // Left sidebar: which page tab is showing, and whether the library drawer
-  // (projects / sessions / recordings / bookmarks / history) is expanded.
+  // Shell layout: Workspace/Page in the left rail and independent collapse.
   sideTab: 'sections',
-  libraryOpen: false,
+  leftView: 'workspace',
+  leftCollapsed: false,
+  rightCollapsed: false,
   theme: 'dark',
   device: 'fit',
   deviceLandscape: false,
