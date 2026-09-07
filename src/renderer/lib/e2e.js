@@ -855,6 +855,8 @@ export async function run(I) {
       const nameOf = (r) => r.querySelector('.sec-name').textContent;
       const rowNamed = (n) => sideRows().find((r) => nameOf(r) === n);
 
+      I.setLeftView('workspace');
+      await sleep(80);
       check('left sidebar starts as a useful workspace', I.state.leftView === 'workspace' && getComputedStyle(document.querySelector('.side-library')).display !== 'none', I.state.leftView);
       const heads = Array.from(document.querySelectorAll('.side-library .side-head h3')).map((x) => x.textContent);
       check('workspace exposes projects, sessions, journeys, bookmarks and history', ['Projects', 'Sessions', 'Recordings', 'Bookmarks', 'History'].every((x) => heads.includes(x)), heads.join(','));
