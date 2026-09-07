@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Northwind Market</title>
+  <meta name="viewport" content="width=device-width" />
+  <style>
+    :root { --ink: #1a1d24; --muted: #c8c8c8; --paper: #fff; --brand: #c44; --line: #e6e8ee; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Georgia, "Times New Roman", serif; color: var(--ink); background: var(--paper); }
+    header {
+      padding: 28px 32px 18px;
+      border-bottom: 1px solid var(--line);
+    }
+    .eyebrow { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
+    h2 { margin: 6px 0 8px; font-size: 28px; font-weight: 700; }
+    .lede { color: var(--muted); font-size: 16px; max-width: 420px; line-height: 1.45; }
+    main { padding: 28px 32px 80px; display: grid; grid-template-columns: 1.2fr 0.8fr; gap: 28px; align-items: start; }
+    .hero-img { width: 100%; height: 180px; object-fit: cover; background: #ddd; display: block; }
+    .price { font-size: 22px; margin: 12px 0; }
+    .buy {
+      background: #e8a0a0; color: #d09090; border: 0; border-radius: 8px;
+      padding: 12px 22px; font: 700 16px system-ui, sans-serif; cursor: pointer;
+    }
+    .tiny {
+      width: 18px; height: 18px; padding: 0; font-size: 10px; line-height: 18px;
+      border: 1px solid #bbb; background: #f6f6f6; cursor: pointer;
+    }
+    aside { border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+    input { display: block; width: 100%; padding: 8px; margin: 8px 0 12px; font: 14px system-ui, sans-serif; }
+    .ghost { color: transparent; height: 14px; }
+    footer { padding: 16px 32px; font-size: 12px; color: #999; }
+    @media (max-width: 720px) { main { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="eyebrow" data-testid="eyebrow">Limited drop</div>
+    <h2>Weekend market tote</h2>
+    <p class="lede" data-testid="contrast-hero">Pale gray copy on white — this headline contrast fails WCAG AA on purpose so Audit has something real to find.</p>
+  </header>
+  <main>
+    <section>
+      <img class="hero-img" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='800' height='180'%3E%3Crect fill='%23d9cfc4' width='800' height='180'/%3E%3Ctext x='24' y='100' fill='%23776655' font-size='28' font-family='Georgia'%3EProduct photo%3C/text%3E%3C/svg%3E" data-testid="hero-img" />
+      <p class="price">$48</p>
+      <p>Canvas tote with a broken checkout CTA and a cart control too small to tap.</p>
+      <p>
+        <button type="button" id="buy-now" data-testid="buy-now" class="buy">Buy now</button>
+        <button type="button" id="tiny-cart" data-testid="tiny-cart" class="tiny" aria-hidden="true">+</button>
+      </p>
+      <p class="ghost">visually hidden junk</p>
+    </section>
+    <aside>
+      <h4>Notify me</h4>
+      <input id="email-unlabeled" data-testid="email-unlabeled" placeholder="Email address" />
+      <button type="button" id="empty-btn" data-testid="empty-btn"></button>
+      <p style="font-size: 10px; color: #aaa;">We will not actually email you. This field has no label.</p>
+    </aside>
+  </main>
+  <footer>Sample playground for Braiwser — inspect the Buy now button, then copy a prompt or hand off.</footer>
+  <script>
+    document.getElementById('buy-now').addEventListener('click', () => {
+      document.getElementById('buy-now').textContent = 'Sold out?';
+    });
+  </script>
+</body>
+</html>

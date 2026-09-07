@@ -13,9 +13,9 @@ main/
   store/               JSON collections + schema migrations
   services/
     ai/                providers + local synthesis
-    agent/             handoff + templates
+    agent/             handoff + templates + PATH detect
     export/            md / prompt / playwright / element / recording
-    review/            checklists, client pack, HTML report
+    review/            checklists, client pack, HTML report, verify runs
     license.js         Free/Pro activation
     sync.js            optional encrypted snapshot queue
     team.js            workspaces + comments
@@ -26,8 +26,9 @@ main/
     enterprise.js      SSO/marketplace/schema
 renderer/
   app.js               shell controller (tabs, modes, command bus)
-  lib/persona.js       persona empty-state copy
-  components/          panels and modals
+  lib/persona.js       persona chrome, empty states, primary CTA
+  components/          panels, coachmarks, handoff modal, verify
+  sample/playground.html  first-run broken shop
 webview/
   inspector.js         in-page inspect/draw/edit/arrange
   audit.js / recorder.js / replay.js

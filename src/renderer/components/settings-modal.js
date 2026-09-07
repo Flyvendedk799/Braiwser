@@ -266,12 +266,28 @@ export function openSettingsModal({ settings, providers, actions }) {
       },
     }),
   ]);
-  body.appendChild(field('Optional cloud sync', syncRow, 'Local-first. Sign-in enables multi-device project snapshots.'));
+  body.appendChild(field('Optional cloud sync (experimental)', syncRow, 'Local-first. Sign-in queues encrypted snapshots — there is no hosted sync endpoint yet.'));
 
   // ---- Agent hand-off command ----
   const agentInput = h('input', { class: 'input mono', type: 'text', value: settings.agentCommand || '', placeholder: 'e.g. claude -p "Apply the changes in {promptPath}"' });
   agentInput.addEventListener('change', () => persist({ agentCommand: agentInput.value.trim() }));
-  body.appendChild(field('Agent command (hand-off)', agentInput, 'Optional. Runs in the project folder when you hand off a session. Placeholders: {promptPath}, {projectPath}. Leave empty to only write the request file.'));
+  const presetRow = h('div', { class: 'preset-row' });
+  const presets = actions.agentPresets || [];
+  presets.filter((p) => p.id !== 'cat').forEach((p) => {
+    presetRow.appendChild(h('button', {
+      class: `btn btn-sm ${p.available ? '' : 'btn-ghost'}`,
+      text: p.available ? p.label : p.label,
+      title: p.command + (p.available ? '' : ' (not found on PATH)'),
+      on: {
+        click: async () => {
+          agentInput.value = p.command;
+          await persist({ agentCommand: p.command });
+          toast('Agent command set to ' + p.label, 'success');
+        },
+      },
+    }));
+  });
+  body.appendChild(field('Agent command (hand-off)', h('div', {}, [presetRow, agentInput]), 'Optional. Runs in the project folder when you hand off a session. Placeholders: {promptPath}, {projectPath}. Leave empty to only write the request file. Presets fill the command if that CLI is on your PATH.'));
 
   // ---- Restore annotations toggle ----
   const toggle = h('input', { type: 'checkbox', checked: settings.restoreAnnotationsOnLoad !== false });
@@ -293,19 +309,15 @@ export function openSettingsModal({ settings, providers, actions }) {
   modal({ title: 'Profile and Settings', width: 560, body, actions: [{ label: 'Done', kind: 'primary' }] });
 }
 
-export function openOnboardingModal({ settings, providers, actions }) {
-  let provider = settings.aiProvider || 'claude-code';
+export function openOnboardingModal({ settings, actions, onComplete }) {
   const profile = { ...(settings.profile || {}) };
-  const models = { ...(settings.models || {}) };
-  const keyInputs = {};
-  const cards = {};
 
   const body = h('div', { class: 'onboarding-body' }, [
     h('div', { class: 'onboarding-hero' }, [
       h('div', { class: 'onboarding-mark', html: icon('ai', 24) }),
       h('div', {}, [
         h('div', { class: 'onboarding-title', text: 'Welcome to Braiwser' }),
-        h('div', { class: 'onboarding-copy', text: 'Pick how you work, then optionally connect Claude or OpenAI. Everything stays on this machine.' }),
+        h('div', { class: 'onboarding-copy', text: 'Pick how you work. AI keys are optional — local synthesis and a signed-in CLI already work. Next: a sample page with real issues to capture.' }),
       ]),
     ]),
   ]);
@@ -345,74 +357,24 @@ export function openOnboardingModal({ settings, providers, actions }) {
   });
   body.appendChild(field('Profile name', nameInput, 'Optional. This app keeps one local profile on this device.'));
 
-  const radioGroup = h('div', { class: 'radio-group' });
-  PROVIDERS.forEach((p) => {
-    const radio = h('input', { type: 'radio', name: 'onboarding-provider', value: p, checked: provider === p });
-    const badge = h('span', { class: `rc-badge ${isReady(providers, p) ? 'ok' : 'no'}`, text: badgeText(providers, p) });
-    const card = h('label', { class: `radio-card ${provider === p ? 'sel' : ''}` }, [
-      radio,
-      h('span', { class: 'rc-name', text: providerLabel(p) }),
-      badge,
-    ]);
-    radio.addEventListener('change', () => {
-      provider = p;
-      Object.values(cards).forEach((c) => c.card.classList.remove('sel'));
-      card.classList.add('sel');
-    });
-    cards[p] = { card, badge };
-    radioGroup.appendChild(card);
-  });
-  body.appendChild(field('Default AI provider', radioGroup, 'AI tasks use this first. A subscription already signed in on this machine needs nothing else; the API-key providers need a key below.'));
-
-  PROVIDERS.forEach((p) => {
-    const model = modelField(p, models[p], settings.modelChoices, (v) => { models[p] = v; });
-    // A subscription has no key to collect. Offering an empty key box for one
-    // would invite a paste that the save path is right to reject.
-    if (isSubscription(p)) {
-      body.appendChild(field(`${providerLabel(p)} setup`, h('div', { class: 'provider-setup-row' }, [
-        model.root,
-        h('div', { class: 'field-hint', style: { margin: '0' }, text: readiness(providers, p).detail || '' }),
-      ])));
-      return;
-    }
-    const keyInput = h('input', {
-      class: 'input',
-      type: 'password',
-      placeholder: readiness(providers, p).hint ? `Saved (${readiness(providers, p).hint}) — enter a new one to replace` : `Paste ${providerLabel(p)}`,
-    });
-    keyInputs[p] = keyInput;
-    body.appendChild(field(`${providerLabel(p)} setup`, h('div', { class: 'provider-setup-row' }, [
-      model.root,
-      keyInput,
-    ])));
-  });
-
-  async function finish(skipKeys) {
+  async function finish() {
     profile.displayName = nameInput.value.trim();
     await actions.setSettings({
       profile: { ...profile },
       persona,
-      aiProvider: provider,
-      models: { ...models },
       onboardingComplete: true,
     });
-    if (!skipKeys) {
-      for (const p of PROVIDERS) {
-        if (!keyInputs[p]) continue; // a subscription — nothing was collected
-        const key = keyInputs[p].value.trim();
-        if (key) await actions.setKey(p, key);
-      }
-    }
-    toast(skipKeys ? 'Profile setup skipped' : 'Profile ready', skipKeys ? 'info' : 'success');
+    toast('Let’s capture one issue', 'success');
+    if (onComplete) onComplete({ persona });
   }
 
   modal({
     title: 'Welcome',
-    width: 600,
+    width: 560,
     body,
     actions: [
-      { label: 'Skip for now', kind: 'ghost', onClick: () => finish(true) },
-      { label: 'Start using Braiwser', kind: 'primary', onClick: () => finish(false) },
+      { label: 'Skip', kind: 'ghost', onClick: () => finish() },
+      { label: 'Open sample page', kind: 'primary', onClick: () => finish() },
     ],
   });
 }

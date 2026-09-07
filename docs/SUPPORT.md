@@ -12,7 +12,7 @@ The guest page loads the inspector preload from inside the app package. If pins 
 
 ## Hand-off wrote a file but the agent did not run
 
-Set **Agent command** in Settings, e.g. `claude -p "{promptPath}"`. Empty means write-only.
+Pick a preset in the hand-off modal or Settings if `claude`, `cursor-agent`, or `codex` is on your PATH. Or paste an **Agent command** such as `claude -p "{promptPath}"`. Empty still writes the request file — use **Copy prompt** instead.
 
 ## License / Pro features
 

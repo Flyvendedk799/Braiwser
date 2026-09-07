@@ -193,6 +193,7 @@ const SHORTCUTS = [
       ['Search notes', 'Mod+F'],
       ['Copy agent prompt', 'Mod+Shift+C'],
       ['Hand off to coding agent', 'Mod+Shift+H'],
+      ['Verify session', 'Mod+Shift+V'],
       ['Rotate device viewport', 'Mod+Shift+R'],
       ['Keyboard shortcuts', 'Mod+/'],
     ],
@@ -247,6 +248,8 @@ const DEFAULT_SETTINGS = {
   // Optional shell command run on agent hand-off, in the project dir.
   // Supports {promptPath} and {projectPath}. Empty = only write the request file.
   agentCommand: '',
+  coachComplete: false,
+  nextActionDone: false,
 };
 
 module.exports = {
