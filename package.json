@@ -11,16 +11,23 @@
     "dev": "electron . --dev",
     "check": "node scripts/check.js",
     "e2e": "node scripts/e2e.js",
-    "test": "npm run check && npm run e2e",
+    "test": "npm run check && npm run test:unit && npm run e2e",
     "dist": "electron-builder",
     "dist:dir": "electron-builder --dir",
-    "release": "electron-builder --publish always"
+    "release": "electron-builder --publish always",
+    "test:unit": "node --test \"test/**/*.test.js\" \"test/**/*.test.cjs\" \"test/**/*.test.mjs\" \"src/**/*.test.js\""
   },
   "build": {
     "appId": "com.braiwser.app",
     "productName": "Braiwser",
-    "files": ["src/**/*", "package.json", "schema/**/*"],
-    "directories": { "output": "dist" },
+    "files": [
+      "src/**/*",
+      "package.json",
+      "schema/**/*"
+    ],
+    "directories": {
+      "output": "dist"
+    },
     "publish": [
       {
         "provider": "github",
@@ -30,12 +37,23 @@
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "hardenedRuntime": true,
       "gatekeeperAssess": false
     },
-    "win": { "target": ["nsis"] },
-    "linux": { "target": ["AppImage"] }
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ]
+    }
   },
   "devDependencies": {
     "electron": "^33.2.0",
@@ -43,6 +61,12 @@
   },
   "dependencies": {
     "@flyvendedk799/ai-auth": "github:Flyvendedk799/ai-auth",
-    "electron-updater": "^6.3.9"
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "electron-updater": "^6.3.9",
+    "playwright-core": "1.64.0",
+    "zod": "4.6.5"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }
