@@ -2093,6 +2093,14 @@ const audit = require('./audit');
   function startTextEdit(el, point) {
     if (!isTextEditable(el)) return false;
     finishTextEdit();
+    // Do not paint the inspect highlight over the text being edited — it makes
+    // the live change look like it never applied.
+    try {
+      if (highlight) highlight.style.display = 'none';
+      if (tooltip) tooltip.style.display = 'none';
+    } catch (_e) {
+      /* ignore */
+    }
     editingText = { el, before: el.textContent };
     try {
       el.setAttribute('contenteditable', 'plaintext-only');
@@ -2786,6 +2794,8 @@ const audit = require('./audit');
       const p = payload || {};
       const el = p.selector ? document.querySelector(p.selector) : editSel;
       if (!el || typeof p.text !== 'string' || !isTextEditable(el)) return;
+      // Never clobber an in-progress page edit with a stale Style-panel value.
+      if (editingText && editingText.el === el) return;
       const before = el.textContent;
       if (before === p.text) return;
       el.textContent = p.text;

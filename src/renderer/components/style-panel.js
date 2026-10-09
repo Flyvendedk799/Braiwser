@@ -78,6 +78,7 @@ function matchFont(options, value) {
 export function createStylePanel(actions) {
   let info = null; // last caos:style-picked payload
   let editingText = false;
+  let suppressTextCommit = false;
 
   const header = h('div', { class: 'st-header' });
   const body = h('div', { class: 'st-body' });
@@ -348,25 +349,42 @@ export function createStylePanel(actions) {
       ])
     );
 
+    // Suppress Content-textarea blur commits while we tear the panel down —
+    // otherwise a re-render after a page text save writes the old value back.
+    suppressTextCommit = true;
     clear(body);
+    suppressTextCommit = false;
 
-    // Copy — the thing people reach for first.
+    // Copy — the thing people reach for first. While the page itself is being
+    // typed into, keep this field out of the DOM: a stale textarea blur after
+    // re-render was writing the old copy back over a successful page edit.
     if (info.editableText) {
-      const ta = h('textarea', { class: 'st-text', value: info.text || '', rows: '3' });
-      const commit = () => {
-        if (ta.value !== (info.text || '')) actions.setText(ta.value);
-      };
-      ta.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-          e.preventDefault();
-          commit();
-          ta.blur();
-        }
-      });
-      ta.addEventListener('blur', commit);
-      body.appendChild(
-        group('Content', [ta, h('div', { class: 'st-hint', text: 'Edit here, or double-click the text on the page.' })])
-      );
+      if (editingText) {
+        body.appendChild(
+          group('Content', [
+            h('div', { class: 'st-editing', text: 'Typing on the page — click away or press Esc to finish.' }),
+          ])
+        );
+      } else {
+        const baseline = info.text || '';
+        const ta = h('textarea', { class: 'st-text', value: baseline, rows: '3' });
+        const commit = () => {
+          if (suppressTextCommit || editingText) return;
+          if (!ta.isConnected) return;
+          if (ta.value !== (info.text || '')) actions.setText(ta.value);
+        };
+        ta.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            commit();
+            ta.blur();
+          }
+        });
+        ta.addEventListener('blur', commit);
+        body.appendChild(
+          group('Content', [ta, h('div', { class: 'st-hint', text: 'Edit here, or double-click the text on the page.' })])
+        );
+      }
     }
 
     const fonts = (info.pageFonts || []).map((f) => [f, f.split(',')[0].replace(/["']/g, '').slice(0, 24)]);
@@ -418,8 +436,6 @@ export function createStylePanel(actions) {
         h('div', { class: 'st-hint', text: 'Drag a label sideways to scrub it. Shift for ×10, Alt for tenths.' }),
       ])
     );
-
-    if (editingText) body.appendChild(h('div', { class: 'st-editing', text: 'Typing on the page — click away or press Esc to finish.' }));
   }
 
   function cssText(inline) {
@@ -435,6 +451,9 @@ export function createStylePanel(actions) {
 
   function setTextEditing(on) {
     editingText = !!on;
+    // Re-render so the Content textarea is removed while the page is being
+    // typed into (and restored with the fresh copy when editing ends).
+    if (info) render();
   }
 
   empty();
