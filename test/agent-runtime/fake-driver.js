@@ -50,8 +50,8 @@ const DEFAULT_SITE = {
 
 const norm = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
 
-function createFakeDriver({ name = 'playwright', modes = ['headless', 'visible'], humanHandoff = 'native', requestInterception = false, site = DEFAULT_SITE, seed = 1 } = {}) {
-  const world = { dispatchLog: [], inputLog: [], submissions: [], badges: [], pagesCreated: 0, sessionsOpened: 0, sessionsClosed: 0, inputsAfterClose: 0 };
+function createFakeDriver({ name = 'playwright', modes = ['headless', 'visible'], humanHandoff = 'native', requestInterception = false, site = DEFAULT_SITE, seed = 1, viewport = true, screenshots = true } = {}) {
+  const world = { dispatchLog: [], inputLog: [], captures: [], submissions: [], badges: [], pagesCreated: 0, sessionsOpened: 0, sessionsClosed: 0, inputsAfterClose: 0 };
   const rng = mulberry32(seed);
   const ctl = {
     delays: { observe: 0, resolve: 0, act: 0, navigate: 0, assertion: 0 },
@@ -62,6 +62,10 @@ function createFakeDriver({ name = 'playwright', modes = ['headless', 'visible']
     failResolve: null, // 'stale' | 'ambiguous'
     redirects: {}, // url -> url
     failNavigation: false,
+    captureBytes: 0, // when > 0 every capture returns this many bytes (size-cap tests)
+    failCapture: null, // 'invalid' (transformed meta) | 'throw' | 'empty'
+    viewportMismatch: false, // setViewport dispatches but the read-back differs (no verification)
+    noViewportEpochBump: false, // a driver that forgets to announce the resize (the broker must still invalidate refs)
     onEmit: null, // (entry) => void, called synchronously at the moment input is emitted
     snapshotOwner: null, // () => any, recorded with each dispatch
   };
@@ -78,6 +82,7 @@ function createFakeDriver({ name = 'playwright', modes = ['headless', 'visible']
       this.events = new EventEmitter();
       this.events.setMaxListeners(50);
       this.documentEpoch = 0;
+      this.viewport = { width: 800, height: 600 };
       this._url = 'about:blank';
       this.doc = { elements: [] };
       this.closed = false;
@@ -87,7 +92,7 @@ function createFakeDriver({ name = 'playwright', modes = ['headless', 'visible']
     url() { return this._url; }
     _load(url) {
       const def = site[url] || { elements: [] };
-      this.doc = { elements: JSON.parse(JSON.stringify(def.elements)) };
+      this.doc = { elements: JSON.parse(JSON.stringify(def.elements)), ...(def.pagination ? { pagination: JSON.parse(JSON.stringify(def.pagination)) } : {}) };
       this._url = url;
       this.documentEpoch += 1;
     }
@@ -120,7 +125,9 @@ function createFakeDriver({ name = 'playwright', modes = ['headless', 'visible']
       const slice = all.slice(start, start + maxNodes);
       const end = start + slice.length;
       return {
-        nodes: slice.map((e) => ({ refId: `${this.documentEpoch}:${e.id}`, role: e.role, name: e.name, enabled: e.enabled !== false, editable: e.editable === true, testId: e.testId, frameId: null, traits: e.traits || [] })),
+        nodes: slice.map((e) => ({ refId: `${this.documentEpoch}:${e.id}`, role: e.role, name: e.name, enabled: e.enabled !== false, editable: e.editable === true, testId: e.testId, frameId: null, traits: e.traits || [],
+          ...(e.table ? { table: e.table } : {}), ...(e.list ? { list: e.list } : {}) })),
+        ...(this.doc.pagination ? { pagination: this.doc.pagination } : {}),
         coverage: { framesSeen: 1, framesUnavailable: 0, nodesReturned: slice.length },
         truncated: end < all.length, nextCursor: end < all.length ? `o${end}` : null,
       };
@@ -162,8 +169,8 @@ function createFakeDriver({ name = 'playwright', modes = ['headless', 'visible']
         const k = cmd.action.kind;
         if (k === 'click') this._effect(el.onClick);
         else if (k === 'fill') el.value = cmd.action.text;
-        else if (k === 'check') el.checked = cmd.action.checked;
-        else if (k === 'select') el.value = cmd.action.value;
+        else if (k === 'check') { el.checked = cmd.action.checked; this._effect(el.onCheck); }
+        else if (k === 'select') { el.value = cmd.action.value; this._effect(el.onSelect); }
         else if (k === 'press') { if (cmd.action.key === 'Enter') this._effect(el.onEnter || el.onClick); }
       };
       if (ctl.hang) {
@@ -186,7 +193,7 @@ function createFakeDriver({ name = 'playwright', modes = ['headless', 'visible']
     _find(target) {
       if (!target) return [];
       const els = this.doc.elements;
-      if (target.by === 'role') return els.filter((e) => e.role === target.role && norm(e.name) === norm(target.name));
+      if (target.by === 'role') return els.filter((e) => e.role === target.role && (target.name === undefined || norm(e.name) === norm(target.name)));
       if (target.by === 'testId') return els.filter((e) => e.testId === target.value);
       if (target.by === 'label') return els.filter((e) => norm(e.name) === norm(target.value));
       return [];
@@ -207,7 +214,40 @@ function createFakeDriver({ name = 'playwright', modes = ['headless', 'visible']
       }
       return make(false, 'unsupported-assertion');
     }
-    async screenshot() { return { bytes: Buffer.from('fake-png'), meta: { url: this._url, viewport: { width: 800, height: 600 }, scale: 1, scroll: { x: 0, y: 0 }, capturedAt: Date.now(), transformed: false } }; }
+    async screenshot() { return { bytes: Buffer.from('fake-png'), meta: { url: this._url, viewport: { ...this.viewport }, scale: 1, scroll: { x: 0, y: 0 }, capturedAt: new Date().toISOString(), transformed: false } }; }
+    // Unmodified pixels of the viewport, or of one observed element. Mirrors the Playwright driver's shape.
+    async capture({ refId } = {}) {
+      if (this.closed) throw Object.assign(new Error('closed'), { code: 'PAGE_CLOSED' });
+      if (this.crashed) throw Object.assign(new Error('crashed'), { code: 'PAGE_CRASHED' });
+      world.captures.push({ refId: refId || null, viewport: { ...this.viewport }, url: this._url });
+      if (ctl.failCapture === 'throw') throw Object.assign(new Error('capture failed'), { code: 'CAPTURE_FAILED' });
+      let clip = null;
+      if (refId) { this.resolve(refId); clip = { x: 0, y: 0, width: Math.min(100, this.viewport.width), height: 40 }; }
+      const shot = await this.screenshot();
+      shot.meta.documentEpoch = this.documentEpoch;
+      shot.meta.clip = clip;
+      shot.bytes = Buffer.from(`fake-png:${this.viewport.width}x${this.viewport.height}:${refId || 'page'}`);
+      if (ctl.captureBytes > 0) shot.bytes = Buffer.alloc(ctl.captureBytes, 7);
+      if (ctl.failCapture === 'invalid') shot.meta.transformed = true;
+      if (ctl.failCapture === 'empty') shot.bytes = Buffer.alloc(0);
+      return shot;
+    }
+    // Emulated window size: a state change (the document epoch moves and every ref dies) that is logged as input.
+    async setViewport({ width, height }, control) {
+      if (this.closed) throw Object.assign(new Error('closed'), { code: 'PAGE_CLOSED' });
+      if (!Number.isInteger(width) || !Number.isInteger(height) || width < 240 || height < 240 || width > 4096 || height > 4096) throw Object.assign(new Error('bad viewport'), { code: 'UNSUPPORTED' });
+      if (control && control.check) control.check();
+      await wait(ctl.delays.resolve);
+      if (control && control.beforeDispatch) control.beforeDispatch();
+      const entry = { operationId: control && control.operationId, kind: 'setViewport', elementId: null, width, height, url: this._url, fakePageId: this.pageId, at: Date.now(), epoch: this.documentEpoch };
+      world.dispatchLog.push(entry); world.inputLog.push(entry);
+      if (ctl.onEmit) ctl.onEmit(entry);
+      this.viewport = { width, height };
+      this.documentEpoch += 1;
+      if (!ctl.noViewportEpochBump) this.events.emit('navigated', { url: this._url, kind: 'viewport' });
+      const matches = !ctl.viewportMismatch;
+      return { status: matches ? 'verified' : 'dispatched', evidence: [{ kind: 'state-change', observed: true, change: 'viewport', width, height, matches, documentEpoch: this.documentEpoch }] };
+    }
     setOwnerBadge(owner) { world.badges.push({ pageId: this.pageId, owner }); }
     openPopup(url) {
       const p = new FakePage(this.sessionState, this);
@@ -226,7 +266,7 @@ function createFakeDriver({ name = 'playwright', modes = ['headless', 'visible']
     name,
     capabilities() {
       return { driver: name, version: 'fake-1', dom: true, frames: false, shadowDom: false, canvas: false, popups: true, downloads: false, uploads: false, dialogs: false,
-        permissions: false, screenshots: true, humanHandoff, liveModeSwitch: false, modes: [...modes], requestInterception };
+        permissions: false, screenshots, viewport, humanHandoff, liveModeSwitch: false, modes: [...modes], requestInterception };
     },
     async open(opts = {}) {
       if (ctl.failOpen) throw new Error('driver failed to launch');

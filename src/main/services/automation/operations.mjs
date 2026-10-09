@@ -11,7 +11,7 @@ import { toMcpReceipt } from './receipt.mjs';
 import {
   SCHEMA_VERSION, DEFAULT_RESPONSE_BUDGET, inputs, envelope, errorSchema,
   sessionSchema, observationSchema, receiptSchema, extractSchema, handoffSchema, runSchema,
-  verdictConsistent, isProvenPass, id as idSchema,
+  verdictConsistent, isProvenPass, id as idSchema, tableSchema, listSchema, paginationSchema,
 } from './schemas.mjs';
 
 const { RegistryError } = registryModule;
@@ -72,6 +72,12 @@ function projectNodes(rawNodes, notes) {
     if (typeof n.enabled === 'boolean') node.enabled = n.enabled;
     if (typeof n.editable === 'boolean') node.editable = n.editable;
     if (typeof n.frameId === 'string' && idSchema.safeParse(n.frameId).success) node.frameId = n.frameId;
+    // A malformed structure payload is dropped (and counted), never relayed.
+    for (const [key, schema] of [['table', tableSchema], ['list', listSchema]]) {
+      if (n[key] === undefined) continue;
+      const parsed = schema.safeParse(n[key]);
+      if (parsed.success) node[key] = parsed.data; else notes.structuresDropped = (notes.structuresDropped || 0) + 1;
+    }
     nodes.push(node);
   }
   return nodes;
@@ -88,6 +94,8 @@ function projectObservation(raw, args) {
     }
   }
   const nodes = projectNodes(raw.nodes, notes);
+  const parsedPagination = raw.pagination === undefined ? null : paginationSchema.safeParse(raw.pagination);
+  const pagination = parsedPagination && parsedPagination.success ? parsedPagination.data : null;
   if (Array.isArray(raw.nodes) && raw.nodes.length > 200) notes.nodesOmittedForLimit = raw.nodes.length - 200;
   Object.assign(coverage, notes);
   return observationSchema.parse({
@@ -96,6 +104,7 @@ function projectObservation(raw, args) {
     // Credential-looking query values and embedded credentials never reach the model.
     url: repro.redactUrl(cut(raw.url, 2000)) || '',
     nodes, coverage,
+    ...(pagination ? { pagination } : {}),
     truncated: raw.truncated === true || (Array.isArray(raw.nodes) && raw.nodes.length > 200),
     nextCursor: raw.nextCursor == null ? null : raw.nextCursor,
     trust: 'untrusted-page',

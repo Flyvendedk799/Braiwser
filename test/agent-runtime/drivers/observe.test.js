@@ -158,3 +158,64 @@ test('coverage reports cross-origin and unavailable frames without flattening', 
     assert.ok(cov.limitations.includes(l), l);
   }
 });
+
+// ---- tables, lists, pagination hints ----------------------------------------------------------------------------
+const tableItem = (name, table) => ({ kind: 'table', role: 'table', name, tag: 'table', type: '', ctx: '', table });
+const smallTable = (cells) => ({ rowCount: cells.length, rowsExact: true, columnCount: 2, hasHeader: true, headers: ['A', 'B'], cells, truncated: { rows: false, columns: false, cells: 0 }, merged: false, withheld: [] });
+
+test('publicNode carries a bounded table / list payload and re-clips every string', () => {
+  const t = obs.publicNode(tableItem('Orders', smallTable([['a‮b', 'x'.repeat(500)], [null, '']])), null);
+  assert.equal(t.table.cells[0][0], 'a b');
+  assert.ok(t.table.cells[0][1].length <= 80);
+  assert.deepEqual(t.table.cells[1], [null, ''], 'withheld (null) and empty ("") stay distinguishable');
+  const l = obs.publicNode({ kind: 'list', role: 'list', name: '', tag: 'ul', list: { ordered: true, itemCount: 100, items: Array.from({ length: 100 }, (_, i) => `i${i}`), truncated: { items: true, cells: 0 } } }, null);
+  assert.equal(l.list.items.length, 30); assert.equal(l.list.itemCount, 100); assert.equal(l.list.truncated.items, true);
+  const evil = obs.boundTable({ headers: new Array(40).fill('h'), cells: new Array(90).fill(new Array(40).fill('c')), withheld: [1, -1, 99, 'x'], rowCount: 'many' });
+  assert.equal(evil.headers.length, 12); assert.ok(evil.cells.length <= 50); assert.ok(evil.cells.every((r) => r.length <= 12));
+  assert.deepEqual(evil.withheld, [1]); assert.equal(evil.rowCount, evil.cells.length); assert.equal(evil.truncated.rows, true);
+  assert.equal(obs.boundTable(null).cells.length, 0, 'garbage in, an empty bounded table out');
+});
+
+test('a table\'s content is part of its state signature, so a delta cannot hide a changed cell', () => {
+  const a = obs.publicNode(tableItem('Orders', smallTable([['1', 'x']])), null);
+  const b = obs.publicNode(tableItem('Orders', smallTable([['1', 'y']])), null);
+  assert.notEqual(obs.stateSig(a), obs.stateSig(b));
+  assert.equal(obs.stateSig(a), obs.stateSig(obs.publicNode(tableItem('Orders', smallTable([['1', 'x']])), null)));
+});
+
+test('assembled observations stay within 64 KiB and 200 nodes with many large tables', () => {
+  const big = Array.from({ length: 50 }, (_, i) => Array.from({ length: 12 }, (_x, j) => `${i}-${j}-` + 'é'.repeat(70)));
+  const items = Array.from({ length: 12 }, (_, i) => tableItem(`T${i}`, smallTable(big)));
+  const h = harness();
+  const o = h.run(items);
+  assert.ok(obs.serializedBytes(o) <= obs.LIMITS.maxBytes, `${obs.serializedBytes(o)} bytes`);
+  assert.ok(o.nodes.length < items.length && o.truncated === true && o.nextCursor, 'tables beyond the byte budget move to the next page, explicitly');
+});
+
+test('pagination hints: accessible names only, links and buttons only, ambiguity reported without a ref', () => {
+  const node = (role, name, extra) => ({ refId: `r_${role}_${name}`, role, name, ...(extra || {}) });
+  assert.deepEqual(obs.paginationHints([node('link', 'Next'), node('link', 'Previous', { enabled: false }), node('heading', 'Next')]),
+    { next: { refId: 'r_link_Next', name: 'Next', enabled: true }, prev: { refId: 'r_link_Previous', name: 'Previous', enabled: false } });
+  assert.equal(obs.paginationHints([node('link', 'Nextel'), node('textbox', 'Next'), node('link', 'Go to next section')]), null);
+  for (const name of ['Next page', 'Older', 'next ›', '›', '»', 'Forward']) assert.ok(obs.paginationHints([node('button', name)]).next, name);
+  for (const name of ['Prev', 'Previous page', 'Newer', '‹', '« Previous', 'Back']) assert.ok(obs.paginationHints([node('button', name)]).prev, name);
+  const amb = obs.paginationHints([node('link', 'Next'), node('button', 'Next page'), node('link', 'Previous')]);
+  assert.deepEqual(amb.ambiguous, ['next']); assert.equal(amb.next, undefined); assert.ok(amb.prev);
+  assert.equal(obs.paginationHints([]), null);
+});
+
+test('assembleObservation attaches the hint with the refs minted for this observation', () => {
+  const h = harness();
+  const o = h.run([item('Save'), { ...item('Next'), role: 'link' }, tableItem('Orders', smallTable([['1', '2']]))]);
+  const next = o.nodes.find((n) => n.name === 'Next');
+  assert.deepEqual(o.pagination, { next: { refId: next.refId, name: 'Next', enabled: true } });
+});
+
+test('viewport evidence uses the closed state-change kind and role locators may omit the name', () => {
+  assert.deepEqual(obs.evidence.viewport(375, 812, true, 4), { kind: 'state-change', observed: true, change: 'viewport', width: 375, height: 812, matches: true, documentEpoch: 4 });
+  assert.deepEqual(obs.normalizeLocator({ by: 'role', role: 'Row' }), { by: 'role', role: 'row' });
+  assert.deepEqual(obs.normalizeLocator({ by: 'role', role: 'row', name: '' }), { by: 'role', role: 'row', name: '' });
+  assert.equal(obs.normalizeLocator({ by: 'role', role: 'row', name: 5 }), null);
+  assert.equal(obs.locatorLabel({ by: 'role', role: 'row' }), 'role=row');
+  assert.equal(obs.LIMITS.minViewport, 240); assert.equal(obs.LIMITS.maxViewport, 4096);
+});

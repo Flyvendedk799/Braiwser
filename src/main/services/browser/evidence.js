@@ -216,7 +216,8 @@ function createEvidenceStore({ dir, fs = nodeFs, clock = { now: () => Date.now()
     }
     const binary = !mime.startsWith('application/json') && !mime.startsWith('text/');
     if (binary) {
-      const slice = buf.subarray(offset, offset + Math.floor(maxBytes * 0.75));
+      // base64 grows 4/3; leave room for the envelope so the whole serialized response stays within maxBytes
+      const slice = buf.subarray(offset, offset + Math.max(1, Math.floor((maxBytes - 600) * 0.75)));
       const end = offset + slice.length;
       return { uri, mimeType: mime, encoding: 'base64', data: slice.toString('base64'), truncated: end < buf.length, totalBytes: buf.length, returnedBytes: slice.length, nextCursor: end < buf.length ? String(end) : null };
     }

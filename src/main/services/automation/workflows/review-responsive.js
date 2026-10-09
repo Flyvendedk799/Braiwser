@@ -7,6 +7,7 @@
 const { z } = require('zod');
 const wf = require('../workflow-core');
 const { RegistryError } = require('./_shared');
+const { VIEWPORT_MIN, VIEWPORT_MAX } = require('../../../../shared/browser-contracts');
 
 const manifest = Object.freeze({
   id: 'review-responsive',
@@ -28,8 +29,8 @@ const DEFAULT_VIEWPORTS = Object.freeze([
 
 const viewport = z.strictObject({
   name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,23}$/),
-  width: z.number().int().min(200).max(4000),
-  height: z.number().int().min(200).max(4000),
+  width: z.number().int().min(VIEWPORT_MIN).max(VIEWPORT_MAX),
+  height: z.number().int().min(VIEWPORT_MIN).max(VIEWPORT_MAX),
 });
 const landmark = z.strictObject({ role: z.string().min(1).max(80), name: z.string().min(1).max(200) });
 

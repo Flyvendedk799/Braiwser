@@ -795,6 +795,7 @@ class ElectronDriver {
       dialogs: false,
       permissions: false,
       screenshots: false, // wc.capturePage path implemented, not natively confirmed
+      viewport: false, // a guest <webview> is sized by the app window; no emulated viewport in this driver
       humanHandoff: 'native',
       liveModeSwitch: false,
       modes: ['visible'],

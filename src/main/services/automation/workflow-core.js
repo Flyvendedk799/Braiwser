@@ -23,6 +23,9 @@ const short = z.string().min(1).max(200);
 const stepId = z.string().regex(/^[A-Za-z0-9_.:-]{1,80}$/, 'Invalid step ID');
 const inputKey = z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,39}$/, 'Invalid input key');
 const KEYS = ['Enter', 'Tab', 'Escape', 'ArrowDown', 'ArrowUp'];
+// The broker's validatePlan (src/shared/browser-contracts.js) is the authority; every limit here must be equal or
+// tighter so a plan that passes this schema is never refused by the broker (test: plan-subset).
+const { VIEWPORT_MIN, VIEWPORT_MAX } = require('../../../shared/browser-contracts');
 
 // Semantic locators only. Refs are ephemeral and CSS paths are brittle; neither
 // is a durable, reviewable contract. The broker resolves a target into a fresh
@@ -51,7 +54,7 @@ const step = z.discriminatedUnion('type', [
   z.strictObject({ id: stepId, type: z.literal('check'), target, checked: z.boolean() }),
   z.strictObject({ id: stepId, type: z.literal('press'), target, key: z.enum(KEYS) }),
   z.strictObject({ id: stepId, type: z.literal('setViewport'),
-    width: z.number().int().min(200).max(4000), height: z.number().int().min(200).max(4000) }),
+    width: z.number().int().min(VIEWPORT_MIN).max(VIEWPORT_MAX), height: z.number().int().min(VIEWPORT_MIN).max(VIEWPORT_MAX) }),
   // Evidence only: a capture can never make a run pass.
   z.strictObject({ id: stepId, type: z.literal('capture'), label: short, target: target.optional() }),
   z.strictObject({ id: stepId, type: z.literal('assert'), target: target.optional(),

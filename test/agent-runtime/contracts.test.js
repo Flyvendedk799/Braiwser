@@ -133,3 +133,66 @@ test('redaction removes secrets from text, urls and nested values', () => {
   assert.equal(redactValue(circular).self, '[circular]');
   assert.ok(redactText('x'.repeat(5000)).length < 2100);
 });
+
+test('setViewport is a closed, bounded, ref-less action', () => {
+  assert.deepEqual(C.validateAction({ kind: 'setViewport', width: 375, height: 812 }), { kind: 'setViewport', width: 375, height: 812 });
+  for (const bad of [{ width: 239, height: 800 }, { width: 800, height: 4097 }, { width: 800.5, height: 800 }, { width: '800', height: 800 }, { width: 800 }, { width: 800, height: 800, ref: 'r_1' }, { width: 800, height: 800, deviceScaleFactor: 2 }]) {
+    assert.throws(() => C.validateAction({ kind: 'setViewport', ...bad }), (e) => e.publicError.code === 'DENIED', JSON.stringify(bad));
+  }
+  const base = { sessionId: 's', pageId: 'p', documentEpoch: 3, operationId: 'o1' };
+  assert.equal(C.validateAct({ ...base, action: { kind: 'setViewport', width: 500, height: 500 } }).action.width, 500, 'no observation is needed');
+  assert.ok(C.ACTION_KINDS.includes('setViewport') && C.REFLESS_ACTIONS.includes('setViewport') && !C.REFLESS_ACTIONS.includes('click'));
+});
+
+test('plan validation covers select / check / press / setViewport / capture and the exists / count / url assertions', () => {
+  const plan = (steps, inputKeys = ['plan']) => ({ schemaVersion: 1, skillId: 'verify-journey', version: '1.0.0', inputKeys, maxDurationMs: 5000, steps });
+  const tail = { id: 'z', type: 'assert', kind: 'url', op: 'contains', expected: 'app' };
+  const good = [
+    { id: 'a', type: 'select', target: { by: 'label', value: 'Plan' }, inputKey: 'plan' },
+    { id: 'b', type: 'check', target: { by: 'role', role: 'checkbox', name: 'Terms' }, checked: false },
+    { id: 'c', type: 'press', target: { by: 'testId', value: 'q' }, key: 'Tab' },
+    { id: 'd', type: 'setViewport', width: 240, height: 4096 },
+    { id: 'e', type: 'capture', label: 'page' },
+    { id: 'f', type: 'capture', label: 'crop', target: { by: 'role', role: 'navigation' } },
+    { id: 'g', type: 'assert', kind: 'exists', op: 'equals', expected: 'exists', target: { by: 'role', role: 'row' } },
+    { id: 'h', type: 'assert', kind: 'count', op: 'contains', expected: '3', target: { by: 'role', role: 'row' } },
+  ];
+  const v = C.validatePlan(plan([...good, tail]));
+  assert.deepEqual(v.steps.map((s) => s.type), ['select', 'check', 'press', 'setViewport', 'capture', 'capture', 'assert', 'assert', 'assert']);
+  assert.deepEqual(v.steps[5].target, { by: 'role', role: 'navigation' }, 'a role-only target stays role-only');
+  assert.equal(C.validatePlan(plan([tail])).steps[0].target, undefined, 'a url assertion has no target');
+  const rejects = (steps, inputKeys) => assert.throws(() => C.validatePlan(plan([...steps, tail], inputKeys)), undefined, JSON.stringify(steps));
+  rejects([{ id: 'a', type: 'select', target: { by: 'label', value: 'Plan' }, inputKey: 'other' }]); // undeclared
+  rejects([{ id: 'a', type: 'select', target: { by: 'label', value: 'Plan' } }]);
+  rejects([{ id: 'a', type: 'check', target: { by: 'label', value: 'T' }, checked: 'yes' }]);
+  rejects([{ id: 'a', type: 'press', target: { by: 'label', value: 'T' }, key: 'F12' }]);
+  rejects([{ id: 'a', type: 'click', target: { by: 'role', role: 'button' } }]); // an action needs a name
+  rejects([{ id: 'a', type: 'setViewport', width: 239, height: 800 }]);
+  rejects([{ id: 'a', type: 'setViewport', width: 800, height: 4097 }]);
+  rejects([{ id: 'a', type: 'setViewport', width: 800, height: 800, deviceScaleFactor: 2 }]);
+  rejects([{ id: 'a', type: 'capture' }]);
+  rejects([{ id: 'a', type: 'capture', label: 'x'.repeat(201) }]);
+  rejects([{ id: 'a', type: 'capture', label: 'x', selector: '#a' }]);
+  rejects([{ id: 'a', type: 'assert', kind: 'exists', op: 'equals', expected: 'gone', target: { by: 'role', role: 'row' } }]);
+  rejects([{ id: 'a', type: 'assert', kind: 'count', op: 'equals', expected: '-1', target: { by: 'role', role: 'row' } }]);
+  rejects([{ id: 'a', type: 'assert', kind: 'count', op: 'equals', expected: '1' }]); // count needs a target
+  rejects([{ id: 'a', type: 'assert', kind: 'url', op: 'equals', expected: '', }]);
+  rejects([{ id: 'a', type: 'assert', kind: 'url', op: 'equals', expected: 'x', target: { by: 'role', role: 'row' } }]);
+  rejects([{ id: 'a', type: 'assert', kind: 'text', op: 'equals', expected: 'x', target: { by: 'role', role: 'status' } }]); // text needs a name
+  rejects([{ id: 'a', type: 'assert', kind: 'text', op: 'matches', expected: 'x', target: { by: 'label', value: 'S' } }]); // no regex
+  assert.throws(() => C.validatePlan(plan([{ id: 'a', type: 'evaluate', code: '1' }, tail])), (e) => e.publicError.code === 'UNSUPPORTED');
+});
+
+test('startRun arguments: strings or small plain JSON; anything exotic is refused', () => {
+  const base = { sessionId: 's', pageId: 'p', requestKey: 'k', skillId: 'x', skillVersion: '1.0.0' };
+  const ok = C.validateStartRun({ ...base, inputs: { name: 'Bob', landmarks: [{ role: 'main', name: 'Content' }], n: 3, flag: true, nothing: null } });
+  assert.deepEqual(ok.inputs.landmarks, [{ role: 'main', name: 'Content' }]);
+  const input = { a: 1 };
+  const out = C.validateStartRun({ ...base, inputs: input });
+  assert.notEqual(out.inputs, input, 'the broker works on a copy');
+  for (const bad of [{ f: () => 1 }, { n: Infinity }, { d: new Date() }, { s: 'x'.repeat(10001) }, { deep: { a: { b: { c: { d: { e: { f: 1 } } } } } } },
+    { big: new Array(600).fill(0) }, { huge: new Array(40).fill('x'.repeat(500)) }, { m: new Map() }]) {
+    assert.throws(() => C.validateStartRun({ ...base, inputs: bad }), /INVALID_INPUT/, Object.keys(bad)[0]);
+  }
+  assert.throws(() => C.validateStartRun({ ...base, inputs: Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`k${i}`, 'v'])) }), /<=20 keys/);
+});

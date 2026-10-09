@@ -6,7 +6,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { browserAvailable, openFixtureSession, nodeByName, waitFor, displayAvailable } = require('./_env');
+const { browserAvailable, openFixtureSession, nodeByName, waitFor, displayAvailable, noopControl } = require('./_env');
 
 const MODES = ['headless', 'visible'];
 const avail = {};
@@ -96,6 +96,18 @@ async function runTask(env) {
   await waitFor(() => seen.some((x) => x.state === 'rejected'));
   out.download = seen.filter((x) => x.state === 'rejected').map((x) => x.reason);
 
+  // viewport, capture and table / list / pagination observation are identical headless and headed
+  await page.navigate(env.url('responsive-buggy.html'));
+  const navVisible = async () => (await page.evaluateAssertion({ kind: 'visible', target: { by: 'role', role: 'navigation', name: 'Primary' } })).status;
+  const resized = await attempt(page.setViewport({ width: 375, height: 700 }, noopControl()));
+  const navAt375 = await navVisible();
+  const shot = await page.capture({});
+  out.viewport = { resized, navAt375, shot: { w: shot.bytes.readUInt32BE(16), h: shot.bytes.readUInt32BE(20), viewport: shot.meta.viewport, transformed: shot.meta.transformed } };
+  await page.setViewport({ width: 1280, height: 800 }, noopControl());
+  out.viewport.navAt1280 = await navVisible();
+  await page.navigate(env.url('tables.html'));
+  const tb = await page.observe();
+  out.tables = { nodes: tb.nodes.filter((n) => n.table || n.list).map((n) => ({ role: n.role, name: n.name, table: n.table, list: n.list })), pagination: Object.keys(tb.pagination || {}).sort() };
   await page.navigate(env.url('popup.html'));
   const pp = await page.observe();
   const popups = [];
@@ -133,6 +145,9 @@ for (const mode of MODES) {
       assert.deepEqual(r.dialog, [{ type: 'confirm', decision: 'dismiss', handledBy: 'policy-deadline' }]);
       assert.deepEqual(r.download, ['not-granted']);
       assert.deepEqual(r.popup, { opener: true, pages: 2 });
+      assert.deepEqual(r.viewport, { resized: { ok: true, status: 'verified', kinds: ['state-change'] }, navAt375: 'failed', navAt1280: 'passed', shot: { w: 375, h: 700, viewport: { width: 375, height: 700 }, transformed: false } });
+      assert.deepEqual(r.tables.pagination, ['next', 'prev']);
+      assert.deepEqual(r.tables.nodes.map((n) => n.name), ['Accounts', 'Merged', 'Grid', '', 'Steps', 'Big']);
     } finally { await env.close(); }
   });
 }

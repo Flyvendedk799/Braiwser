@@ -121,9 +121,9 @@ shell. `npm run agent -- <command>` runs it from the repo.
 | Skill | Runs through `browser_run` | What it does |
 |---|---|---|
 | `verify-journey` 1.0.0 | yes | Compiles a saved recording into a closed plan and proves its assertions |
-| `review-responsive` 1.0.0 | planned; **the current broker rejects it** (needs viewport + capture steps) | Fixed-viewport landmark checks with capture evidence |
+| `review-responsive` 1.0.0 | yes (Playwright driver; the Electron driver has no emulated viewport and refuses it before dispatch) | Fixed-viewport landmark checks; page and per-landmark captures are stored as evidence and never make a run pass |
 | `compare-fix` 1.0.0 | no (library / CLI orchestration) | Same frozen assertions on a baseline and a candidate; reports fixed / regressed / not-fixed / not-reproduced, or why the comparison is unavailable |
-| `extract-table` 1.0.0 | no (library) | Bounded pagination with missing-value markers; never "complete" unless the end of the table was seen |
+| `extract-table` 1.0.0 | no (library) | Typed records with source refs (table, row, column, page) and missing-value markers; bounded pagination; never "complete" unless the end of the table was seen |
 | `handoff-repro` 1.0.0 | no (library) | Builds a redacted issue/repro package; sending it elsewhere is a separate approved action |
 
 Versions are pinned exactly and each resolves to one digest (`skill-lock.json`). Changed bytes under the same
@@ -200,15 +200,23 @@ What the MCP/CLI surface adds on top (verified against the real broker unless no
 - Not wired into the app UI yet (see "Not wired yet"); no connection-management screen.
 - Packaged builds keep sources inside `app.asar`, which plain Node cannot execute; run the sidecar and CLI from a
   checkout or an unpacked copy (an `asarUnpack` entry for the automation folder is not configured yet).
-- No tool lists the pages of a session, so a popup/new tab cannot be switched to. No viewport control, so
-  `review-responsive` and responsive checks cannot run.
-- Observations contain landmarks, h1/h2 headings, interactables, status and error text. They do not contain table
-  cells or list items, so `extract-table` returns `NO_TABLE` (incomplete) on real pages; this is reported, not hidden.
+- No tool lists the pages of a session, so a popup/new tab cannot be switched to; popup and second-tab tasks stay
+  `unsupported`.
+- `setViewport` (240..4096) exists on the Playwright driver only. It is a state change: refs and observations die
+  with the document epoch, it needs the `interact` class and is ledgered like any action.
+- Tables are observed as one bounded payload per table/grid node: at most 50 rows x 12 columns, 80 characters per
+  cell, 20 KiB per table, 20 tables/lists per frame. Anything beyond that is marked (`truncated`), never silently
+  dropped; merged cells (`merged`) and secret-looking columns or cells (`withheld`, `null`) are flagged and their
+  content is not returned. A page with more rows than that makes `extract-table` stop with `PAGE_ROWS_TRUNCATED`.
+  Lists are observed the same way (30 items); navigation menus and link-only lists are skipped.
+- Pagination hints (`pagination.next` / `prev`) are found by accessible name only (Next, Next page, Older, Previous,
+  Newer, arrows...). Two candidates for one direction yield no ref and an `ambiguous` marker.
 - Delta observations (`sinceObservationId`) are not exposed.
 - Recordings made today only carry CSS selectors; unless a step has a `data-testid`, an `aria-label` on a button or
   form field, or a button's own text, migration refuses it. Re-record with test ids, or add semantic locators.
-- Recording-derived typed values reach a run through a resolver hook that depends on the broker passing its
-  `inputs` object to the skill resolver; a broker that copies it first fails closed with "missing input".
+- Recording-derived typed values come from the resolver's `inputs` result; the broker merges them itself, only for keys
+  the plan declares in `inputKeys`, only strings, at most 10000 characters. Structured skill arguments (for example
+  `review-responsive`'s `landmarks`) are accepted only for keys the resolver reports in `argumentKeys`.
 - `browser_extract` reads accessible names from the last observation; it is not a scraping engine.
 - A dispatched click is not proof of an outcome. Use a run with registered assertions for that.
 - No claim is made that this is faster, cheaper or more reliable than any other tool. See

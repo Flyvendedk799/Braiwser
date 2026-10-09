@@ -221,14 +221,26 @@ function validateAct(i) {
     operationId: clientId(i.operationId, 'operationId'), action, approvalId: opt(i.approvalId, (v) => clientId(v, 'approvalId')),
     timeoutMs: i.timeoutMs === undefined ? 15000 : int(i.timeoutMs, 'timeoutMs', { min: 10, max: 120000 }) };
 }
+// Skill arguments: strings (<= 10000) or small plain JSON (depth <= 5, <= 500 nodes, <= 16 KiB in all). Which keys are
+// allowed, and that plan inputs are strings, is decided against the validated plan in the broker.
+function jsonArgument(v, name, state = { nodes: 0 }, depth = 0) {
+  if (++state.nodes > 500 || depth > 5) throw invalid(`${name} is too complex`);
+  if (v === null || typeof v === 'boolean') return;
+  if (typeof v === 'number') { if (!Number.isFinite(v)) throw invalid(`${name} must be finite`); return; }
+  if (typeof v === 'string') { if (v.length > 10000) throw invalid(`${name} string is too long`); return; }
+  if (Array.isArray(v)) { v.forEach((x) => jsonArgument(x, name, state, depth + 1)); return; }
+  if (isObj(v) && Object.getPrototypeOf(v) === Object.prototype) { for (const k of Object.keys(v)) { str(k, 'input key', { max: 200 }); jsonArgument(v[k], name, state, depth + 1); } return; }
+  throw invalid(`${name} must be plain JSON`);
+}
 function validateStartRun(i) {
   exact(i, ['sessionId', 'pageId', 'requestKey', 'skillId', 'skillVersion', 'maxDurationMs', 'inputs'], 'startRun');
   const inputs = i.inputs === undefined ? {} : i.inputs;
   if (!isObj(inputs) || Object.keys(inputs).length > 20) throw invalid('inputs must be an object (<=20 keys)');
-  for (const [k, v] of Object.entries(inputs)) { str(k, 'input key', { max: 200 }); if (typeof v !== 'string' || v.length > 10000) throw invalid('input values must be strings <= 10000'); }
+  for (const [k, v] of Object.entries(inputs)) { str(k, 'input key', { max: 200 }); jsonArgument(v, 'input value'); }
+  if (JSON.stringify(inputs).length > 16384) throw invalid('inputs are too large');
   return { sessionId: clientId(i.sessionId, 'sessionId'), pageId: clientId(i.pageId, 'pageId'), requestKey: clientId(i.requestKey, 'requestKey'),
     skillId: str(i.skillId, 'skillId', { max: 200 }), skillVersion: str(i.skillVersion, 'skillVersion', { max: 40, re: /^\d+\.\d+\.\d+$/ }),
-    maxDurationMs: i.maxDurationMs === undefined ? 300000 : int(i.maxDurationMs, 'maxDurationMs', { min: 1000, max: 3600000 }), inputs: { ...inputs } };
+    maxDurationMs: i.maxDurationMs === undefined ? 300000 : int(i.maxDurationMs, 'maxDurationMs', { min: 1000, max: 3600000 }), inputs: clone(inputs) };
 }
 function validateGetRun(i) {
   exact(i, ['runId', 'afterSequence', 'maxEvents'], 'getRun');
@@ -270,7 +282,7 @@ function validateAssertStep(s, id) {
   if (s.kind === 'visible' && (s.op !== 'equals' || s.expected !== 'visible')) throw invalid('visibility assertion');
   if (s.kind === 'exists' && (s.op !== 'equals' || s.expected !== 'exists')) throw invalid('existence assertion');
   if (s.kind === 'text' && !s.expected) throw invalid('text assertion needs an expected value');
-  if (s.kind === 'count' && !/^d{1,9}$/.test(s.expected)) throw invalid('count assertion needs a non-negative integer');
+  if (s.kind === 'count' && !/^\d{1,9}$/.test(s.expected)) throw invalid('count assertion needs a non-negative integer');
   return out;
 }
 function validatePlan(plan) {
@@ -313,7 +325,7 @@ function validatePlan(plan) {
     }
   });
   if (!steps.some((s) => s.type === 'assert')) throw invalid('plan needs an assertion');
-  return freezeDeep({ schemaVersion: 1, skillId: str(plan.skillId, 'skillId', { max: 200 }), version: str(plan.version, 'version', { max: 40, re: /^d+.d+.d+$/ }),
+  return freezeDeep({ schemaVersion: 1, skillId: str(plan.skillId, 'skillId', { max: 200 }), version: str(plan.version, 'version', { max: 40, re: /^\d+\.\d+\.\d+$/ }),
     inputKeys, maxDurationMs: int(plan.maxDurationMs, 'plan.maxDurationMs', { min: 1000, max: 300000 }), steps });
 }
 

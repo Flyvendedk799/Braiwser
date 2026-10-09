@@ -53,9 +53,29 @@ export const runSchema = z.strictObject({
 
 export const coverageSchema = z.record(z.string().max(60), z.union([z.number(), z.boolean(), z.string().max(200)]));
 
+// Bounded structure payloads of table/grid and list nodes (see drivers/observe.js). A cell is text, '' (empty) or
+// null (withheld: secret-looking column or control). Page text: untrusted like every other node name.
+const structCell = z.string().max(100).nullable();
+export const tableSchema = z.strictObject({
+  rowCount: nonneg, rowsExact: z.boolean(), columnCount: nonneg, hasHeader: z.boolean(),
+  headers: z.array(z.string().max(100)).max(12),
+  cells: z.array(z.array(structCell).max(12)).max(50),
+  truncated: z.strictObject({ rows: z.boolean(), columns: z.boolean(), cells: nonneg }),
+  merged: z.boolean(), withheld: z.array(z.number().int().min(0).max(11)).max(12),
+});
+export const listSchema = z.strictObject({
+  ordered: z.boolean(), itemCount: nonneg, itemsExact: z.boolean(), items: z.array(structCell).max(30),
+  truncated: z.strictObject({ items: z.boolean(), cells: nonneg }),
+});
 export const nodeSchema = z.strictObject({
   ref: id, role: z.string().max(80), name: z.string().max(200),
   enabled: z.boolean().optional(), editable: z.boolean().optional(), frameId: id.optional(),
+  table: tableSchema.optional(), list: listSchema.optional(),
+});
+// Next / previous page controls, found by accessible name only; they are ordinary refs from the same observation.
+const pageLink = z.strictObject({ ref: id, name: z.string().max(200), enabled: z.boolean() });
+export const paginationSchema = z.strictObject({
+  next: pageLink.optional(), prev: pageLink.optional(), ambiguous: z.array(z.enum(['next', 'prev'])).max(2).optional(),
 });
 
 export const observationSchema = z.strictObject({
@@ -63,6 +83,7 @@ export const observationSchema = z.strictObject({
   url: z.string().max(2000),
   nodes: z.array(nodeSchema).max(200),
   coverage: coverageSchema,
+  pagination: paginationSchema.optional(),
   truncated: z.boolean(),
   nextCursor: cursor.nullable(),
   trust: z.literal('untrusted-page'),
@@ -79,6 +100,8 @@ export const actionSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('press'), ref: id, key: z.enum(ACT_KEYS) }),
   z.strictObject({ kind: z.literal('select'), ref: id, value: z.string().max(1000) }),
   z.strictObject({ kind: z.literal('check'), ref: id, checked: z.boolean() }),
+  // Emulated window size. Changes the document epoch: observe again afterwards.
+  z.strictObject({ kind: z.literal('setViewport'), width: z.number().int().min(240).max(4096), height: z.number().int().min(240).max(4096) }),
   z.strictObject({ kind: z.literal('navigate'), url: z.string().max(2000).url().refine((v) => {
     try { const u = new URL(v); return (u.protocol === 'https:' || u.protocol === 'http:') && !u.username && !u.password; }
     catch { return false; }

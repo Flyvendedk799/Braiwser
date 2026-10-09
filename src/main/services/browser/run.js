@@ -187,7 +187,7 @@ function runToDTO(run, { afterSequence = 0, maxEvents = 50 } = {}) {
 // ---------------------------------------------------------------------------
 const norm = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
 function nodeMatches(node, t) {
-  if (t.by === 'role') return node.role === t.role && norm(node.name) === norm(t.name);
+  if (t.by === 'role') return node.role === t.role && (t.name === undefined || norm(node.name) === norm(t.name));
   if (t.by === 'testId') return node.testId === t.value;
   if (t.by === 'label') return norm(node.name) === norm(t.value);
   return false;
@@ -256,12 +256,57 @@ async function executeStep(step, ctx) {
     // Read-only: no dispatch. Only counts as proof if its evidence was recorded.
     return result(status, status === 'unknown' ? 'unknown' : 'notDispatched', { evidenceIds: ids, code: a.status === 'passed' ? 'OK' : String(a.code || a.status).toUpperCase(), summary: `assert ${a.status}` });
   }
-  // click / fill
+  if (step.type === 'setViewport') {
+    let r;
+    for (let attempt = 0; attempt < MAX_STEP_ATTEMPTS; attempt++) {
+      if (signal.aborted) return result('cancelled', 'notDispatched', { code: 'CANCELLED' });
+      r = await host.setViewport(step.width, step.height, step, attempt);
+      if (!(r.status === 'not_attempted' && await mayRetry(r.code))) break;
+    }
+    const m = fromReceipt(r);
+    return result(m.status, m.effect, { code: r.code, evidenceIds: await record('viewport', { receipt: r, width: step.width, height: step.height }), summary: `setViewport ${r.status}` });
+  }
+  if (step.type === 'capture') {
+    let c = null;
+    for (let attempt = 0; attempt < MAX_STEP_ATTEMPTS; attempt++) {
+      if (signal.aborted) return result('cancelled', 'notDispatched', { code: 'CANCELLED' });
+      let found = null;
+      if (step.target) {
+        let t;
+        try { t = await findTarget(host, step.target); } catch (e) {
+          const code = (e && e.code) || 'OBSERVE_FAILED';
+          if (await mayRetry(code)) continue;
+          return result('failed', 'notDispatched', { code, summary: 'capture target could not be observed' });
+        }
+        if (t.error) return result('failed', 'notDispatched', { code: t.error, summary: t.error === 'AMBIGUOUS_TARGET' ? 'capture target is not unique' : 'capture target not found' });
+        found = t.found;
+      }
+      c = await host.capture(step, found);
+      if (!(c.status !== 'captured' && await mayRetry(c.code))) break;
+    }
+    if (!c) return result('failed', 'notDispatched', { code: 'RETRIES_EXHAUSTED', summary: 'capture never became available' });
+    // Evidence only: a capture is read-only and is never an assertion; it can make a run fail (it could not be taken), never pass.
+    if (c.status === 'captured' && c.evidenceIds && c.evidenceIds.length) return result('passed', 'confirmed', { code: 'OK', evidenceIds: c.evidenceIds, summary: 'capture stored' });
+    const code = c.code || 'CAPTURE_FAILED';
+    if (code === 'CANCELLED') return result('cancelled', 'notDispatched', { code });
+    if (code === 'DEADLINE_EXCEEDED') return result('timedOut', 'notDispatched', { code });
+    return result('failed', 'notDispatched', { code, summary: 'capture failed' });
+  }
+  // click / fill / select / check / press (target actions)
   let value;
-  if (step.type === 'fill') {
+  if (step.type === 'fill' || step.type === 'select') {
     value = inputs[step.inputKey];
     if (typeof value !== 'string') return result('failed', 'notDispatched', { code: 'MISSING_INPUT', summary: 'declared input was not supplied' });
   }
+  const actionFor = (ref) => {
+    switch (step.type) {
+      case 'fill': return { kind: 'fill', ref, text: value };
+      case 'select': return { kind: 'select', ref, value };
+      case 'check': return { kind: 'check', ref, checked: step.checked };
+      case 'press': return { kind: 'press', ref, key: step.key };
+      default: return { kind: 'click', ref };
+    }
+  };
   let last = null;
   for (let attempt = 0; attempt < MAX_STEP_ATTEMPTS; attempt++) {
     if (signal.aborted) return result('cancelled', 'notDispatched', { code: 'CANCELLED' });
@@ -273,8 +318,7 @@ async function executeStep(step, ctx) {
       return result('failed', 'notDispatched', { code, summary: 'target could not be observed' });
     }
     if (t.error) return result('failed', 'notDispatched', { code: t.error, summary: t.error === 'AMBIGUOUS_TARGET' ? 'target is not unique' : 'target not found' });
-    const action = step.type === 'click' ? { kind: 'click', ref: t.found.node.ref } : { kind: 'fill', ref: t.found.node.ref, text: value };
-    last = await host.act(action, { step, attempt, observation: t.found.observation, node: t.found.node });
+    last = await host.act(actionFor(t.found.node.ref), { step, attempt, observation: t.found.observation, node: t.found.node });
     // Provably not dispatched => safe to re-observe and try again.
     if (!(last.status === 'not_attempted' && await mayRetry(last.code))) break;
   }
@@ -359,6 +403,26 @@ function driverPageHost(page, { signal, sink, policy, stepTimeoutMs = 15000 }) {
         if (!dispatched) return { status: 'not_attempted', code: 'DRIVER_DID_NOT_DISPATCH' };
         return { status: r.status === 'verified' && Array.isArray(r.evidence) && r.evidence.length ? 'verified' : 'dispatched', code: 'OK' };
       } catch (e) { return { status: dispatched ? 'uncertain' : 'not_attempted', code: e.code || 'DRIVER_FAILED' }; }
+    },
+    async setViewport(width, height) {
+      if (typeof page.setViewport !== 'function') return { status: 'not_attempted', code: 'UNSUPPORTED' };
+      let dispatched = false;
+      const control = { signal, check() { if (signal && signal.aborted) throw rerr('CANCELLED'); }, beforeDispatch() { if (signal && signal.aborted) throw rerr('CANCELLED'); dispatched = true; } };
+      try {
+        const r = await wrap(() => page.setViewport({ width, height }, control));
+        if (!dispatched) return { status: 'not_attempted', code: 'DRIVER_DID_NOT_DISPATCH' };
+        return { status: r.status === 'verified' && Array.isArray(r.evidence) && r.evidence.length ? 'verified' : 'dispatched', code: 'OK' };
+      } catch (e) { return { status: dispatched ? 'uncertain' : 'not_attempted', code: e.code || 'DRIVER_FAILED' }; }
+    },
+    async capture(step, found) {
+      if (typeof page.capture !== 'function') return { status: 'failed', code: 'UNSUPPORTED' };
+      try {
+        const shot = await wrap(() => page.capture(found ? { refId: nodes.get(found.node.ref).refId } : {}));
+        if (!shot || !Buffer.isBuffer(shot.bytes) || !shot.bytes.length || !shot.meta || shot.meta.transformed !== false) return { status: 'failed', code: 'CAPTURE_INVALID' };
+        // In-memory evidence keeps the digest and metadata, not the pixels.
+        const id = sink.put('capture', { label: step.label, bytes: shot.bytes.length, sha256: C.sha256(shot.bytes), meta: shot.meta, transformed: false });
+        return { status: 'captured', code: 'OK', evidenceIds: [id] };
+      } catch (e) { return { status: 'failed', code: e.code || 'CAPTURE_FAILED' }; }
     },
     async assert(assertion) {
       try { const r = await wrap(() => page.evaluateAssertion(assertion)); return { status: ['passed', 'failed', 'unknown'].includes(r.status) ? r.status : 'unknown', actual: r.actual }; } catch (e) { return { status: 'unknown', code: e.code }; }

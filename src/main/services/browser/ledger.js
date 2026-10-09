@@ -300,6 +300,7 @@ function createLedger({ dir, fs = nodeFs, clock = { now: () => Date.now() }, max
     const s = { kind: String(a.kind || '').slice(0, 20) };
     if (a.kind === 'fill') s.textLength = typeof a.text === 'string' ? a.text.length : 0;
     else if (a.kind === 'navigate') s.url = redactUrl(a.url) || '[invalid]';
+    else if (a.kind === 'setViewport') { s.width = Number(a.width) || 0; s.height = Number(a.height) || 0; }
     else if (a.kind === 'press') s.key = String(a.key).slice(0, 20);
     else if (a.kind === 'check') s.checked = !!a.checked;
     else if (a.kind === 'select') s.valueLength = typeof a.value === 'string' ? a.value.length : 0;

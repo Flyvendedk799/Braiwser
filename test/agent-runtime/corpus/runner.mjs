@@ -265,7 +265,7 @@ function toolSession({ call, stats, registry, onApproval }) {
     press: (ref, key) => act({ kind: 'press', ref, key }, ref),
     check: (ref, checked) => act({ kind: 'check', ref, checked }, ref),
     select: (ref, value) => act({ kind: 'select', ref, value }, ref),
-    async setViewport() { throw Object.assign(new Error('no viewport tool'), { code: 'UNSUPPORTED' }); },
+    setViewport: (width, height) => act({ kind: 'setViewport', width, height }, null),
     async switchToNewPage() { throw Object.assign(new Error('the tool surface has no page listing'), { code: 'UNSUPPORTED' }); },
     async runSkill({ recording, cancelAfterMs, urls }) {
       void recording; void urls;
@@ -317,7 +317,7 @@ const grantFor = (task, urls) => ({
 });
 
 export function createAdapters({ manifest }) {
-  const braiwserCaps = { dom: true, frames: true, popups: false, viewport: false, 'durable-run': true, 'repro-package': true };
+  const braiwserCaps = { dom: true, frames: true, popups: false, viewport: true, 'durable-run': true, 'repro-package': true };
   let stack = null;
   const ensureStack = async () => stack || (stack = await buildBraiwserStack(manifest));
 

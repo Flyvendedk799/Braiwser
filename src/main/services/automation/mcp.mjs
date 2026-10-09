@@ -137,7 +137,7 @@ export function createMcpServer(broker, options = {}) {
       workflowSchemaVersion: core.SCHEMA_VERSION,
       server: { name: 'braiwser', version: packageVersion() },
       tools: ops.tools.map((t) => ({ name: t.name, readOnly: t.readOnly })),
-      actions: ['click', 'fill', 'press', 'select', 'check', 'navigate'],
+      actions: ['click', 'fill', 'press', 'select', 'check', 'navigate', 'setViewport'],
       limits: { maxNodesPerObservation: 200, responseBudgetBytes: budget, maxEventsPerStatus: 100, maxRunDurationMs: 300000 },
       guarantees: [
         'No arbitrary JavaScript, CSS selectors, file paths, cookie export or shell in any tool.',

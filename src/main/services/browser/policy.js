@@ -269,6 +269,8 @@ function createPolicy({ clock = { now: () => Date.now() }, fs = nodeFs, lookup, 
     if (!C.ACTION_KINDS.includes(action && action.kind)) return { toolClass: null, writeLike: true, unknown: true };
     const traits = traitSet(target);
     if (action.kind === 'navigate') return { toolClass: 'navigate', writeLike: false };
+    // Emulated viewport: changes layout/media-query state of the page but dispatches no page input and has no external effect.
+    if (action.kind === 'setViewport') return { toolClass: 'interact', writeLike: false };
     if (traits.has('file-input')) return { toolClass: 'upload', writeLike: true };
     let writeLike = [...traits].some((t) => WRITE_TRAITS.has(t));
     if (action.kind === 'click' && WRITE_NAME.test(String(target.name || ''))) writeLike = true;

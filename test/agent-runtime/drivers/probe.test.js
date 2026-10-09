@@ -227,3 +227,80 @@ test('assertFacts resolves semantic locators exactly (role+name, label, testId) 
   assert.equal(probe.assertFacts({ target: { by: 'testId', value: 'x-1' } }).matchCount, 2);
   assert.equal(probe.assertFacts({ target: { by: 'text', value: 'Done' } }).error, 'invalid-target');
 });
+
+// ---- tables and lists (layout stubbed; the real-browser suite covers visibility) ------------------------------------
+test('tables: header names, bounded matrix, hidden rows skipped, secret columns and controls withheld', () => {
+  load(`<main>
+    <table><caption>Users</caption>
+      <thead><tr><th>Name</th><th>Password</th><th>Note</th></tr></thead>
+      <tbody>
+        <tr><td>ada</td><td>CANARY-pw-1</td><td>a</td></tr>
+        <tr hidden><td>ghost</td><td>CANARY-pw-2</td><td>b</td></tr>
+        <tr><td>grace</td><td>CANARY-pw-3</td><td><input type="password" value="CANARY-pw-4"></td></tr>
+        <tr><td>alan</td><td></td><td><input type="text" value="CANARY-visible-input"> x</td></tr>
+      </tbody>
+    </table>
+    <table aria-label="Rows">${Array.from({ length: 60 }, (_, i) => `<tr><th>H</th>${Array.from({ length: 14 }, (_x, j) => `<td>${i}-${j}</td>`).join('')}</tr>`).join('')}</table>
+  </main>`);
+  const r = collect();
+  const users = r.items.find((i) => i.kind === 'table' && i.name === 'Users');
+  assert.deepEqual(users.table.headers, ['Name', 'Password', 'Note']);
+  assert.equal(users.table.rowCount, 3, 'the hidden row is neither counted nor returned');
+  assert.deepEqual(users.table.cells.map((row) => row[0]), ['ada', 'grace', 'alan']);
+  assert.deepEqual(users.table.withheld, [1]);
+  assert.ok(users.table.cells.every((row) => row[1] === null));
+  assert.equal(users.table.cells[1][2], null, 'a password control withholds its own cell');
+  assert.equal(users.table.cells[2][2], 'x', 'input values are never read');
+  assert.equal(users.table.cells[0][2], 'a');
+  const json = JSON.stringify(r);
+  assert.ok(!/CANARY/.test(json), 'no secret or input value in the whole collection, including row context labels');
+
+  const rows = r.items.find((i) => i.kind === 'table' && i.name === 'Rows');
+  assert.equal(rows.table.hasHeader, false, 'a <th> that is not the whole row is a row header, not a header row');
+  assert.equal(rows.table.rowCount, 60); assert.equal(rows.table.cells.length, 50); assert.equal(rows.table.truncated.rows, true);
+  assert.ok(rows.table.cells.every((row) => row.length === 12)); assert.equal(rows.table.truncated.columns, true);
+  assert.equal(rows.table.columnCount, 15);
+});
+
+test('tables: ARIA grids, merged cells, nested tables and caps on how many structures are returned', () => {
+  load(`<main>
+    <div role="grid" aria-label="G"><div role="row"><div role="columnheader">K</div><div role="columnheader">V</div></div>
+      <div role="row"><div role="gridcell">a</div><div role="gridcell">1</div></div></div>
+    <table aria-label="M"><tr><th>A</th><th colspan="2">B</th></tr><tr><td>1</td><td>2</td><td>3</td></tr></table>
+    <table aria-label="Outer"><tr><th>X</th></tr><tr><td><table aria-label="Inner"><tr><th>Y</th></tr><tr><td>y1</td></tr></table></td></tr></table>
+  </main>`);
+  const r = collect();
+  const t = (n) => r.items.find((i) => i.kind === 'table' && i.name === n).table;
+  assert.deepEqual(t('G').cells, [['a', '1']]); assert.deepEqual(t('G').headers, ['K', 'V']);
+  assert.equal(t('M').merged, true);
+  assert.equal(t('Outer').rowCount, 1, 'rows of a nested table belong to the nested table');
+  assert.deepEqual(t('Inner').cells, [['y1']]);
+  load(Array.from({ length: 30 }, (_, i) => `<table aria-label="T${i}"><tr><th>H</th></tr><tr><td>v</td></tr></table>`).join(''));
+  const many = collect();
+  assert.equal(many.items.filter((i) => i.kind === 'table').length, 20);
+  assert.equal(many.stats.structuresCapped, true, 'the cap is reported, not silent');
+});
+
+test('lists: ordered flag, bounded items; menus, single items and link-only lists are skipped', () => {
+  load(`<main>
+    <nav><ul><li>one</li><li>two</li></ul></nav>
+    <ul id="a"><li>apples</li><li>pears</li></ul>
+    <ol aria-label="Steps"><li>Open</li><li>Edit</li></ol>
+    <ul id="one"><li>solo</li></ul>
+    <ul id="links"><li><a href="/1">One</a></li><li><a href="/2">Two</a></li></ul>
+    <ul aria-label="Long">${Array.from({ length: 40 }, (_, i) => `<li>item ${i}</li>`).join('')}</ul>
+  </main>`);
+  const lists = collect().items.filter((i) => i.kind === 'list');
+  assert.deepEqual(lists.map((l) => l.name), ['', 'Steps', 'Long']);
+  assert.deepEqual(lists[0].list.items, ['apples', 'pears']); assert.equal(lists[1].list.ordered, true);
+  assert.equal(lists[2].list.items.length, 30); assert.equal(lists[2].list.itemCount, 40); assert.equal(lists[2].list.truncated.items, true);
+});
+
+test('role locators without a name match any name; an empty name still means "no accessible name"', () => {
+  load('<main><button>Save</button><button aria-label=" "></button><div role="row">r1</div><div role="row">r2</div></main>');
+  const facts = (target) => probe.run('assertFacts', { target });
+  assert.equal(facts({ by: 'role', role: 'row' }).matchCount, 2);
+  assert.equal(facts({ by: 'role', role: 'button' }).matchCount, 2);
+  assert.equal(facts({ by: 'role', role: 'button', name: 'Save' }).matchCount, 1);
+  assert.equal(facts({ by: 'role', role: 'button', name: '' }).matchCount, 1);
+});

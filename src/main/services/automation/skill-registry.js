@@ -209,18 +209,18 @@ function publicFault(error) {
 }
 
 // The `skills` option of createBroker(): { resolve, catalog }. The broker calls
-// resolve() SYNCHRONOUSLY with the client's raw inputs and expects { plan }. We
-// also return `inputs` (values derived from the recording) and the pinned
-// digests so the broker can record them; a broker that ignores these still
-// fails closed for plans that need a derived value ("missing input").
+// resolve() SYNCHRONOUSLY with a COPY of the client's raw inputs and expects
+// { plan }. The result also carries:
+//   inputs        values the skill derived (e.g. the typed text of a recording).
+//                 The broker merges them itself, and only for keys the plan
+//                 declares in inputKeys (strings, bounded); nothing is written
+//                 into the caller's object.
+//   argumentKeys  the client input keys the skill's own schema consumed while
+//                 compiling (e.g. review-responsive's url/landmarks), so the
+//                 broker can tell them from undeclared keys it must refuse.
+//   skillDigest / planDigest / dropped / warnings  pins and diagnostics.
 // loadRecording(recordingId, principal) must be a synchronous, owner-scoped lookup.
-//
-// supplementInputs (default true): the broker passes its own `inputs` object to
-// resolve() and later runs the plan with it. Recording-derived values (the typed
-// text of a journey) have no other way in, so the resolver adds them to that
-// object, restricted to keys the compiled plan declares. A broker that copies the
-// object first simply does not see them and fails closed ("missing input").
-function createBrokerSkills({ registry, loadRecording, maxDurationMs, supplementInputs = true } = {}) {
+function createBrokerSkills({ registry, loadRecording, maxDurationMs } = {}) {
   const reg = registry || defaultRegistry();
   return {
     resolve({ skillId, skillVersion, inputs, principal } = {}) {
@@ -235,12 +235,7 @@ function createBrokerSkills({ registry, loadRecording, maxDurationMs, supplement
           loadRecording: (recordingId) => (typeof loadRecording === 'function' ? loadRecording(recordingId, principal) : null),
           maxDurationMs,
         });
-        if (supplementInputs && inputs && typeof inputs === 'object' && !Object.isFrozen(inputs)) {
-          for (const [k, v] of Object.entries(compiled.inputs)) {
-            if (compiled.plan.inputKeys.includes(k) && typeof v === 'string' && !(k in inputs)) inputs[k] = v;
-          }
-        }
-        return { plan: compiled.plan, inputs: compiled.inputs, skillDigest: resolved.digest, planDigest: compiled.planDigest,
+        return { plan: compiled.plan, inputs: compiled.inputs, argumentKeys: Object.keys(resolved.inputs || {}), skillDigest: resolved.digest, planDigest: compiled.planDigest,
           dropped: compiled.dropped, warnings: compiled.warnings };
       } catch (error) {
         throw publicFault(error);

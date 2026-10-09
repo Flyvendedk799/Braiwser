@@ -432,7 +432,7 @@ class PlaywrightPage extends EventEmitter {
     const { list, capped } = this._frames();
     const entries = [];
     const frames = [];
-    const stats = { candidates: 0, candidatesCapped: false, shadowRootsOpen: 0, possibleClosedShadowHosts: 0,
+    const stats = { candidates: 0, candidatesCapped: false, structuresCapped: false, shadowRootsOpen: 0, possibleClosedShadowHosts: 0,
       canvases: 0, iframes: 0, framesCapped: capped, title: '' };
     let prefix = 0;
     try {
@@ -453,6 +453,7 @@ class PlaywrightPage extends EventEmitter {
         prefix += res.total;
         stats.candidates += res.stats.candidates;
         stats.candidatesCapped = stats.candidatesCapped || res.stats.candidatesCapped;
+        stats.structuresCapped = stats.structuresCapped || res.stats.structuresCapped === true;
         stats.shadowRootsOpen += res.stats.shadowRootsOpen;
         stats.possibleClosedShadowHosts += res.stats.possibleClosedShadowHosts;
         stats.canvases += res.stats.canvases;
@@ -784,7 +785,44 @@ class PlaywrightPage extends EventEmitter {
     return result;
   }
 
+  // ---- viewport -------------------------------------------------------------------------------
+  // Emulated window size. A resize re-evaluates layout and media queries, so it is a document-state change:
+  // every ref and observation dies (epoch bump + 'navigated' kind:'viewport'), exactly like a navigation.
+  setViewport(size, control) {
+    const run = this._lane.then(() => this._setViewport(size || {}, control || NOOP_CONTROL));
+    this._lane = run.then(() => {}, () => {});
+    return run;
+  }
+
+  async _setViewport({ width, height }, control) {
+    this._assertUsable();
+    await this._awaitBarrier();
+    for (const n of [width, height]) {
+      if (!Number.isInteger(n) || n < obs.LIMITS.minViewport || n > obs.LIMITS.maxViewport) {
+        throw driverError('UNSUPPORTED', `Viewport sizes must be integers ${obs.LIMITS.minViewport}..${obs.LIMITS.maxViewport}.`, { detail: 'INVALID_VIEWPORT' });
+      }
+    }
+    control.check();
+    control.beforeDispatch();
+    try {
+      await this._raw.setViewportSize({ width, height });
+    } catch (err) {
+      throw driverError(isTimeout(err) ? 'TIMEOUT' : 'UNAVAILABLE', 'Resizing the viewport failed after dispatch started; the effect is unknown.',
+        { dispatched: true, effectUnknown: true, detail: 'VIEWPORT_FAILED' });
+    }
+    this._bumpEpoch();
+    this.emit('navigated', { documentEpoch: this.documentEpoch, url: this.url(), mainFrame: true, kind: 'viewport' });
+    this._emitSession({ type: 'navigated', documentEpoch: this.documentEpoch, mainFrame: true });
+    // Read the size back from the engine AND from the page: only an observed match is "verified".
+    const engine = this._raw.viewportSize() || { width: 0, height: 0 };
+    const inner = await this._raw.mainFrame().evaluate(probe.run, { cmd: 'viewportInfo', args: {} }).catch(() => ({ width: 0, height: 0 }));
+    const matches = engine.width === width && engine.height === height && inner.width === width && inner.height === height;
+    return { status: matches ? 'verified' : 'dispatched', evidence: [obs.evidence.viewport(width, height, matches, this.documentEpoch)] };
+  }
+
   // ---- screenshots / presentation -------------------------------------------------------------
+  // Unmodified pixels of the viewport (or of one observed element via capture({ refId })). The agent badge is Braiwser
+  // UI, not page content, and is hidden for the shot. Nothing is masked, annotated or resized: meta.transformed is false.
   async screenshot({ clip } = {}) {
     this._assertUsable();
     const vp = this._raw.viewportSize() || { width: 0, height: 0 };
@@ -796,8 +834,32 @@ class PlaywrightPage extends EventEmitter {
       if (!ok) throw driverError('UNSUPPORTED', 'clip must lie inside the viewport.', { detail: 'CLIP_INVALID' });
       region = { x: clip.x, y: clip.y, width: clip.width, height: clip.height };
     }
+    return this._shoot(vp, region, (o) => this._raw.screenshot({ ...o, clip: region }));
+  }
+
+  // Evidence capture: the whole viewport, or the single element behind an observed ref (never a selector).
+  async capture({ refId } = {}) {
+    this._assertUsable();
+    await this._awaitBarrier();
+    const vp = this._raw.viewportSize() || { width: 0, height: 0 };
+    if (!refId) return this._shoot(vp, undefined, (o) => this._raw.screenshot(o));
+    this.resolve(refId); // unknown / dead / expired -> STALE_REF
+    const ref = this._refs.get(refId);
+    this._sameEpoch(ref);
+    const live = await this._describe(ref);
+    this._sameEpoch(ref);
+    this._assertLive(ref, live);
+    let box = null;
+    try { box = await ref.handle.boundingBox(); } catch (err) { if (isGone(err)) throw driverError('STALE_REF', 'The target is gone.', { detail: 'NODE_DETACHED' }); throw err; }
+    if (!box || !(box.width > 0 && box.height > 0)) throw driverError('UNAVAILABLE', 'The target has no visible box to capture.', { detail: 'NOT_CAPTURABLE' });
+    const shot = await this._shoot(vp, { x: Math.round(box.x), y: Math.round(box.y), width: Math.round(box.width), height: Math.round(box.height) },
+      (o) => ref.handle.screenshot({ ...o, timeout: this._opts.dispatchTimeoutMs * 3 }));
+    this._sameEpoch(ref);
+    return shot;
+  }
+
+  async _shoot(vp, region, take) {
     const main = this._raw.mainFrame();
-    // The owner badge is Braiwser UI, not page content: hide it so the evidence is unmodified.
     let hidden = false;
     if (this.session.mode === 'visible' && this.owner !== 'none') {
       hidden = await main.evaluate(() => {
@@ -808,8 +870,8 @@ class PlaywrightPage extends EventEmitter {
       }).catch(() => false);
     }
     try {
+      const bytes = await take({ type: 'png', scale: 'css', animations: 'allow', caret: 'initial' });
       const view = await main.evaluate(probe.run, { cmd: 'viewportInfo', args: {} }).catch(() => ({ scrollX: 0, scrollY: 0, scale: 1 }));
-      const bytes = await this._raw.screenshot({ type: 'png', clip: region, scale: 'css', animations: 'allow', caret: 'initial' });
       return {
         bytes,
         meta: {
@@ -997,6 +1059,7 @@ class PlaywrightDriver {
       dialogs: true, // observed; default policy DISMISS, accept only via resolveDialog()
       permissions: true, // default deny; no grant API exposed
       screenshots: true,
+      viewport: true, // setViewport({ width, height }): emulated size, 240..4096, bumps the document epoch
       // headless: no remote-view transport exists. visible: a person operates the very same headed window
       // while the broker lease keeps the agent from dispatching (ownership enforcement is tested; a real
       // person at a real keyboard is not).

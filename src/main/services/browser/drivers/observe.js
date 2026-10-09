@@ -29,6 +29,15 @@ const LIMITS = Object.freeze({
   urlChars: 512,
   maxFrames: 16,
   maxSnapshots: 6,
+  minViewport: 240,
+  maxViewport: 4096,
+  // One table/list payload inside an observation. Probe-side caps (50 rows x 12 columns, 80 chars per cell,
+  // 30 list items) are tightened here until the payload fits, with explicit truncation markers.
+  structBytes: 20 * 1024,
+  tableRows: 50,
+  tableCols: 12,
+  cellChars: 80,
+  listItems: 30,
 });
 
 // ---- errors -----------------------------------------------------------------
@@ -91,6 +100,67 @@ function fingerprintOf(item) {
 }
 
 // ---- nodes ------------------------------------------------------------------
+// ---- bounded structures (tables / lists) ------------------------------------------------
+// The probe already limits what it reads; this is the authority on what leaves the driver. Page text is clipped and
+// sanitised again, a cell is a string or null (null = withheld, never a secret value), and rows are dropped from the
+// end - with truncated.rows set - until the payload fits its byte budget.
+function boundCell(c) { return c === null ? null : clipText(c, LIMITS.cellChars); }
+function boundTable(t) {
+  const src = t && typeof t === 'object' ? t : {};
+  const headers = (Array.isArray(src.headers) ? src.headers : []).slice(0, LIMITS.tableCols).map((h) => clipText(h, LIMITS.cellChars));
+  let cells = (Array.isArray(src.cells) ? src.cells : []).slice(0, LIMITS.tableRows)
+    .map((row) => (Array.isArray(row) ? row.slice(0, LIMITS.tableCols).map(boundCell) : []));
+  const truncated = { rows: src.truncated && src.truncated.rows === true, columns: src.truncated && src.truncated.columns === true,
+    cells: Number.isInteger(src.truncated && src.truncated.cells) ? src.truncated.cells : 0 };
+  const rowCount = Number.isInteger(src.rowCount) && src.rowCount >= 0 ? src.rowCount : cells.length;
+  const out = { rowCount, rowsExact: src.rowsExact !== false, columnCount: Number.isInteger(src.columnCount) ? src.columnCount : headers.length,
+    hasHeader: src.hasHeader === true, headers, cells, truncated, merged: src.merged === true,
+    withheld: (Array.isArray(src.withheld) ? src.withheld : []).filter((x) => Number.isInteger(x) && x >= 0 && x < LIMITS.tableCols).slice(0, LIMITS.tableCols) };
+  if (src.cells && src.cells.length > cells.length) out.truncated.rows = true;
+  while (cells.length > 1 && Buffer.byteLength(JSON.stringify(out)) > LIMITS.structBytes) {
+    cells = cells.slice(0, Math.max(1, Math.floor(cells.length * 0.8)));
+    out.cells = cells;
+    out.truncated.rows = true;
+  }
+  if (Buffer.byteLength(JSON.stringify(out)) > LIMITS.structBytes) { out.cells = []; out.truncated.rows = true; }
+  return out;
+}
+function boundList(l) {
+  const src = l && typeof l === 'object' ? l : {};
+  let items = (Array.isArray(src.items) ? src.items : []).slice(0, LIMITS.listItems).map(boundCell);
+  const out = { ordered: src.ordered === true, itemCount: Number.isInteger(src.itemCount) ? src.itemCount : items.length, itemsExact: src.itemsExact !== false,
+    items, truncated: { items: src.truncated && src.truncated.items === true, cells: Number.isInteger(src.truncated && src.truncated.cells) ? src.truncated.cells : 0 } };
+  while (items.length > 1 && Buffer.byteLength(JSON.stringify(out)) > LIMITS.structBytes) {
+    items = items.slice(0, Math.max(1, Math.floor(items.length * 0.8)));
+    out.items = items;
+    out.truncated.items = true;
+  }
+  return out;
+}
+
+// ---- pagination hints ---------------------------------------------------------------------------
+// By ACCESSIBLE NAME only (closed English vocabulary) on links/buttons that are in this observation. Page markup,
+// classes and hrefs are never consulted. Two candidates for one direction => no ref, listed as ambiguous.
+const NEXT_NAME = /^(?:next(?: page)?|older|forward)(?: ?[›»>→])?$|^[›»>→]$/i;
+const PREV_NAME = /^(?:prev(?:ious)?(?: page)?|newer|back)$|^[‹«<←] ?(?:prev(?:ious)?)?$|^(?:prev(?:ious)?) ?[‹«<←]$/i;
+function paginationHints(nodes) {
+  const found = { next: [], prev: [] };
+  for (const n of nodes) {
+    if (!n || !n.refId || (n.role !== 'link' && n.role !== 'button')) continue;
+    const name = String(n.name || '').replace(/\s+/g, ' ').trim();
+    if (NEXT_NAME.test(name)) found.next.push(n);
+    else if (PREV_NAME.test(name)) found.prev.push(n);
+  }
+  const out = {};
+  const ambiguous = [];
+  for (const dir of ['next', 'prev']) {
+    if (found[dir].length === 1) out[dir] = { refId: found[dir][0].refId, name: found[dir][0].name, enabled: found[dir][0].enabled !== false };
+    else if (found[dir].length > 1) ambiguous.push(dir);
+  }
+  if (ambiguous.length) out.ambiguous = ambiguous;
+  return Object.keys(out).length ? out : null;
+}
+
 // raw probe item -> public node (no refId yet). frameId is only attached for
 // nodes that live in a child frame.
 function publicNode(item, frameId) {
@@ -110,6 +180,10 @@ function publicNode(item, frameId) {
   } else if (item.kind === 'canvas') {
     n.limitation = item.limitation;
     if (item.occluded) n.occluded = true;
+  } else if (item.kind === 'table') {
+    n.table = boundTable(item.table);
+  } else if (item.kind === 'list') {
+    n.list = boundList(item.list);
   }
   if (item.testId) n.testId = clipText(item.testId, 80);
   if (item.text) n.text = clipText(item.text, LIMITS.statusChars);
@@ -123,8 +197,12 @@ function normalizeLocator(t) {
   if (!t || typeof t !== 'object' || Array.isArray(t)) return null;
   const s = (v, max) => (typeof v === 'string' && v.length <= max ? v : null);
   if (t.by === 'role') {
-    const role = s(t.role, 40); const name = s(t.name, 200);
-    return role && /^[a-z]+$/i.test(role) && name !== null ? { by: 'role', role: role.toLowerCase(), name } : null;
+    const role = s(t.role, 40);
+    if (!role || !/^[a-z]+$/i.test(role)) return null;
+    // A role locator without a name means "any name" (count / exists / visible); an empty string means "no accessible name".
+    if (t.name === undefined) return { by: 'role', role: role.toLowerCase() };
+    const name = s(t.name, 200);
+    return name !== null ? { by: 'role', role: role.toLowerCase(), name } : null;
   }
   if (t.by === 'label' || t.by === 'testId') {
     const value = s(t.value, 200);
@@ -134,13 +212,13 @@ function normalizeLocator(t) {
 }
 
 function locatorLabel(l) {
-  if (l.by === 'role') return `role=${l.role}[name="${clipText(l.name, 80)}"]`;
+  if (l.by === 'role') return l.name === undefined ? `role=${l.role}` : `role=${l.role}[name="${clipText(l.name, 80)}"]`;
   return `${l.by}=${clipText(l.value, 80)}`;
 }
 
 function stateSig(node) {
   return JSON.stringify([node.enabled, node.editable, node.checked, node.expanded, node.invalid, node.ambiguous,
-    node.occluded, node.offscreen, node.name, node.text]);
+    node.occluded, node.offscreen, node.name, node.text, node.table, node.list]);
 }
 
 // Stable-per-document key for delta matching: fingerprint + frame + ordinal among identical fingerprints.
@@ -276,6 +354,7 @@ function buildCoverage({ frames, stats, nodesReturned, nodesTotal, closedShadowR
   if (stats.canvases > 0) limitations.push('canvas-content-not-observable');
   if (unavailable.length) limitations.push('frames-unavailable');
   if (stats.candidatesCapped) limitations.push('candidate-scan-capped');
+  if (stats.structuresCapped) limitations.push('table-list-scan-capped');
   if (stats.framesCapped) limitations.push('frame-scan-capped');
   void closedShadowReported;
   return {
@@ -318,6 +397,8 @@ const evidence = {
   checked: (matches, checked, epoch) => ({ kind: 'checked', observed: true, matches: !!matches, checked, documentEpoch: epoch }),
   navigation: ({ url, outcome, matches, fromEpoch, documentEpoch }) => ({ kind: 'navigation', observed: true, url: clipText(url, LIMITS.urlChars),
     outcome, matches: !!matches, fromEpoch, documentEpoch }),
+  // the engine and the page both reported the requested size after a resize
+  viewport: (width, height, matches, epoch) => ({ kind: 'state-change', observed: true, change: 'viewport', width, height, matches: !!matches, documentEpoch: epoch }),
   dialog: (dialogType, dialogId, epoch) => ({ kind: 'state-change', observed: true, change: 'dialog_opened', dialogType: clipText(dialogType, 20),
     dialogId: clipText(dialogId, 40), documentEpoch: epoch }),
   // a = normalized assertion; status = passed | failed | unknown
@@ -456,6 +537,8 @@ function assembleObservation(ctx, collected, refs) {
     delta: plan.delta,
     ...(ctx.extra || {}),
   };
+  const pager = paginationHints(kept.map((e, i) => ({ ...e.node, refId: refFor[i] })));
+  if (pager) result.pagination = pager;
   // Final guard: the WHOLE observation must respect the byte cap.
   const cap = Math.min(LIMITS.maxBytes, Number.isFinite(ctx.maxBytes) ? ctx.maxBytes : LIMITS.maxBytes);
   while (serializedBytes(result) > cap && result.nodes.length > 1) {
@@ -470,5 +553,5 @@ function assembleObservation(ctx, collected, refs) {
 module.exports = {
   LIMITS, PUBLIC_CODES, driverError, clipText, sanitizeFilename, originOf, sha, fingerprintOf,
   publicNode, stateSig, assignKeys, encodeCursor, decodeCursor, nodeBytes, clampNodes, fitBudget,
-  SnapshotStore, planDelta, buildCoverage, serializedBytes, assembleObservation, evidence, composeResult, normalizeLocator, locatorLabel, parseKey, validateNavigationUrl, normalizeFocus, NAMED_KEYS, MODIFIERS,
+  paginationHints, boundTable, boundList, SnapshotStore, planDelta, buildCoverage, serializedBytes, assembleObservation, evidence, composeResult, normalizeLocator, locatorLabel, parseKey, validateNavigationUrl, normalizeFocus, NAMED_KEYS, MODIFIERS,
 };

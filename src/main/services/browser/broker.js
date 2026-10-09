@@ -29,6 +29,8 @@ const DEFAULT_LIMITS = Object.freeze({
   maxResponseBytes: C.DEFAULT_MAX_RESPONSE_BYTES, approvalWaitMs: 10 * 60 * 1000, humanWaitMs: 30 * 60 * 1000,
   stepTimeoutMs: 15000, observeTimeoutMs: 15000, maxNodes: 200, drainTimeoutMs: 5000,
 });
+const MAX_INPUT_CHARS = 10000;
+const STRUCT_MAX_BYTES = 28 * 1024; // one table/list payload inside an observation
 const EVIDENCE_KINDS = new Set(['visible', 'text', 'exists', 'count', 'url', 'navigation', 'state-change', 'value', 'focus', 'checked', 'selected', 'clicked']);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function withTimeout(promise, ms) {
@@ -125,7 +127,10 @@ function createBroker(options = {}) {
   // observed a navigation to a destination the grant allows.
   function makeAcceptTransition(session) {
     return (cmd, result, scope) => scope.sessionId === cmd.sessionId && scope.pageId === cmd.pageId && scope.documentEpoch > cmd.documentEpoch
-      && Array.isArray(result.evidence) && result.evidence.some((e) => isTrustedEvidence(e) && e.kind === 'navigation' && typeof e.url === 'string' && policy.checkDestination(session.grant, e.url).allowed);
+      && Array.isArray(result.evidence) && result.evidence.some((e) => isTrustedEvidence(e)
+        && ((e.kind === 'navigation' && typeof e.url === 'string' && policy.checkDestination(session.grant, e.url).allowed)
+          // Resizing re-evaluates layout/media queries: the driver bumps its epoch and reports the observed size.
+          || (cmd.action.kind === 'setViewport' && e.kind === 'state-change' && e.change === 'viewport' && e.width === cmd.action.width && e.height === cmd.action.height)));
   }
 
   // ======================================================================
@@ -240,6 +245,15 @@ function createBroker(options = {}) {
       if (outcome !== 'ready') return { status: 'dispatched', code: 'NAVIGATION_FAILED', evidence: [] };
       return { status: 'verified', evidence: [{ kind: 'navigation', observed: true, url: r.url }] };
     }
+    if (a.kind === 'setViewport') {
+      if (typeof rec.driverPage.setViewport !== 'function') throw Object.assign(new Error('driver cannot set a viewport'), { code: 'UNSUPPORTED' });
+      const epochBefore = rec.documentEpoch;
+      // Like every input, the driver calls beforeDispatch() immediately before the resize (after its own validation).
+      const r = await rec.driverPage.setViewport({ width: a.width, height: a.height }, { signal: control.signal, check: control.check, beforeDispatch: preDispatch });
+      // A resize is a state change: refs, cursors and observations die with the epoch even if the driver did not say so.
+      if (rec.documentEpoch === epochBefore) { rec.owned.navigated(); rec.invalidate(); }
+      return r;
+    }
     const driverCmd = {
       operationId: cmd.operationId, sessionId: cmd.sessionId, pageId: cmd.pageId, runId: cmd.runId, observationId: cmd.observationId,
       documentEpoch: cmd.documentEpoch, driverDocumentEpoch: cmd.target.driverDocumentEpoch,
@@ -254,7 +268,26 @@ function createBroker(options = {}) {
   // ======================================================================
   // observe
   // ======================================================================
-  const publicNode = (n) => ({ ref: n.ref, role: clip(n.role, 80), name: clip(n.name, 200), ...(typeof n.enabled === 'boolean' ? { enabled: n.enabled } : {}), ...(typeof n.editable === 'boolean' ? { editable: n.editable } : {}) });
+  const publicNode = (n) => ({ ref: n.ref, role: clip(n.role, 80), name: clip(n.name, 200), ...(typeof n.enabled === 'boolean' ? { enabled: n.enabled } : {}), ...(typeof n.editable === 'boolean' ? { editable: n.editable } : {}),
+    ...(n.table ? { table: n.table } : {}), ...(n.list ? { list: n.list } : {}) });
+  // Bounded structure payloads (tables/lists) from the driver: redacted like names, shape-checked, never trusted for size.
+  const structOf = (n, key) => {
+    const v = n[key];
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+    const clean = evidence.redactor.value(v);
+    return Buffer.byteLength(JSON.stringify(clean)) <= STRUCT_MAX_BYTES ? clean : undefined;
+  };
+  // Pagination hints are refs to ordinary link/button nodes found by accessible name only.
+  const paginationOf = (raw, refOf) => {
+    if (!raw || typeof raw !== 'object') return undefined;
+    const out = {};
+    for (const dir of ['next', 'prev']) {
+      const h = raw[dir];
+      if (h && typeof h.refId === 'string' && refOf.has(h.refId)) out[dir] = { ref: refOf.get(h.refId), name: clip(evidence.redactor.text(clip(h.name, 120), 120), 120), enabled: h.enabled !== false };
+    }
+    if (Array.isArray(raw.ambiguous)) out.ambiguous = raw.ambiguous.filter((x) => x === 'next' || x === 'prev');
+    return Object.keys(out).length ? out : undefined;
+  };
 
   async function observeCore(session, rec, { maxNodes = 200, focus, cursor, noSpend = false }, principal, runId) {
     policy.assertActive(session.grant, principal);
@@ -283,17 +316,18 @@ function createBroker(options = {}) {
       }
       const res = read.value || {};
       const rawNodes = Array.isArray(res.nodes) ? res.nodes.filter((n) => n && typeof n.refId === 'string' && typeof n.role === 'string').slice(0, limits.maxNodes) : [];
-      const cleaned = rawNodes.map((n) => ({ ...n, name: evidence.redactor.text(clip(n.name, 200), 200), role: clip(n.role, 80) }));
+      const cleaned = rawNodes.map((n) => ({ ...n, name: evidence.redactor.text(clip(n.name, 200), 200), role: clip(n.role, 80), table: structOf(n, 'table'), list: structOf(n, 'list') }));
       const observationId = C.newId('observation');
       const refIds = rec.addObservation({ observationId, documentEpoch: read.documentEpoch, nodes: cleaned, driverNextCursor: res.nextCursor || null, now });
       obs = rec.observations.get(observationId);
       const driverEpoch = (() => { try { return rec.driverPage.documentEpoch; } catch { return undefined; } })();
-      obs.nodes = cleaned.map((n, i) => ({ ref: refIds[i], role: n.role, name: n.name, enabled: n.enabled, editable: n.editable, testId: typeof n.testId === 'string' ? clip(n.testId, 200) : undefined, frameId: n.frameId || null, traits: n.traits }));
+      obs.nodes = cleaned.map((n, i) => ({ ref: refIds[i], role: n.role, name: n.name, enabled: n.enabled, editable: n.editable, testId: typeof n.testId === 'string' ? clip(n.testId, 200) : undefined, frameId: n.frameId || null, traits: n.traits, table: n.table, list: n.list }));
+      obs.pagination = paginationOf(res.pagination, new Map(cleaned.map((n, i) => [n.refId, refIds[i]])));
       for (const id of refIds) { const r = rec.refs.get(id); if (r) r.driverEpoch = driverEpoch; }
       obs.coverage = res.coverage && typeof res.coverage === 'object' ? evidence.redactor.value(res.coverage) : { nodesReturned: obs.nodes.length };
       obs.driverTruncated = res.truncated === true;
       obs.url = rec.currentUrl || (() => { try { return rec.driverPage.url(); } catch { return null; } })();
-      safePut(container, { id: observationId, kind: 'observation', data: { observationId, sessionId: session.sessionId, pageId: rec.pageId, documentEpoch: obs.documentEpoch, url: redactUrl(obs.url || '') || null, trust: 'untrusted-page', coverage: obs.coverage, nodes: obs.nodes.map(publicNode), truncated: obs.driverTruncated } });
+      safePut(container, { id: observationId, kind: 'observation', data: { observationId, sessionId: session.sessionId, pageId: rec.pageId, documentEpoch: obs.documentEpoch, url: redactUrl(obs.url || '') || null, trust: 'untrusted-page', coverage: obs.coverage, nodes: obs.nodes.map(publicNode), ...(obs.pagination ? { pagination: obs.pagination } : {}), truncated: obs.driverTruncated } });
     }
     const evidenceUri = C.uris.observation(container, obs.observationId);
     const shell = (slice, end) => {
@@ -301,7 +335,7 @@ function createBroker(options = {}) {
       if (end < obs.nodes.length) nextCursor = rec.mintCursor({ kind: 'local', observationId: obs.observationId, offset: end }, now, limits.refTtlMs);
       else if (obs.driverNextCursor) nextCursor = rec.mintCursor({ kind: 'driver', driverCursor: obs.driverNextCursor }, now, limits.refTtlMs);
       return { sessionId: session.sessionId, pageId: rec.pageId, observationId: obs.observationId, documentEpoch: obs.documentEpoch, url: redactUrl(obs.url || '') || null, trust: 'untrusted-page',
-        nodes: slice.map(publicNode), coverage: obs.coverage, truncated: nextCursor !== null || obs.driverTruncated, nextCursor, evidenceUri };
+        nodes: slice.map(publicNode), ...(obs.pagination ? { pagination: obs.pagination } : {}), coverage: obs.coverage, truncated: nextCursor !== null || obs.driverTruncated, nextCursor, evidenceUri };
     };
     let end = Math.min(obs.nodes.length, start + Math.min(maxNodes, limits.maxNodes));
     let out = shell(obs.nodes.slice(start, end), end);
@@ -353,7 +387,8 @@ function createBroker(options = {}) {
 
     policy.assertActive(session.grant, principal);
     let node = null;
-    if (v.action.kind !== 'navigate') node = rec.resolveRef(v.action.ref, { observationId: v.observationId, documentEpoch: v.documentEpoch, now: clock.now(), ttlMs: limits.refTtlMs });
+    const refless = C.REFLESS_ACTIONS.includes(v.action.kind);
+    if (!refless) node = rec.resolveRef(v.action.ref, { observationId: v.observationId, documentEpoch: v.documentEpoch, now: clock.now(), ttlMs: limits.refTtlMs });
     else if (v.documentEpoch !== rec.documentEpoch) throw dtoError('STALE_REF', 'document changed; observe again', { retry: 'refresh', detail: 'STALE_DOCUMENT' });
     const targetInfo = node ? { role: node.role, name: node.name, traits: node.traits } : {};
     const auth = policy.authorizeAction({ grant: session.grant, principal, action: v.action, target: targetInfo });
@@ -381,7 +416,7 @@ function createBroker(options = {}) {
     const cmd = {
       operationId: v.operationId, sessionId: v.sessionId, pageId: v.pageId, runId: v.runId || null, principalId: principal.id,
       documentEpoch: v.documentEpoch, observationId: v.observationId || null, requestHash, timeoutMs: v.timeoutMs,
-      action: v.action.kind === 'navigate' ? v.action : (({ ref, ...rest }) => rest)(v.action),
+      action: refless ? v.action : (({ ref, ...rest }) => rest)(v.action),
       target: node ? { refId: node.driverRefId, frameId: node.frameId, nodeIdentity: node.nodeIdentity, role: node.role, name: node.name, traits: node.traits, driverDocumentEpoch: node.driverEpoch } : null,
       approval,
     };
@@ -468,7 +503,7 @@ function createBroker(options = {}) {
       }
       await Promise.race([Promise.allSettled(pending), sleep(1500)]);
       policy.revokeApprovals({ sessionId: session.sessionId });
-      for (const runId of session.runs) { const rt = runtimes.get(runId); if (rt) { rt.inputs = {}; runtimes.delete(runId); } } // run inputs live in memory only, and only this long
+      for (const runId of session.runs) { const rt = runtimes.get(runId); if (rt) { rt.inputs = {}; rt.args = {}; runtimes.delete(runId); } } // run inputs live in memory only, and only this long
       for (const p of [...session.pages.values()]) {
         p.owned.quarantine('SESSION_CLOSED');
         try { p.driverPage.dispose && p.driverPage.dispose(); } catch { /* ignore */ }
@@ -596,6 +631,47 @@ function createBroker(options = {}) {
           return await doAct({ sessionId: session.sessionId, pageId: rec.pageId, runId: run.runId, documentEpoch: rec.documentEpoch, operationId, action: { kind: 'navigate', url }, timeoutMs: limits.stepTimeoutMs }, ctx, { afterObserve: false });
         } catch (e) { return fromThrown(e); }
       },
+      async setViewport(width, height, step, attempt = 0) {
+        const operationId = opId(step, attempt, `v${counter++}`);
+        runStore.stepStarted(run.runId, step.id, operationId);
+        try {
+          return await doAct({ sessionId: session.sessionId, pageId: rec.pageId, runId: run.runId, documentEpoch: rec.documentEpoch, operationId, action: { kind: 'setViewport', width, height }, timeoutMs: limits.stepTimeoutMs }, ctx, { afterObserve: false });
+        } catch (e) { return fromThrown(e); }
+      },
+      // Read-only evidence: an unmodified screenshot of the viewport (or of one resolved element). The pixels go to the
+      // evidence store as an internal binary artifact; only a bounded metadata record and ids ever leave this method.
+      async capture(step, found) {
+        try {
+          policy.assertActive(session.grant, principal);
+          policy.assertClass(session.grant, 'observe');
+          policy.spend(session.grant, 'observations');
+          let refId;
+          if (found) {
+            const node = rec.resolveRef(found.node.ref, { observationId: found.observation.observationId, documentEpoch: found.observation.documentEpoch, now: clock.now(), ttlMs: limits.refTtlMs });
+            refId = node.driverRefId;
+          }
+          if (typeof rec.driverPage.capture !== 'function') return { status: 'failed', code: 'UNSUPPORTED' };
+          const read = await rec.owned.read(() => withTimeout(Promise.resolve().then(() => rec.driverPage.capture(refId ? { refId } : {})), limits.stepTimeoutMs));
+          const shot = read.value || {};
+          const m = shot.meta || {};
+          const size = (o) => (o && Number.isFinite(o.width) && Number.isFinite(o.height) ? { width: Math.round(o.width), height: Math.round(o.height) } : null);
+          if (!Buffer.isBuffer(shot.bytes) || !shot.bytes.length || m.transformed !== false || !size(m.viewport)) return { status: 'failed', code: 'CAPTURE_INVALID' };
+          const label = clip(evidence.redactor.text(clip(step.label, 200), 200), 200);
+          const png = evidence.putArtifact(container, { kind: 'screenshot', mime: 'image/png', data: shot.bytes, visibility: 'internal', label });
+          const meta = evidence.putArtifact(container, { kind: 'capture', label, data: {
+            stepId: step.id, label, screenshot: { artifactId: png.artifactId, bytes: png.bytes },
+            url: redactUrl(m.url || '') || null, viewport: size(m.viewport), scale: Number.isFinite(m.scale) ? m.scale : 1,
+            scroll: { x: Number(m.scroll && m.scroll.x) || 0, y: Number(m.scroll && m.scroll.y) || 0 },
+            ...(m.clip ? { clip: size(m.clip) && { x: Number(m.clip.x) || 0, y: Number(m.clip.y) || 0, ...size(m.clip) } } : {}),
+            ...(found ? { target: describeTarget(found.node) } : {}),
+            capturedAt: typeof m.capturedAt === 'string' ? clip(m.capturedAt, 40) : new Date(clock.now()).toISOString(), transformed: false,
+          } });
+          return { status: 'captured', code: 'OK', evidenceIds: [png.artifactId, meta.artifactId] };
+        } catch (e) {
+          const p = (e && e.publicError) || null;
+          return { status: 'failed', code: (e && e.code && /^[A-Z_]+$/.test(e.code) ? e.code : p && p.code) || 'CAPTURE_FAILED' };
+        }
+      },
       async act(action, { step, attempt, observation }) {
         let approvalId;
         for (let round = 0; round < 2; round++) {
@@ -671,7 +747,7 @@ function createBroker(options = {}) {
   function launchRun(run, rt, session) {
     runtimes.set(run.runId, rt);
     session.runs.add(run.runId);
-    if (runtimes.size > 200) { for (const [id, old] of runtimes) { if (old.finished) { old.inputs = {}; runtimes.delete(id); } if (runtimes.size <= 150) break; } }
+    if (runtimes.size > 200) { for (const [id, old] of runtimes) { if (old.finished) { old.inputs = {}; old.args = {}; runtimes.delete(id); } if (runtimes.size <= 150) break; } }
     // Monotonic deadline (immune to wall-clock jumps); the wall deadline is persisted for recovery/display.
     rt.deadlineMono = clock.monotonic() + Math.max(0, run.deadlineAt - clock.now());
     rt.timer = setTimeout(() => rt.controller.abort('DEADLINE'), Math.max(0, rt.deadlineMono - clock.monotonic()));
@@ -682,37 +758,65 @@ function createBroker(options = {}) {
     session.runChain = rt.done;
   }
 
+  // Plan inputs = the values the executor feeds into fill/select steps. They come from two places and only for keys the plan
+  // DECLARES: strings the client passed, and strings the skill resolver derived (e.g. the typed text of a recording).
+  // The resolver is the authority for the keys it returns. Everything else the client sent must be an argument the
+  // resolver consumed itself (`resolved.argumentKeys`); an undeclared key is refused rather than ignored.
+  function planInputsOf(plan, args, resolved) {
+    const declared = new Set(plan.inputKeys);
+    const argumentKeys = new Set(Array.isArray(resolved.argumentKeys) ? resolved.argumentKeys.filter((k) => typeof k === 'string').slice(0, 20) : []);
+    const out = {};
+    for (const [k, val] of Object.entries(args)) {
+      if (declared.has(k)) {
+        if (typeof val !== 'string') throw C.invalid(`input ${clip(k, 40)} must be a string`);
+        out[k] = val;
+      } else if (!argumentKeys.has(k)) throw C.invalid(`undeclared input ${clip(k, 40)}`);
+    }
+    const derived = resolved.inputs;
+    if (derived && typeof derived === 'object' && !Array.isArray(derived)) {
+      for (const [k, val] of Object.entries(derived)) {
+        if (declared.has(k) && typeof val === 'string' && val.length <= MAX_INPUT_CHARS) out[k] = val;
+      }
+    }
+    return out;
+  }
+
   function prepareRun(v, ctx, principal, { parent = null } = {}) {
     const session = ownedSession(v.sessionId, principal);
     const rec = session.page(v.pageId);
     policy.assertActive(session.grant, principal);
     if (!skills || typeof skills.resolve !== 'function') throw dtoError('UNAVAILABLE', 'no skill registry is installed', { detail: 'NO_SKILLS' });
-    const resolved = skills.resolve({ skillId: v.skillId, skillVersion: v.skillVersion, inputs: v.inputs, principal });
+    // The resolver gets a copy: the broker, not the resolver, decides what becomes a plan input.
+    const resolved = skills.resolve({ skillId: v.skillId, skillVersion: v.skillVersion, inputs: C.clone(v.inputs), principal });
     if (!resolved || !resolved.plan) throw dtoError('DENIED', 'unknown skill or version', { detail: 'UNKNOWN_SKILL' });
     const plan = C.validatePlan(resolved.plan);
     if (plan.skillId !== v.skillId || plan.version !== v.skillVersion) throw dtoError('DENIED', 'skill pin mismatch', { detail: 'SKILL_PIN' });
-    for (const k of Object.keys(v.inputs)) if (!plan.inputKeys.includes(k)) throw C.invalid(`undeclared input ${clip(k, 40)}`);
+    const planInputs = planInputsOf(plan, v.inputs, resolved);
     for (const s of plan.steps) {
-      if (s.type === 'fill' && typeof v.inputs[s.inputKey] !== 'string') throw C.invalid(`missing input ${clip(s.inputKey, 40)}`);
+      if ((s.type === 'fill' || s.type === 'select') && typeof planInputs[s.inputKey] !== 'string') throw C.invalid(`missing input ${clip(s.inputKey, 40)}`);
       if (s.type === 'navigate' && !policy.checkDestination(session.grant, s.url).allowed) throw dtoError('DENIED', `plan navigates outside the grant (${clip(redactUrl(s.url), 80)})`, { detail: 'DESTINATION_DENIED' });
     }
     if (session.capabilities.dom === false) throw dtoError('UNSUPPORTED', 'driver cannot drive DOM targets', { detail: 'CAP_DOM' });
+    // Unsupported capabilities are discovered BEFORE any dispatch, never half way through a plan.
+    if (plan.steps.some((s) => s.type === 'setViewport') && session.capabilities.viewport !== true) throw dtoError('UNSUPPORTED', 'driver cannot set a viewport', { detail: 'CAP_VIEWPORT' });
+    if (plan.steps.some((s) => s.type === 'capture') && session.capabilities.screenshots !== true) throw dtoError('UNSUPPORTED', 'driver cannot capture screenshots', { detail: 'CAP_SCREENSHOTS' });
     const maxDurationMs = Math.min(v.maxDurationMs, plan.maxDurationMs, session.grant.budgets.maxDurationMs);
-    const inputsDigest = ledger.commandHash(v.inputs);
+    const inputsDigest = ledger.commandHash({ args: v.inputs, plan: planInputs });
     const requestHash = C.sha256({ sessionId: v.sessionId, pageId: v.pageId, skillId: v.skillId, skillVersion: v.skillVersion, maxDurationMs: v.maxDurationMs, inputsDigest, planDigest: C.sha256(plan), parent: parent ? parent.runId : null });
-    return { session, rec, plan, maxDurationMs, inputsDigest, requestHash };
+    return { session, rec, plan, maxDurationMs, inputsDigest, requestHash, planInputs };
   }
 
   function createRun(v, principal, prep, { parent = null } = {}) {
     const runId = C.newId('run');
     const now = clock.now();
     const meta = { runId, evidenceRunId: runId, ownerId: principal.id, sessionId: v.sessionId, pageId: v.pageId, reviewSessionId: prep.session.reviewSessionId, requestKey: v.requestKey, requestHash: prep.requestHash,
-      skillId: v.skillId, skillVersion: v.skillVersion, plan: prep.plan, inputKeys: Object.keys(v.inputs), inputsDigest: prep.inputsDigest, maxDurationMs: prep.maxDurationMs,
+      skillId: v.skillId, skillVersion: v.skillVersion, plan: prep.plan, inputKeys: Object.keys(prep.planInputs), inputsDigest: prep.inputsDigest, maxDurationMs: prep.maxDurationMs,
       deadlineAt: now + prep.maxDurationMs, parentRunId: parent ? parent.runId : null, attempt: parent ? parent.attempt + 1 : 1, driverName: prep.session.driverName };
     const { run, existing } = runStore.create(meta);
     if (existing) return { run, existing: true };
     evidence.registerRun(runId, { ownerId: principal.id, sessionId: v.sessionId, pageId: v.pageId, reviewSessionId: prep.session.reviewSessionId, kind: 'run', attempt: meta.attempt, parentRunId: meta.parentRunId });
-    const rt = { controller: new AbortController(), principal, inputs: { ...v.inputs }, approvals: [], finished: false, done: null };
+    // `args` (what the client asked for) is kept only for retries; `inputs` (plan inputs) is all the executor ever reads. Memory only.
+    const rt = { controller: new AbortController(), principal, inputs: { ...prep.planInputs }, args: C.clone(v.inputs), approvals: [], finished: false, done: null };
     launchRun(run, rt, prep.session);
     return { run, existing: false };
   }
@@ -737,10 +841,10 @@ function createBroker(options = {}) {
       if (grade.uncertainEffect && !(principal.kind === 'ui' && input.acknowledgeUncertain === true)) {
         throw dtoError('DENIED', 'the previous attempt has an unknown external effect; reconcile it in the UI before retrying', { effectUnknown: true, detail: 'RETRY_UNCERTAIN' });
       }
-      const inputs = input.inputs && typeof input.inputs === 'object' ? input.inputs : (runtimes.get(parent.runId) || {}).inputs || {};
+      const inputs = input.inputs && typeof input.inputs === 'object' ? input.inputs : (runtimes.get(parent.runId) || {}).args || {};
       const v = C.validateStartRun({ sessionId: input.sessionId || parent.sessionId, pageId: input.pageId || parent.pageId, requestKey: input.requestKey, skillId: parent.skillId, skillVersion: parent.skillVersion, maxDurationMs: parent.maxDurationMs, inputs });
       const prep = prepareRun(v, ctx, principal, { parent });
-      if (ledger.commandHash(v.inputs) !== parent.inputsDigest) throw dtoError('DENIED', 'retry inputs differ from the original run', { detail: 'RETRY_INPUTS' });
+      if (prep.inputsDigest !== parent.inputsDigest) throw dtoError('DENIED', 'retry inputs differ from the original run', { detail: 'RETRY_INPUTS' });
       const { run } = createRun(v, principal, prep, { parent });
       return dto(run);
     });

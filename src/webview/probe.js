@@ -42,13 +42,21 @@ function run(cmd, args) {
   const NAME_MAX = 120;
   const CTX_MAX = 60;
   const MAX_CANDIDATES = 6000;
+  // Structure (table / list) bounds. The driver (observe.js) enforces the byte budget again.
+  const MAX_STRUCTS = 20;
+  const T_ROWS = 50;
+  const T_COLS = 12;
+  const T_SCAN_ROWS = 2000;
+  const CELL_MAX = 80;
+  const L_ITEMS = 30;
+  const L_SCAN_ITEMS = 500;
 
   const LANDMARK_ROLES = ['banner', 'navigation', 'main', 'complementary', 'contentinfo', 'search', 'form', 'region'];
   const INTERACTIVE_ROLES = ['button', 'link', 'checkbox', 'radio', 'tab', 'menuitem', 'menuitemcheckbox',
     'menuitemradio', 'switch', 'textbox', 'searchbox', 'combobox', 'option', 'slider', 'spinbutton', 'treeitem'];
   const CANDIDATE_SEL = 'a[href],button,input:not([type=hidden]),select,textarea,summary,'
     + '[contenteditable=""],[contenteditable="true"],[role],h1,h2,nav,main,aside,footer,header,form,'
-    + 'section,dialog,canvas';
+    + 'section,dialog,canvas,table,ul,ol';
   const SECRET_HINT = /pass(?:word|wd|code|phrase)|(?:^|[^a-z0-9])(?:pwd|otp|cvv|cvc|csc|pin|ssn|iban)(?:$|[^a-z0-9])|one[-_ ]?time|verification[-_ ]?code|security[-_ ]?code|card[-_ ]?(?:number|num|no)\b|cardnumber|cardnum|ccnum|credit[-_ ]?card|secret/i;
   const SECRET_AC = /(?:^|\s)(?:one-time-code|current-password|new-password|cc-[a-z-]+)(?:\s|$)/i;
 
@@ -134,6 +142,8 @@ function run(cmd, args) {
       case 'section': return (attr(el, 'aria-label') || attr(el, 'aria-labelledby')) ? 'region' : 'generic';
       case 'dialog': return 'dialog';
       case 'canvas': return 'canvas';
+      case 'table': return 'table';
+      case 'ul': case 'ol': return 'list';
       default: break;
     }
     if (el.isContentEditable && attr(el, 'contenteditable') !== 'false') return 'textbox';
@@ -156,6 +166,7 @@ function run(cmd, args) {
     if (lb) name = clip(byIds(lb), NAME_MAX);
     if (!name) name = clip(attr(el, 'aria-label'), NAME_MAX);
     const tag = el.tagName.toLowerCase();
+    if (!name && tag === 'table' && el.caption) name = clip(textOf(el.caption, 200), NAME_MAX);
     if (!name && tag === 'input') {
       const t = (attr(el, 'type') || 'text').toLowerCase();
       if (t === 'button' || t === 'submit' || t === 'reset') {
@@ -181,6 +192,51 @@ function run(cmd, args) {
     return name;
   };
 
+  // ---- table row helpers (shared by the table payload and by row labels) --------------------------
+  const TABLE_OWNER_SEL = 'table,[role=table],[role=grid],[role=treegrid]';
+  const rowCells = (row, useTr) => {
+    if (useTr) {
+      const cells = [];
+      for (let k = 0; k < row.children.length; k++) {
+        const ch = row.children[k];
+        if (ch.tagName === 'TD' || ch.tagName === 'TH') cells.push(ch);
+      }
+      return cells;
+    }
+    return Array.prototype.filter.call(row.querySelectorAll('[role=cell],[role=gridcell],[role=columnheader],[role=rowheader]'),
+      (c) => c.closest('[role=row]') === row);
+  };
+  const isHeadCell = (c, useTr) => (useTr ? c.tagName === 'TH' && attr(c, 'scope') !== 'row' : attr(c, 'role') === 'columnheader');
+  // Column indexes whose HEADER looks like a secret (password, one-time code, card number...). Cached per table per call.
+  const secretColCache = typeof WeakMap === 'function' ? new WeakMap() : null;
+  const secretColsOf = (table) => {
+    if (secretColCache && secretColCache.has(table)) return secretColCache.get(table);
+    const set = {};
+    const useTr = table.tagName === 'TABLE';
+    const rows = table.querySelectorAll(useTr ? 'tr' : '[role=row]');
+    for (let r = 0; r < rows.length && r < 8; r++) {
+      if (rows[r].closest(TABLE_OWNER_SEL) !== table) continue;
+      const cells = rowCells(rows[r], useTr);
+      if (cells.length && cells.every((c) => isHeadCell(c, useTr))) {
+        cells.forEach((c, k) => { if (SECRET_HINT.test(clip(textOf(c, 200), 200))) set[k] = true; });
+        break;
+      }
+    }
+    if (secretColCache) secretColCache.set(table, set);
+    return set;
+  };
+  // Text of a table row without the cells of secret-looking columns.
+  const safeRowText = (row, budget) => {
+    const table = row.closest(TABLE_OWNER_SEL);
+    if (!table) return textOf(row, budget);
+    const useTr = table.tagName === 'TABLE';
+    const secret = secretColsOf(table);
+    const cells = rowCells(row, useTr);
+    let out = '';
+    for (let k = 0; k < cells.length && out.length < budget; k++) if (!secret[k]) out += textOf(cells[k], budget) + ' ';
+    return out;
+  };
+
   const ctxOf = (el) => {
     const p = el.parentElement || (el.getRootNode() && el.getRootNode().host);
     if (!p || !p.closest) return '';
@@ -198,7 +254,7 @@ function run(cmd, args) {
       const lg = row.querySelector('legend');
       if (lg) label = clip(textOf(lg, 100), CTX_MAX);
     }
-    if (!label) label = clip(textOf(row, 120), CTX_MAX);
+    if (!label) label = clip(row.tagName === 'TR' || attr(row, 'role') === 'row' ? safeRowText(row, 120) : textOf(row, 120), CTX_MAX);
     return label;
   };
 
@@ -238,6 +294,8 @@ function run(cmd, args) {
     if (role === 'alert') return 'error';
     if (role === 'status') return 'status';
     if (role === 'dialog' || role === 'alertdialog') return 'dialog';
+    if (role === 'table' || role === 'grid' || role === 'treegrid') return 'table';
+    if (role === 'list') return 'list';
     if (role === 'heading') {
       const level = el.tagName.length === 2 && el.tagName[0] === 'H' ? Number(el.tagName[1]) : Number(attr(el, 'aria-level'));
       return level >= 1 && level <= 2 ? 'heading' : null;
@@ -254,13 +312,105 @@ function run(cmd, args) {
     return a === 'mixed' ? 'mixed' : a === 'true';
   };
 
+  // ---- bounded structure (table / list) extraction ------------------------------------------------
+  // Text only: textOf() never reads <input>/<select>/<textarea> values, a column whose header looks like a secret is
+  // withheld, and any cell holding a secret-looking control is withheld. Withheld cells are null, empty cells are ''.
+  const cellTextOf = (c, tally) => {
+    const full = clip(textOf(c, CELL_MAX * 3), CELL_MAX * 3);
+    if (full.length > CELL_MAX) tally.clipped++;
+    return clip(full, CELL_MAX);
+  };
+  const hasSecretControl = (c) => {
+    const ctl = c.querySelectorAll('input,textarea,select,[contenteditable]');
+    for (let i = 0; i < ctl.length; i++) if (isSecret(ctl[i], '')) return true;
+    return false;
+  };
+  const tableData = (el) => {
+    const useTr = el.tagName === 'TABLE';
+    const rowNodes = el.querySelectorAll(useTr ? 'tr' : '[role=row]');
+    const tally = { clipped: 0 };
+    let headers = null;
+    let merged = false;
+    let scanned = 0;
+    let visible = 0;
+    let maxCols = 0;
+    let capped = false;
+    const matrix = [];
+    const secretCols = {};
+    for (let r = 0; r < rowNodes.length; r++) {
+      const row = rowNodes[r];
+      if (row.closest(TABLE_OWNER_SEL) !== el) continue;
+      if (++scanned > T_SCAN_ROWS) { capped = true; break; }
+      const cells = rowCells(row, useTr);
+      if (!cells.length) continue;
+      let allHead = true;
+      for (let k = 0; k < cells.length; k++) {
+        const c = cells[k];
+        if (!isHeadCell(c, useTr)) allHead = false;
+        const span = Number(attr(c, 'colspan') || attr(c, 'aria-colspan') || 1) > 1 || Number(attr(c, 'rowspan') || attr(c, 'aria-rowspan') || 1) > 1;
+        if (span) merged = true;
+      }
+      if (allHead) {
+        if (!headers) headers = cells.map((c) => cellTextOf(c, tally));
+        continue;
+      }
+      if (!boxVisible(row)) continue;
+      visible++;
+      if (cells.length > maxCols) maxCols = cells.length;
+      if (matrix.length < T_ROWS) {
+        matrix.push(cells.slice(0, T_COLS).map((c, k) => {
+          // a cell holding a secret-looking control is withheld on its own; a secret-looking HEADER withholds the whole column
+          return hasSecretControl(c) ? null : cellTextOf(c, tally);
+        }));
+      }
+    }
+    const cols = headers ? headers.length : maxCols;
+    if (headers) {
+      headers.forEach((h, k) => { if (k < T_COLS && SECRET_HINT.test(h)) secretCols[k] = true; });
+    }
+    for (let r = 0; r < matrix.length; r++) {
+      for (const k of Object.keys(secretCols)) if (Number(k) < matrix[r].length) matrix[r][Number(k)] = null;
+    }
+    return {
+      rowCount: visible, rowsExact: !capped, columnCount: cols, hasHeader: !!headers,
+      headers: (headers || []).slice(0, T_COLS).map((h) => clip(h, CELL_MAX)), cells: matrix,
+      truncated: { rows: visible > matrix.length, columns: cols > T_COLS, cells: tally.clipped },
+      merged, withheld: Object.keys(secretCols).map(Number).sort((a, b) => a - b),
+    };
+  };
+  const listData = (el) => {
+    const out = [];
+    const nodes = el.tagName === 'UL' || el.tagName === 'OL'
+      ? Array.prototype.filter.call(el.children, (c) => c.tagName === 'LI' || attr(c, 'role') === 'listitem')
+      : Array.prototype.filter.call(el.querySelectorAll('[role=listitem]'), (c) => c.closest('[role=list]') === el);
+    const tally = { clipped: 0 };
+    let count = 0;
+    for (let i = 0; i < nodes.length && i < L_SCAN_ITEMS; i++) {
+      if (!boxVisible(nodes[i])) continue;
+      count++;
+      if (out.length < L_ITEMS) out.push(hasSecretControl(nodes[i]) ? null : cellTextOf(nodes[i], tally));
+    }
+    return { nodes, count, items: out, itemsExact: nodes.length <= L_SCAN_ITEMS, clipped: tally.clipped };
+  };
+
   const makeItem = (el) => {
     const role = roleOf(el);
     const kind = kindOf(el, role);
     if (!kind) return null;
     const name = accName(el, role);
     const item = { kind, role, name, tag: el.tagName.toLowerCase() };
-    if (kind === 'interactable') {
+    if (kind === 'table') {
+      item.table = tableData(el);
+      if (!item.table.cells.length && !item.table.headers.length) return null;
+    } else if (kind === 'list') {
+      const l = listData(el);
+      // Navigation menus and link-only lists are already covered by their own link nodes.
+      const quiet = !item.name && (el.closest('nav,[role=navigation],header,footer,[role=banner],[role=contentinfo]')
+        || l.nodes.every((li) => { const a = li.querySelector('a[href],button'); return a && clip(textOf(li, 200), 200) === clip(textOf(a, 200), 200); }));
+      if (l.count < 2 || quiet) return null;
+      item.list = { ordered: el.tagName === 'OL', itemCount: l.count, itemsExact: l.itemsExact, items: l.items,
+        truncated: { items: l.count > l.items.length, cells: l.clipped } };
+    } else if (kind === 'interactable') {
       item.enabled = enabledOf(el);
       if (editableOf(el, item.enabled)) item.editable = true;
       const checked = checkedOf(el, role);
@@ -357,10 +507,19 @@ function run(cmd, args) {
       let iframes = 0;
       for (let i = 0; i < all.length; i++) if (all[i].tagName === 'IFRAME' || all[i].tagName === 'FRAME') iframes++;
       const counts = Object.create(null);
+      let structures = 0;
+      let structuresCapped = false;
       for (let i = 0; i < cands.length; i++) {
         const el = cands[i];
+        const role0 = roleOf(el);
+        // tables and lists are the only expensive items: decide cheap things first
+        if ((role0 === 'table' || role0 === 'grid' || role0 === 'treegrid' || role0 === 'list') && (!boxVisible(el) || structures >= MAX_STRUCTS)) {
+          if (structures >= MAX_STRUCTS && boxVisible(el)) structuresCapped = true;
+          continue;
+        }
         const item = makeItem(el);
         if (!item) continue;
+        if (item.kind === 'table' || item.kind === 'list') structures++;
         if (item.kind === 'interactable' || item.kind === 'canvas') {
           if (!rendered(el)) continue;
         } else if (!boxVisible(el) || (el.closest && el.closest('[aria-hidden="true"], [inert]'))) {
@@ -425,6 +584,7 @@ function run(cmd, args) {
         stats: {
           candidates: cands.length,
           candidatesCapped: capped,
+          structuresCapped,
           shadowRootsOpen: stats.shadowRootsOpen,
           possibleClosedShadowHosts: stats.possibleClosedShadowHosts,
           canvases,
@@ -491,7 +651,7 @@ function run(cmd, args) {
             if (attr(el, 'data-testid') !== v && attr(el, 'data-test') !== v && attr(el, 'data-cy') !== v && attr(el, 'data-qa') !== v) continue;
           } else if (t.by === 'role') {
             const r = roleOf(el);
-            if (r !== String(t.role).toLowerCase() || nn(accName(el, r)) !== nn(t.name)) continue;
+            if (r !== String(t.role).toLowerCase() || (t.name != null && nn(accName(el, r)) !== nn(t.name))) continue;
           } else if (t.by === 'label') {
             const tag = el.tagName;
             if (tag !== 'INPUT' && tag !== 'SELECT' && tag !== 'TEXTAREA' && !el.isContentEditable) continue;

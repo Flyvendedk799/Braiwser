@@ -177,7 +177,7 @@ test('real broker: recordings with secret steps are refused with reason codes; t
   await h.close(); await r.broker.close();
 });
 
-test('real broker: pin failures and unsupported skills never reach the broker or the page', async () => {
+test('real broker: pin failures and unsupported skills never reach the broker or the page; review-responsive runs as a broker plan', async () => {
   const r = rig();
   const h = await client(r);
   const s = await open(h);
@@ -186,11 +186,14 @@ test('real broker: pin failures and unsupported skills never reach the broker or
   assert.equal((await h.call('browser_run', { ...args, skillVersion: '2.0.0' })).structuredContent.error.code, 'UNSUPPORTED');
   assert.equal((await h.call('browser_run', { ...args, skillId: 'extract-table', inputs: {} })).structuredContent.error.code, 'UNSUPPORTED');
   assert.equal(r.fake.world.dispatchLog.length, 0);
-  // review-responsive needs viewport/screenshot steps the broker's closed plan language does not execute yet: it must fail closed.
-  const rr = await h.call('browser_run', { ...args, requestKey: 'rk-rr', skillId: 'review-responsive',
-    inputs: { url: 'https://app.test/', landmarks: [{ role: 'heading', name: 'Welcome' }] } });
-  assert.equal(rr.isError, true, 'an unsupported step type is refused, not skipped');
-  assert.equal(r.fake.world.dispatchLog.length, 0);
+  // review-responsive is a first-class broker plan now: setViewport / capture / visible run through the same executor
+  const rr = await h.ok('browser_run', { ...args, requestKey: 'rk-rr', skillId: 'review-responsive',
+    inputs: { url: 'https://app.test/', landmarks: [{ role: 'heading', name: 'Welcome' }], viewports: [{ name: 'phone', width: 375, height: 812 }] } });
+  const rrDone = await waitTerminal(h, rr.runId);
+  assert.equal(rrDone.state, 'passed', JSON.stringify(rrDone.events.slice(-3)));
+  assert.equal(rrDone.requiredAssertions, 1);
+  assert.deepEqual(r.fake.world.dispatchLog.map((d) => d.kind), ['setViewport'], 'one resize, no page input');
+  assert.equal(r.fake.world.captures.length, 2, 'page + landmark crop');
   await h.close(); await r.broker.close();
 });
 

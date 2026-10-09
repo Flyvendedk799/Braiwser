@@ -97,13 +97,15 @@ DriverPage {
   act(cmd, control) -> { status:'dispatched'|'verified', evidence[] }   // control = OwnedPage {signal,check,beforeDispatch}
   evaluateAssertion(assertion) -> { status:'passed'|'failed'|'unknown', actual, evidence[] }  // closed DSL only
   screenshot({ clip? }) -> { bytes, meta:{url,viewport,scale,scroll,capturedAt,transformed:false} }
+  setViewport({ width, height }, control) -> { status:'verified'|'dispatched', evidence[] }   // 240..4096; v1.2
+  capture({ refId? }) -> { bytes, meta:{url,documentEpoch,viewport,scale,scroll,clip,capturedAt,transformed:false} }  // v1.2
   setOwnerBadge(owner)                                // visible drivers: show agent/human/quarantined
   events: 'navigated' | 'crashed' | 'closed' | 'popup' | 'download' | 'dialog'  (EventEmitter)
   dispose()
 }
 ```
 Actions DSL (closed): `click{ref}`, `fill{ref,text}` (rejects password/OTP/payment), `press{ref,key}`,
-`select{ref,value}`, `check{ref,checked}`, `navigate{url}`. Assertion DSL: `{kind:'visible'|'text'|'exists'|'count'|'url',
+`select{ref,value}`, `check{ref,checked}`, `navigate{url}`, `setViewport{width,height}` (v1.2). Assertion DSL: `{kind:'visible'|'text'|'exists'|'count'|'url',
 op:'equals'|'contains', expected, target?}` — semantics identical to `src/shared/assertions.js`.
 
 ---
@@ -232,3 +234,66 @@ storage engineer's `src/shared/redact.js` remains the journey-step redactor).
 - `driver.capabilities({ mode })` is now called by the broker with the requested mode.
 - The Electron driver releases its debugger lease after ~750 ms idle; `fullpage-capture` waits briefly for a busy debugger before falling back to an unmodified viewport shot.
 - `src/main/services/browser/bootstrap.js` builds the broker in the main process; the local bridge never starts under e2e and its default client grants no scopes.
+
+---
+
+# Addenda v1.2 — plan language, viewport, capture, structure
+
+Everything above still holds. Tests: `test/agent-runtime/broker-plan-kinds.test.js`, `plan-subset.test.js`,
+`drivers/playwright.structure.real.test.js`, `automation/real-chromium.test.mjs` (real headless Chromium, local fixtures).
+
+## Plan language (broker `validatePlan`, the authority)
+Step types: `navigate, click, fill, select, check, press, setViewport, capture, assert`.
+- `select{target,inputKey}` and `fill{target,inputKey}`: the key must be declared in `inputKeys`; the value is a plan input.
+- `check{target,checked:boolean}`, `press{target,key}` (key in Enter/Tab/Escape/ArrowDown/ArrowUp; Enter is write-like and needs approval).
+- `setViewport{width,height}`: integers 240..4096.
+- `capture{label,target?}`: label 1..200. Evidence only. Read-only, class `observe`, counted against the observation budget.
+  No target = the viewport; a target is resolved by a fresh observation and must match exactly one node (a role target
+  may omit the name). It can fail or time out a run (the picture could not be stored) but can never count as an assertion.
+- `assert{kind,op,expected,target?}`: kinds `visible|exists|text|count|url`, ops `equals|contains`. `visible` = (equals, "visible"),
+  `exists` = (equals, "exists"), `count` expected `^\d{1,9}$`, `text`/`url` expected non-empty (<= 1000). `url` takes no target, every
+  other kind requires one. Assertion and capture targets may be `{by:'role',role}` (any name); action targets need a name.
+- `src/main/services/automation/workflow-core.js` (zod) must stay a SUBSET of this validator (`plan-subset.test.js` checks
+  thousands of generated plans). The broker may be wider (it has no "trailing action" rule).
+
+## setViewport as an action
+`broker.act` accepts `{ kind:'setViewport', width, height }` (no ref; `documentEpoch` must be current, `observationId` is optional).
+Class `interact`, not write-like (no approval), spends one action, journaled (`summary.width/height`), idempotent by `operationId`.
+The driver calls `control.beforeDispatch()` immediately before resizing, then bumps its document epoch, emits `navigated` with
+`kind:'viewport'` and returns `state-change` evidence `{ change:'viewport', width, height, matches }` where `matches` means the engine AND
+the page (`innerWidth/innerHeight`) report the requested size. Only a match is `verified`; otherwise `dispatched` (a run then ends
+`uncertain`). The broker accepts the epoch move only with that evidence, and bumps the epoch / drops refs, cursors and observations
+itself if the driver did not announce it. Capability `viewport:true` is required; `startRun` answers `UNSUPPORTED` before any dispatch
+for a plan with `setViewport` (`viewport`) or `capture` (`screenshots`) on a driver without it.
+
+## capture evidence
+`driverPage.capture({ refId? })` returns unmodified PNG bytes (no masking, annotation or resizing; the owner badge is hidden) plus
+`meta{ url, documentEpoch, viewport, scale, scroll, clip|null, capturedAt, transformed:false }`. The broker refuses anything with
+`transformed !== false`, empty bytes or no viewport. It stores two artifacts per capture: the pixels (`kind:'screenshot'`,
+`image/png`, visibility `internal`) and a redacted public record (`kind:'capture'`: step id, label, artifact id and size of the
+pixels, redacted url, viewport, scale, scroll, clip, target description, capturedAt, `transformed:false`). The digest of the pixels is
+in the manifest's artifact list. Pixels are never part of a run DTO, event or step result; resource reads are owner-only and capped
+(base64 chunks sized so the whole response stays <= 64 KiB, with `nextCursor`). Quota failures are recorded as evidence errors and fail the step.
+
+## Skill resolution and inputs
+`skills.resolve({skillId, skillVersion, inputs, principal})` receives a COPY of the client's inputs and returns
+`{ plan, inputs?, argumentKeys?, skillDigest?, planDigest?, ... }`. The broker builds the plan inputs itself:
+1. client keys that the plan declares in `inputKeys` (must be strings);
+2. then `resolved.inputs`, only for declared keys, only strings of at most 10000 characters (the resolver is authoritative for keys it returns);
+3. every other client key must be listed in `resolved.argumentKeys` (arguments the skill consumed itself); otherwise `INVALID_INPUT`.
+`startRun.inputs` values may be strings or small plain JSON (depth <= 5, <= 500 nodes, <= 16 KiB). Plan inputs and arguments are
+memory-only; the run digest covers both. `retryRun` replays the original arguments.
+
+## Observation structure
+Observation nodes may carry `table` (role table/grid/treegrid) or `list` (role list), both bounded and re-clipped by `drivers/observe.js`:
+`table{ rowCount, rowsExact, columnCount, hasHeader, headers[<=12], cells[<=50][<=12], truncated{rows,columns,cells}, merged, withheld[] }`,
+cells <= 80 chars, a cell is a string, `''` (empty) or `null` (withheld: secret-looking column header, or a cell holding a secret-looking
+control; input values are never read); `list{ ordered, itemCount, itemsExact, items[<=30], truncated }`. At most 20 tables/lists per frame
+(`coverage.limitations` gets `table-list-scan-capped`), <= 20 KiB per payload (rows are dropped from the end and `truncated.rows` is set),
+and the 64 KiB / 200 node caps still apply to the whole observation. The payload is part of the state signature used by delta observations.
+`observation.pagination = { next?, prev?, ambiguous? }`: `{ref,name,enabled}` of the single link/button whose accessible name is a known
+Next/Previous label; two candidates yield no ref and `ambiguous`. Role locators in assertions may omit the name ("any name"); an empty name means
+"no accessible name". The Electron driver shares the probe and observation builder (tables and lists included); it has no `setViewport`/`capture`.
+
+## Not supported
+Popups and second tabs cannot be addressed through the broker API (no page listing), so popup corpus tasks stay `unsupported`.

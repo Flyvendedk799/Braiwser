@@ -77,7 +77,7 @@ repair verification (3), export (2), adversarial correctness (5). 15 are marked 
 ## Known limits of this version
 
 - The current tool surface has no page listing, so tasks that open a second tab are `unsupported`.
-- The MCP surface has no viewport control, so `note-02` is `unsupported`.
+- `setViewport` is a `browser_act` action, so `note-02` runs against the Playwright driver. Popups and second tabs are still not addressable through the tool surface (no page listing), so those tasks stay `unsupported`.
 - The observation reports landmarks, h1/h2 headings, interactables, status and error text, not table cells, so
   the table-extraction tasks fail honestly (never a false pass) until the driver exposes table structure.
 - The Playwright MCP baseline is unmeasured: no pinned `@playwright/mcp` is installed here and this harness has no
