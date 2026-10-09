@@ -58,6 +58,10 @@ function shellBackground(theme) {
   return dark ? '#0e0f13' : '#f6f7f9';
 }
 
+// Electron >= 35 reports console levels as strings ('info' | 'warning' | 'error' | 'debug').
+const CONSOLE_LEVELS = { info: 'log', warning: 'warn', error: 'error', debug: 'log' };
+function consoleLevel(level) { return CONSOLE_LEVELS[level] || level; }
+
 function createWindow(settings) {
   mainWindow = new BrowserWindow({
     width: 1480,
@@ -84,9 +88,8 @@ function createWindow(settings) {
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
   const e2e = isE2E();
   if (e2e) {
-    const levels = ['log', 'warn', 'error'];
-    mainWindow.webContents.on('console-message', (_e, level, message) => {
-      console.log(`[renderer:${levels[level] || level}] ${message}`);
+    mainWindow.webContents.on('console-message', (event) => {
+      console.log(`[renderer:${consoleLevel(event.level)}] ${event.message}`);
     });
     // Every terminal state (done, crash, hang, load failure, main exception,
     // window closed early, overall timeout) goes through ONE finalizer that
@@ -116,9 +119,8 @@ function createWindow(settings) {
   if (process.argv.includes('--dev')) {
     mainWindow.webContents.openDevTools({ mode: 'detach' });
     // Forward renderer console + load failures to the terminal for debugging.
-    const levels = ['log', 'warn', 'error'];
-    mainWindow.webContents.on('console-message', (_e, level, message, line, source) => {
-      console.log(`[renderer:${levels[level] || level}] ${message}  (${source}:${line})`);
+    mainWindow.webContents.on('console-message', (event) => {
+      console.log(`[renderer:${consoleLevel(event.level)}] ${event.message}  (${event.sourceId}:${event.lineNumber})`);
     });
     mainWindow.webContents.on('did-fail-load', (_e, code, desc, url) => {
       console.log(`[did-fail-load] ${code} ${desc} ${url}`);
