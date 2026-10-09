@@ -80,3 +80,28 @@ message, dispatched, effectUnknown, retry }`. Brokers throw `Error` with `.publi
 6. Playwright driver: `require('playwright-core')`, launched with `chromiumSandbox: true`,
    `acceptDownloads: false` unless a download expectation is granted. Never `force:true`.
 7. Only ONE process writes the ledger/store (the owning broker). No sidecar JSON writers.
+
+## Driver interface (implemented by `drivers/*.js`, consumed by broker/run)
+```
+driver.name                       'playwright' | 'electron-embedded'
+driver.capabilities()             versioned doc: { driver, version, dom, frames, shadowDom, canvas, popups, downloads,
+                                  uploads, dialogs, permissions, screenshots, humanHandoff:'native'|'remote-view'|
+                                  'checkpoint-relaunch'|'unsupported', liveModeSwitch:false, modes:[...] }
+driver.open({ mode, viewport, locale, timezoneId, profile, onPageEvent }) -> DriverSession
+DriverSession { capabilities, pages: Map<pageId, DriverPage>, newPage(), close() }
+DriverPage {
+  pageId, url(), documentEpoch,                      // epoch bumps on ANY navigation incl. SPA/frame
+  navigate(url, { signal, timeoutMs }) -> { outcome:'ready'|'failed'|'timeout'|'cancelled', url }
+  observe({ maxNodes, focus, cursor }) -> { nodes:[{refId,role,name,enabled?,editable?,frameId?}], coverage, truncated, nextCursor }
+  resolve(refId) -> { fingerprint, scope }          // server-side only, never exposed
+  act(cmd, control) -> { status:'dispatched'|'verified', evidence[] }   // control = OwnedPage {signal,check,beforeDispatch}
+  evaluateAssertion(assertion) -> { status:'passed'|'failed'|'unknown', actual, evidence[] }  // closed DSL only
+  screenshot({ clip? }) -> { bytes, meta:{url,viewport,scale,scroll,capturedAt,transformed:false} }
+  setOwnerBadge(owner)                                // visible drivers: show agent/human/quarantined
+  events: 'navigated' | 'crashed' | 'closed' | 'popup' | 'download' | 'dialog'  (EventEmitter)
+  dispose()
+}
+```
+Actions DSL (closed): `click{ref}`, `fill{ref,text}` (rejects password/OTP/payment), `press{ref,key}`,
+`select{ref,value}`, `check{ref,checked}`, `navigate{url}`. Assertion DSL: `{kind:'visible'|'text'|'exists'|'count'|'url',
+op:'equals'|'contains', expected, target?}` — semantics identical to `src/shared/assertions.js`.
