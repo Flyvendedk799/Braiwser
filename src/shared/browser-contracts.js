@@ -18,7 +18,11 @@ const ACTIVE_STATES = Object.freeze(['queued', 'running', 'needsApproval', 'need
 const TERMINAL_STATES = Object.freeze(['passed', 'failed', 'cancelled', 'timedOut', 'uncertain', 'interrupted']);
 const VERDICTS = Object.freeze(['pending', 'passed', 'failed', 'cancelled', 'timedOut', 'skipped', 'unknown']);
 const TOOL_CLASSES = Object.freeze(['observe', 'navigate', 'interact', 'submit', 'download', 'upload', 'credentials', 'preview-edit']);
-const ACTION_KINDS = Object.freeze(['click', 'fill', 'press', 'select', 'check', 'navigate']);
+const ACTION_KINDS = Object.freeze(['click', 'fill', 'press', 'select', 'check', 'navigate', 'setViewport']);
+// Actions that address the page itself, not a ref from an observation.
+const REFLESS_ACTIONS = Object.freeze(['navigate', 'setViewport']);
+const VIEWPORT_MIN = 240;
+const VIEWPORT_MAX = 4096;
 const PRESS_KEYS = Object.freeze(['Enter', 'Tab', 'Escape', 'ArrowDown', 'ArrowUp']);
 const HANDOFF_METHODS = Object.freeze(['native', 'remote-view', 'checkpoint-relaunch', 'unsupported']);
 const OWNERS = Object.freeze(['agent', 'handoff-pending', 'human', 'quarantined']);
@@ -153,6 +157,8 @@ function validateAction(a) {
     case 'check': exact(a, ['kind', 'ref', 'checked'], 'action');
       if (typeof a.checked !== 'boolean') throw invalid('checked must be boolean');
       return { kind: 'check', ref: clientId(a.ref, 'ref'), checked: a.checked };
+    case 'setViewport': exact(a, ['kind', 'width', 'height'], 'action');
+      return { kind: 'setViewport', width: int(a.width, 'width', { min: VIEWPORT_MIN, max: VIEWPORT_MAX }), height: int(a.height, 'height', { min: VIEWPORT_MIN, max: VIEWPORT_MAX }) };
     default: exact(a, ['kind', 'url'], 'action'); return { kind: 'navigate', url: str(a.url, 'url', { max: 2048 }) };
   }
 }
@@ -209,7 +215,7 @@ function validateObserve(i) {
 function validateAct(i) {
   exact(i, ['sessionId', 'pageId', 'runId', 'observationId', 'documentEpoch', 'operationId', 'action', 'approvalId', 'timeoutMs'], 'act');
   const action = validateAction(i.action);
-  if (action.kind !== 'navigate' && i.observationId === undefined) throw invalid('observationId is required for ref actions');
+  if (!REFLESS_ACTIONS.includes(action.kind) && i.observationId === undefined) throw invalid('observationId is required for ref actions');
   return { sessionId: clientId(i.sessionId, 'sessionId'), pageId: clientId(i.pageId, 'pageId'), runId: opt(i.runId, (v) => clientId(v, 'runId')),
     observationId: opt(i.observationId, (v) => clientId(v, 'observationId')), documentEpoch: int(i.documentEpoch, 'documentEpoch'),
     operationId: clientId(i.operationId, 'operationId'), action, approvalId: opt(i.approvalId, (v) => clientId(v, 'approvalId')),
@@ -232,11 +238,40 @@ function validateGetRun(i) {
 
 // A closed workflow plan, as produced by automation/workflow.mjs. Validated
 // again here: the broker never trusts a plan it did not check itself.
+// workflow-core.js (zod) must stay a SUBSET of this validator (test: plan-subset).
 const TARGET_BY = ['role', 'testId', 'label'];
-function validateTarget(t) {
+// Action targets always need an accessible name. Assertion / capture targets may
+// name a role alone ("any row"); uniqueness is then decided at resolution time.
+function validateTarget(t, { nameOptional = false } = {}) {
   if (!isObj(t) || !TARGET_BY.includes(t.by)) throw invalid('step target');
-  if (t.by === 'role') { exact(t, ['by', 'role', 'name'], 'target'); return { by: 'role', role: str(t.role, 'role', { max: 200 }), name: str(t.name, 'name', { max: 200 }) }; }
+  if (t.by === 'role') {
+    exact(t, ['by', 'role', 'name'], 'target');
+    const role = str(t.role, 'role', { max: 200 });
+    if (t.name === undefined && nameOptional) return { by: 'role', role };
+    return { by: 'role', role, name: str(t.name, 'name', { max: 200 }) };
+  }
   exact(t, ['by', 'value'], 'target'); return { by: t.by, value: str(t.value, 'value', { max: 200 }) };
+}
+const ASSERT_KINDS = Object.freeze(['visible', 'text', 'exists', 'count', 'url']);
+const ASSERT_OPS = Object.freeze(['equals', 'contains']);
+const PLAN_STEP_TYPES = Object.freeze(['navigate', 'click', 'fill', 'select', 'check', 'press', 'setViewport', 'capture', 'assert']);
+function validateAssertStep(s, id) {
+  exact(s, ['id', 'type', 'target', 'kind', 'op', 'expected'], 'step');
+  if (!ASSERT_KINDS.includes(s.kind) || !ASSERT_OPS.includes(s.op)) throw invalid('assert kind/op');
+  if (typeof s.expected !== 'string' || s.expected.length > 1000) throw invalid('assert.expected');
+  const out = { id, type: 'assert', kind: s.kind, op: s.op, expected: s.expected };
+  if (s.kind === 'url') {
+    if (s.target !== undefined) throw invalid('url assertion takes no target');
+    if (!s.expected) throw invalid('url assertion needs an expected value');
+    return out;
+  }
+  if (s.target === undefined) throw invalid(`${s.kind} assertion requires a target`);
+  out.target = validateTarget(s.target, { nameOptional: ['visible', 'exists', 'count'].includes(s.kind) });
+  if (s.kind === 'visible' && (s.op !== 'equals' || s.expected !== 'visible')) throw invalid('visibility assertion');
+  if (s.kind === 'exists' && (s.op !== 'equals' || s.expected !== 'exists')) throw invalid('existence assertion');
+  if (s.kind === 'text' && !s.expected) throw invalid('text assertion needs an expected value');
+  if (s.kind === 'count' && !/^d{1,9}$/.test(s.expected)) throw invalid('count assertion needs a non-negative integer');
+  return out;
 }
 function validatePlan(plan) {
   exact(plan, ['schemaVersion', 'skillId', 'version', 'inputKeys', 'maxDurationMs', 'steps'], 'plan');
@@ -245,6 +280,7 @@ function validatePlan(plan) {
   const inputKeys = plan.inputKeys.map((k) => str(k, 'inputKey', { max: 200 }));
   if (!Array.isArray(plan.steps) || plan.steps.length < 1 || plan.steps.length > 200) throw invalid('plan.steps (1-200)');
   const ids = new Set();
+  const declared = (k) => { const inputKey = str(k, 'inputKey', { max: 200 }); if (!inputKeys.includes(inputKey)) throw invalid('undeclared input key'); return inputKey; };
   const steps = plan.steps.map((s) => {
     if (!isObj(s)) throw invalid('step');
     const id = str(s.id, 'step.id', { max: 200 });
@@ -253,24 +289,31 @@ function validatePlan(plan) {
     switch (s.type) {
       case 'navigate': exact(s, ['id', 'type', 'url'], 'step'); return { id, type: 'navigate', url: str(s.url, 'url', { max: 2048 }) };
       case 'click': exact(s, ['id', 'type', 'target'], 'step'); return { id, type: 'click', target: validateTarget(s.target) };
-      case 'fill': {
-        exact(s, ['id', 'type', 'target', 'inputKey'], 'step');
-        const inputKey = str(s.inputKey, 'inputKey', { max: 200 });
-        if (!inputKeys.includes(inputKey)) throw invalid('undeclared input key');
-        return { id, type: 'fill', target: validateTarget(s.target), inputKey };
+      case 'fill': exact(s, ['id', 'type', 'target', 'inputKey'], 'step'); return { id, type: 'fill', target: validateTarget(s.target), inputKey: declared(s.inputKey) };
+      case 'select': exact(s, ['id', 'type', 'target', 'inputKey'], 'step'); return { id, type: 'select', target: validateTarget(s.target), inputKey: declared(s.inputKey) };
+      case 'check':
+        exact(s, ['id', 'type', 'target', 'checked'], 'step');
+        if (typeof s.checked !== 'boolean') throw invalid('check.checked must be boolean');
+        return { id, type: 'check', target: validateTarget(s.target), checked: s.checked };
+      case 'press':
+        exact(s, ['id', 'type', 'target', 'key'], 'step');
+        if (!PRESS_KEYS.includes(s.key)) throw invalid('key not allowed');
+        return { id, type: 'press', target: validateTarget(s.target), key: s.key };
+      case 'setViewport':
+        exact(s, ['id', 'type', 'width', 'height'], 'step');
+        return { id, type: 'setViewport', width: int(s.width, 'width', { min: VIEWPORT_MIN, max: VIEWPORT_MAX }), height: int(s.height, 'height', { min: VIEWPORT_MIN, max: VIEWPORT_MAX }) };
+      case 'capture': {
+        exact(s, ['id', 'type', 'label', 'target'], 'step');
+        const out = { id, type: 'capture', label: str(s.label, 'label', { max: 200 }) };
+        if (s.target !== undefined) out.target = validateTarget(s.target, { nameOptional: true });
+        return out;
       }
-      case 'assert': {
-        exact(s, ['id', 'type', 'target', 'kind', 'op', 'expected'], 'step');
-        if (!['visible', 'text'].includes(s.kind) || !['equals', 'contains'].includes(s.op)) throw invalid('assert kind/op');
-        if (typeof s.expected !== 'string' || s.expected.length > 1000) throw invalid('assert.expected');
-        if (s.kind === 'visible' && (s.op !== 'equals' || s.expected !== 'visible')) throw invalid('visibility assertion');
-        return { id, type: 'assert', target: validateTarget(s.target), kind: s.kind, op: s.op, expected: s.expected };
-      }
+      case 'assert': return validateAssertStep(s, id);
       default: throw brokerError('UNSUPPORTED', 'unknown step type', { detail: 'UNKNOWN_STEP' });
     }
   });
   if (!steps.some((s) => s.type === 'assert')) throw invalid('plan needs an assertion');
-  return freezeDeep({ schemaVersion: 1, skillId: str(plan.skillId, 'skillId', { max: 200 }), version: str(plan.version, 'version', { max: 40, re: /^\d+\.\d+\.\d+$/ }),
+  return freezeDeep({ schemaVersion: 1, skillId: str(plan.skillId, 'skillId', { max: 200 }), version: str(plan.version, 'version', { max: 40, re: /^d+.d+.d+$/ }),
     inputKeys, maxDurationMs: int(plan.maxDurationMs, 'plan.maxDurationMs', { min: 1000, max: 300000 }), steps });
 }
 
@@ -361,7 +404,7 @@ function capText(text, { maxBytes = DEFAULT_MAX_RESPONSE_BYTES, offset = 0 } = {
 
 module.exports = {
   SCHEMA_VERSION, PRINCIPAL_KINDS, DRIVER_NAMES, MODES, ERROR_CODES, RETRY, RECEIPT_STATUS, RUN_STATES, ACTIVE_STATES, TERMINAL_STATES, VERDICTS,
-  TOOL_CLASSES, ACTION_KINDS, PRESS_KEYS, HANDOFF_METHODS, OWNERS, RUN_TRANSITIONS, canTransition, DEFAULT_MAX_RESPONSE_BYTES,
+  TOOL_CLASSES, ACTION_KINDS, REFLESS_ACTIONS, VIEWPORT_MIN, VIEWPORT_MAX, ASSERT_KINDS, ASSERT_OPS, PLAN_STEP_TYPES, PRESS_KEYS, HANDOFF_METHODS, OWNERS, RUN_TRANSITIONS, canTransition, DEFAULT_MAX_RESPONSE_BYTES,
   newId, isServerId, isClientId, canonical, canonicalJson, sha256, freezeDeep, clone,
   brokerError, invalid, publicError, toBrokerError, CODE_MAP,
   validatePrincipal, validateAction, validateGrantRequest, validateOpenSession, validateSessionPage, validateObserve, validateAct, validateStartRun, validateGetRun, validatePlan,

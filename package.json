@@ -67,7 +67,12 @@
       "target": [
         "AppImage"
       ]
-    }
+    },
+    "asarUnpack": [
+      "src/main/services/automation/**/*",
+      "node_modules/@modelcontextprotocol/**/*",
+      "node_modules/zod/**/*"
+    ]
   },
   "devDependencies": {
     "electron": "44.7.0",

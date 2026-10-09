@@ -226,3 +226,9 @@ every emitted input and external effect). `test/agent-runtime/harness.js` boots 
 ## New shared file
 `src/shared/browser-redact.js` (general text/URL/value redaction used by contracts, ledger summaries and evidence; the
 storage engineer's `src/shared/redact.js` remains the journey-step redactor).
+
+## Addendum v1.2 (lead)
+- The shared assertion spec (`src/shared/assertions.js`) also supports `op:'matches'` (regular expression) for `text` and `url` assertions, in addition to `equals|contains`.
+- `driver.capabilities({ mode })` is now called by the broker with the requested mode.
+- The Electron driver releases its debugger lease after ~750 ms idle; `fullpage-capture` waits briefly for a busy debugger before falling back to an unmodified viewport shot.
+- `src/main/services/browser/bootstrap.js` builds the broker in the main process; the local bridge never starts under e2e and its default client grants no scopes.
