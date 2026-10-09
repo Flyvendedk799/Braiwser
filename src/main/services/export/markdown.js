@@ -51,9 +51,11 @@ function describeTarget(annotation) {
   if (attrs.role) lines.push(`- **role:** ${attrs.role}`);
   if (attrs.ariaLabel) lines.push(`- **aria-label:** ${attrs.ariaLabel}`);
 
-  if (annotation.viewport && annotation.viewport.w) {
-    const v = annotation.viewport;
-    lines.push(`- **Captured at:** ${v.label || 'viewport'} ${v.w}×${v.h}`);
+  // Dimensions are shown only when finite and bounded (CE-04); anything else is omitted.
+  const v = annotation.viewport;
+  if (v && typeof v === 'object' && Number.isFinite(v.w) && Number.isFinite(v.h) && v.w > 0 && v.h > 0 && v.w <= 20000 && v.h <= 20000) {
+    const label = typeof v.label === 'string' ? v.label.replace(/[^ -~]+/g, ' ').slice(0, 40) : '';
+    lines.push(`- **Captured at:** ${label || 'viewport'} ${Math.round(v.w)}×${Math.round(v.h)}`);
   }
 
   const box = t.box;

@@ -95,12 +95,25 @@ function labelFor(el) {
 
 // ---------------------------------------------------------------- contrast
 
+// Parse a computed CSS colour. Understands the legacy comma form and the
+// space/slash form, with alpha as a number or a percentage. Anything else
+// (color(), oklch(), …) returns null — callers must treat that as "unknown",
+// never as a colour they can do arithmetic on.
 function parseColor(value) {
-  const m = String(value || '').match(/rgba?\(([^)]+)\)/);
+  const v = String(value || '').trim().toLowerCase();
+  if (v === 'transparent') return { r: 0, g: 0, b: 0, a: 0 };
+  const m = v.match(/^rgba?\(([^)]+)\)$/);
   if (!m) return null;
-  const parts = m[1].split(/[,\s/]+/).filter(Boolean).map(Number);
-  if (parts.length < 3 || parts.some((n) => Number.isNaN(n))) return null;
-  return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 };
+  const parts = m[1].split(/[,\s/]+/).filter(Boolean);
+  if (parts.length < 3) return null;
+  const chan = (p) => (p.endsWith('%') ? (parseFloat(p) / 100) * 255 : Number(p));
+  const r = chan(parts[0]);
+  const g = chan(parts[1]);
+  const b = chan(parts[2]);
+  let a = 1;
+  if (parts.length > 3) a = parts[3].endsWith('%') ? parseFloat(parts[3]) / 100 : Number(parts[3]);
+  if ([r, g, b, a].some((n) => Number.isNaN(n))) return null;
+  return { r, g, b, a: Math.max(0, Math.min(1, a)) };
 }
 
 function relativeLuminance({ r, g, b }) {
@@ -111,31 +124,57 @@ function relativeLuminance({ r, g, b }) {
   return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
 }
 
+// Porter-Duff source-over, keeping the accumulated alpha: `fg` painted on top
+// of `bg`. The result is only opaque if one of the layers was. (Flattening to
+// a=1 after the first translucent layer is what made two 10% blacks over white
+// read as pure black.)
 function blend(fg, bg) {
-  const a = fg.a == null ? 1 : fg.a;
-  return {
-    r: fg.r * a + bg.r * (1 - a),
-    g: fg.g * a + bg.g * (1 - a),
-    b: fg.b * a + bg.b * (1 - a),
-    a: 1,
-  };
+  const fa = fg.a == null ? 1 : fg.a;
+  const ba = bg.a == null ? 1 : bg.a;
+  const a = fa + ba * (1 - fa);
+  if (a <= 0) return { r: 0, g: 0, b: 0, a: 0 };
+  const mix = (f, b2) => (f * fa + b2 * ba * (1 - fa)) / a;
+  return { r: mix(fg.r, bg.r), g: mix(fg.g, bg.g), b: mix(fg.b, bg.b), a };
 }
 
-// Walk ancestors for the first opaque-enough background; default to white.
+const CANVAS = { r: 255, g: 255, b: 255, a: 1 };
+
+// The colour behind `el`'s text, composited layer by layer from the element up
+// through its ancestors until an opaque layer is reached, then flattened onto
+// the default white canvas exactly once.
+//
+// Returns { r, g, b, a: 1 } when the answer is a real colour, or
+// { indeterminate: true, reason } when something in the stack cannot be
+// resolved to a flat colour (background-image / gradient above the first
+// opaque layer, or a colour syntax we cannot parse). Callers must not report a
+// confident ratio for an indeterminate background.
 function effectiveBackground(el) {
   let node = el;
-  let acc = null;
+  let acc = null; // everything painted so far, top-down
   while (node && node.nodeType === 1) {
-    const c = parseColor(getComputedStyle(node).backgroundColor);
-    if (c && c.a > 0) {
-      acc = acc ? blend(acc, c) : c;
-      if (acc.a >= 0.999 || c.a >= 0.999) return { ...acc, a: 1 };
+    let cs;
+    try {
+      cs = getComputedStyle(node);
+    } catch (_e) {
+      return { indeterminate: true, reason: 'style-unavailable' };
+    }
+    // A background image sits above that same element's background colour, so
+    // it has to be checked before the colour is folded in.
+    const image = cs.backgroundImage;
+    if (image && image !== 'none') return { indeterminate: true, reason: 'background-image' };
+    const raw = String(cs.backgroundColor || '').trim();
+    if (raw) {
+      const c = parseColor(raw);
+      if (!c) return { indeterminate: true, reason: 'unparseable-color' };
+      if (c.a > 0) {
+        acc = acc ? blend(acc, c) : c;
+        if (acc.a >= 0.999) return { r: acc.r, g: acc.g, b: acc.b, a: 1 };
+      }
     }
     node = node.parentElement;
   }
-  const page = parseColor(getComputedStyle(document.documentElement).backgroundColor);
-  const base = page && page.a > 0 ? page : { r: 255, g: 255, b: 255, a: 1 };
-  return acc ? blend(acc, base) : base;
+  const flat = acc ? blend(acc, CANVAS) : CANVAS;
+  return { r: flat.r, g: flat.g, b: flat.b, a: 1 };
 }
 
 function contrastRatio(a, b) {
@@ -168,6 +207,7 @@ function runAudit({ describe } = {}) {
   const findings = [];
   const counts = {};
   const seenPerRule = {};
+  let contrastIndeterminate = 0; // text over images/gradients: neither passed nor failed
 
   const push = (ruleId, el, detail, extra) => {
     seenPerRule[ruleId] = (seenPerRule[ruleId] || 0) + 1;
@@ -298,6 +338,12 @@ function runAudit({ describe } = {}) {
       const fg = parseColor(style.color);
       if (fg && fg.a > 0.1) {
         const bg = effectiveBackground(el);
+        if (bg.indeterminate) {
+          // A gradient/image (or an unparseable colour) sits behind this text:
+          // there is no honest single ratio, so do not claim a pass or a fail.
+          contrastIndeterminate++;
+          continue;
+        }
         const ratio = contrastRatio(blend(fg, bg), bg);
         const min = isLargeText(style) ? 3 : 4.5;
         if (ratio < min) {
@@ -321,6 +367,7 @@ function runAudit({ describe } = {}) {
     title: document.title || location.href,
     scanned: all.length,
     truncated: all.length >= MAX_ELEMENTS,
+    contrastIndeterminate,
     counts,
     total: findings.length,
     findings,
@@ -339,4 +386,9 @@ function outline(el) {
   return s;
 }
 
-module.exports = { runAudit, RULES };
+// `internals` is exposed for unit tests (numeric compositing references).
+module.exports = {
+  runAudit,
+  RULES,
+  internals: { parseColor, blend, effectiveBackground, contrastRatio, relativeLuminance },
+};

@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Swallowed click</title></head>
+<body>
+<main>
+  <button id="btn" type="button">Do the thing</button>
+  <div role="status" id="log">idle</div>
+</main>
+<script>
+// A hostile / buggy page: a window-level capture listener eats every click before it reaches the button.
+window.addEventListener('click', function (e) { e.stopImmediatePropagation(); e.preventDefault(); }, true);
+document.getElementById('btn').addEventListener('click', function () { document.getElementById('log').textContent = 'handled'; });
+</script>
+</body></html>

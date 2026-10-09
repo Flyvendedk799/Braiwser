@@ -2,65 +2,114 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://braiwser.app/schema/braiwser-bundle.v1.json",
   "title": "Braiwser project bundle",
-  "description": "Portable interchange format for Braiwser projects, sessions, annotations, and recordings.",
+  "description": "Portable interchange format for Braiwser projects, sessions, annotations, and recordings. Files written by Braiwser carry BOTH `format` and `kind`; files written by earlier builds carry only `kind`, and files produced from this schema may carry only `format`. Importers accept any of the three. Secret values are never part of a bundle: a text entry into a secret field has `secret: true`, `placeholder: \"{{secret}}\"` and no `value`.",
   "type": "object",
-  "required": ["format", "version", "project"],
+  "required": ["version", "project"],
+  "anyOf": [
+    { "required": ["format"] },
+    { "required": ["kind"] }
+  ],
   "properties": {
     "format": { "const": "braiwser-bundle" },
+    "kind": { "const": "braiwser.project-bundle", "description": "Legacy discriminator, still written for compatibility." },
     "version": { "type": "integer", "minimum": 1 },
+    "exportedAt": { "type": "string", "maxLength": 64 },
     "project": {
       "type": "object",
       "required": ["name"],
       "properties": {
-        "id": { "type": "string" },
-        "name": { "type": "string" },
-        "path": { "type": "string" },
-        "kind": { "enum": ["local", "url"] }
+        "id": { "type": "string", "maxLength": 200 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "path": { "type": "string", "description": "Source machine path. Ignored on import: imported projects have no path until the user picks a local directory." },
+        "kind": { "enum": ["local", "url"] },
+        "imported": { "type": "boolean" }
       }
     },
     "sessions": {
       "type": "array",
+      "maxItems": 1000,
       "items": {
         "type": "object",
+        "required": ["id"],
         "properties": {
-          "id": { "type": "string" },
+          "id": { "type": "string", "minLength": 1, "maxLength": 200, "description": "Unique within the bundle; annotations reference it." },
           "projectId": { "type": "string" },
-          "name": { "type": "string" },
-          "url": { "type": "string" },
-          "title": { "type": "string" }
+          "name": { "type": "string", "maxLength": 200 },
+          "url": { "type": "string", "maxLength": 8000 },
+          "title": { "type": "string", "maxLength": 300 }
         }
       }
     },
     "annotations": {
       "type": "array",
+      "maxItems": 50000,
       "items": {
         "type": "object",
+        "required": ["sessionId"],
         "properties": {
           "id": { "type": "string" },
-          "sessionId": { "type": "string" },
+          "sessionId": { "type": "string", "description": "Must name a session in this bundle; otherwise the annotation is reported as orphaned and not imported." },
           "kind": { "enum": ["element", "region", "edit"] },
-          "action": { "type": "string" },
-          "note": { "type": "string" },
+          "action": { "type": "string", "maxLength": 40 },
+          "note": { "type": "string", "maxLength": 20000 },
           "status": { "enum": ["open", "resolved"] },
           "priority": { "enum": ["low", "normal", "high", "critical"] },
           "visibility": { "enum": ["internal", "client"] },
           "sortOrder": { "type": "number" },
           "target": { "type": "object" },
-          "viewport": { "type": "object" },
-          "url": { "type": "string" }
+          "viewport": {
+            "type": "object",
+            "required": ["w", "h"],
+            "properties": {
+              "w": { "type": "number", "minimum": 1, "maximum": 20000 },
+              "h": { "type": "number", "minimum": 1, "maximum": 20000 },
+              "label": { "type": "string", "maxLength": 40 }
+            }
+          },
+          "url": { "type": "string", "maxLength": 8000 }
         }
       }
     },
     "recordings": {
       "type": "array",
+      "maxItems": 500,
       "items": {
         "type": "object",
         "properties": {
           "id": { "type": "string" },
           "projectId": { "type": "string" },
-          "name": { "type": "string" },
-          "startUrl": { "type": "string" },
-          "steps": { "type": "array" }
+          "name": { "type": "string", "maxLength": 200 },
+          "startUrl": { "type": "string", "maxLength": 8000 },
+          "steps": {
+            "type": "array",
+            "maxItems": 5000,
+            "items": {
+              "type": "object",
+              "required": ["type"],
+              "properties": {
+                "type": { "enum": ["navigate", "click", "input", "key", "scroll", "assert"] },
+                "selector": { "type": "string", "maxLength": 2000 },
+                "control": { "enum": ["text", "select", "multiselect", "checkbox", "radio", "secret"] },
+                "secret": { "type": "boolean" },
+                "placeholder": { "type": "string", "maxLength": 40 },
+                "value": {
+                  "anyOf": [
+                    { "type": "string", "maxLength": 100000 },
+                    { "type": "boolean" },
+                    { "type": "number" },
+                    { "type": "array", "maxItems": 200, "items": { "type": "string", "maxLength": 2000 } }
+                  ]
+                },
+                "kind": { "enum": ["exists", "visible", "text", "count", "url"], "description": "Assertion kind (type = assert)." },
+                "op": { "enum": ["contains", "equals", "matches"] },
+                "expected": { "anyOf": [{ "type": "string", "maxLength": 4000 }, { "type": "number" }] },
+                "url": { "type": "string", "maxLength": 8000 },
+                "key": { "type": "string", "maxLength": 40 },
+                "x": { "type": "number" },
+                "y": { "type": "number" }
+              }
+            }
+          }
         }
       }
     }

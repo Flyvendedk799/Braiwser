@@ -1,3 +1,5 @@
+> **Historical planning document.** It records plans made earlier in the project and may describe work that is done, changed or abandoned. For what the code does today see README.md and docs/ARCHITECTURE.md.
+
 # Braiwser — v2 plan
 
 > **Historical.** All four phases below shipped, and the product has since gone

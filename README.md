@@ -13,7 +13,10 @@ accessibility auditor and a journey recorder, purpose-built for turning "this lo
 wrong" into something an engineer or an agent can act on directly.
 
 Everything stays on your machine. Projects, notes, journeys and API keys never
-leave it; nothing is uploaded unless you run an AI task with your own key.
+leave it; the only thing that is ever sent anywhere is the content of an AI task
+you run, and only to the provider you connected (Anthropic or OpenAI). There is
+no hosted Braiwser service: sync, team workspaces, billing and single sign-on are
+**not implemented** (see [What is and is not implemented](#what-is-and-is-not-implemented)).
 
 ---
 
@@ -31,7 +34,11 @@ npm run dist         # installers
 npm run dist:dir     # unpacked app, faster
 ```
 
-Requires Node 18+ for development. The packaged app bundles its own runtime.
+Requires **Node 20+** for development (`engines` enforces it; the `@flyvendedk799/ai-auth`
+dependency needs it, and the CI uses Node 22). The packaged app bundles its own runtime.
+
+Releases bake their licence configuration in at build time: see
+[Licensing and releases](#licensing-and-releases).
 
 ---
 
@@ -144,7 +151,10 @@ corrupting what you already have.
   `claude` CLI is signed in on your machine it works with **nothing configured** —
   the call goes on that subscription. Otherwise sign in to a Claude subscription
   from Settings, or paste an Anthropic/OpenAI API key. **With no credential at all
-  it still works**, synthesizing a useful result locally from your notes.
+  it still works**, synthesizing a useful result locally from your notes (the
+  result is labelled as locally generated and no model is called). A credential
+  that exists but is expired, unreadable or rejected is reported as an error
+  instead; it is never quietly replaced by a local answer.
 
 Guest console errors and failed loads are captured (bounded, per tab) and included
 in the prompt and Markdown exports, so the agent sees runtime errors next to the
@@ -271,8 +281,62 @@ nothing configured. The toolbar shows the tools for your persona; everything els
 stays in **More tools** and the native menu. After a hand-off, **Verify session**
 re-runs the audit and journey and stores a before/after on the session.
 
-Without a key, AI tasks fall back to local synthesis so the app stays fully useful
-offline.
+With no credential at all, AI tasks fall back to a labelled local synthesis so the
+app stays useful offline. If a credential is present but unusable (expired login,
+undecryptable saved key, damaged login file) the task fails with a message that
+says what to fix. AI calls honour the configured timeout through the whole
+response, not just the headers, and can be cancelled from the panel.
+
+---
+
+## What is and is not implemented
+
+| Area | Status |
+| --- | --- |
+| Inspect, annotate, audit, journeys, exports, hand-off, local AI synthesis | Implemented. |
+| AI through Claude / ChatGPT subscription or your own API key | Implemented; a real provider call needs a credential. |
+| Cloud sync | **Local-only.** "Sign in" stores an email on this machine; the queue stages encrypted snapshots locally and uploads nothing. It is not a backup. |
+| Team workspaces, invitations, roles | **Local-only records.** Invitations are not sent; roles are not enforced; comments are not shared. |
+| Billing / checkout / seats | **Not implemented.** Seat counts are local numbers; there is no payment flow. |
+| SSO (SAML/OIDC), SCIM, self-hosted sync | **Not implemented.** Reported as `not-implemented`; configuring them is refused. |
+| Integrations (GitHub / Linear / Jira / Slack / webhooks) | **Drafts only.** Braiwser builds the payload; it does not authenticate with or send to those services. A CI workflow starter can be written to your project. |
+| Licences | Offline, Ed25519-verified tokens. See below. |
+| Data export / erase | Covers every item in the data inventory (`billing.dataInventory`): projects, review sessions, notes, journeys, comments, bookmarks, history, workspaces, analytics, audit log, sync queue, your profile / agency / integration settings, the licence, and the stored AI credentials and key files. It does not touch files you exported, handoff files written into your project folders, embedded-browser site data, or logins owned by the `claude` / `codex` CLIs. |
+
+---
+
+## Licensing and releases
+
+A licence is `BRW1.<payload>.<signature>`, signed with **Ed25519**. The app embeds
+only a *public* key and verifies offline; it cannot mint a licence. The private key
+never enters the repository (`.license-keys/` is git-ignored).
+
+Whether Pro features are gated is decided at **build time**, not by the environment
+the installed app runs in:
+
+- `scripts/gen-build-config.js --channel release` writes `src/main/build-config.json`
+  (git-ignored, packed into the app): licences enforced, no demo keys, no e2e bypass,
+  and it **fails the build** without `BRAIWSER_LICENSE_PUBLIC_KEY`. `release.yml` does
+  this and then checks the packed `app.asar` with `scripts/verify-packaged-config.js`.
+- `--channel ci` enforces licences but keeps demo keys and the e2e bypass so the
+  packaged smoke test can drive Pro features; those builds are never published.
+- Running from source (`npm start`) is a **development build**: nothing is enforced and
+  Pro features are unlocked for everyone. `license.status().build` says so
+  (`channel: 'dev'`, `proUnlockedForAll: true`) so the UI can label it. A packaged build
+  with no generated config fails closed (gated, no demo keys).
+
+Maintainers:
+
+```bash
+npm run license:keypair                         # writes .license-keys/ (private key stays local)
+BRAIWSER_LICENSE_PUBLIC_KEY="$(cat .license-keys/license-public.pem)" \
+  node scripts/gen-build-config.js --channel release
+npm run license:issue -- --email a@b.co --tier pro --days 365
+```
+
+Set the repository variable `BRAIWSER_LICENSE_PUBLIC_KEY` (the public PEM) for
+`release.yml`. For local development, `BRAIWSER_LICENSE_PUBLIC_KEY` in the
+environment of a *source* run is trusted; in a packaged app it is ignored.
 
 ---
 
@@ -282,9 +346,18 @@ Two gates, both runnable on a bare checkout:
 
 ```bash
 npm run check      # static: every file parses, imports resolve, module systems hold
+npm run test:unit  # deterministic, offline unit tests (node --test)
 npm run e2e        # end-to-end: drives the real app, prints PASS/FAIL per check
-npm test           # both
+npm test           # all three
 ```
+
+`npm run e2e` is a launcher (`scripts/e2e.js`). It does not trust the app's exit
+code alone: the run passes only if the app writes a complete `ok: true` report
+(the `BRAIWSER_E2E_REPORT` stdout line the app prints, or a JSON file at `BRAIWSER_E2E_REPORT_FILE`). A crash, a
+hang, a missing/partial report or a failed check all fail it (exit 1; 2 on timeout;
+3 for a harness error). `node scripts/e2e.js --app <packaged binary>` runs the same
+suite against a packaged build, and `BRAIWSER_E2E_CRASH=1` deliberately kills the
+renderer mid-suite so CI can prove the gate goes red.
 
 The e2e suite boots the actual app and drives it with **trusted input events** —
 real mouse and keystrokes into the guest webview, so isolated-world listeners fire
@@ -297,11 +370,13 @@ Playwright), project bundle round-trips, the agent hand-off, the menu command
 bus, and product-platform foundations (license, templates, checklists, schema).
 It exits non-zero when any check fails, so CI goes red.
 
-CI (`.github/workflows/ci.yml`) runs both gates under Xvfb, builds the unpacked
-app on Linux, macOS and Windows, and then runs the whole suite **again against
-the packaged Linux artifact** — which is what proves the bundle is real, most
-importantly that the webview's inspector preload still loads from inside
-`app.asar`.
+CI (`.github/workflows/ci.yml`) runs `check` and `test:unit`; runs the behavioural
+e2e suite on Linux (Xvfb), Windows and macOS; builds the unpacked app on all three
+and runs the whole suite **again against each packaged artifact** — which is what
+proves the bundle is real, most importantly that the webview's inspector preload
+still loads from inside `app.asar`. Every one of those jobs is followed by an
+intentional-renderer-crash step that must make the launcher exit 1, for both the
+dev tree and the packaged app.
 
 ---
 

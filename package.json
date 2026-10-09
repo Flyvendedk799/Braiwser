@@ -4,16 +4,29 @@
   "private": true,
   "description": "Braiwser — an annotation-first inspector browser for agentic UI review and testing. Open any web project, click any element, leave notes, audit accessibility, record journeys, and hand the whole review to a coding agent.",
   "main": "src/main/main.js",
+  "bin": {
+    "braiwser-agent": "src/main/services/automation/cli.mjs",
+    "braiwser-mcp": "src/main/services/automation/sidecar.mjs"
+  },
   "author": "Braiwser",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
+    "mcp": "node src/main/services/automation/sidecar.mjs",
+    "agent": "node src/main/services/automation/cli.mjs",
+    "bench:agent": "node scripts/benchmark-agent-browser.js",
     "check": "node scripts/check.js",
     "e2e": "node scripts/e2e.js",
+    "license:keypair": "node scripts/gen-license-keypair.js",
+    "license:issue": "node scripts/issue-license.js",
     "test": "npm run check && npm run test:unit && npm run e2e",
+    "build:guest": "node scripts/bundle-guest.js",
+    "predist": "npm run build:guest",
     "dist": "electron-builder",
+    "predist:dir": "npm run build:guest",
     "dist:dir": "electron-builder --dir",
+    "prerelease": "npm run build:guest",
     "release": "electron-builder --publish always",
     "test:unit": "node --test \"test/**/*.test.js\" \"test/**/*.test.cjs\" \"test/**/*.test.mjs\" \"src/**/*.test.js\""
   },
@@ -22,6 +35,7 @@
     "productName": "Braiwser",
     "files": [
       "src/**/*",
+      "src/webview/dist/**/*",
       "package.json",
       "schema/**/*"
     ],

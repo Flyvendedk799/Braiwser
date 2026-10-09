@@ -1519,8 +1519,11 @@ kbd {
 .next-rail-copy strong { margin-right: 4px; }
 .next-rail-acts { display: flex; flex-wrap: wrap; gap: 6px; }
 
+/* The coach never blocks the app (RF-12): the overlay is click-through and only
+   the card takes pointer events, so the page, the toolbar and the panels stay
+   usable while a step points at them. */
 .coach-overlay {
-  position: fixed; inset: 0; z-index: 80; pointer-events: auto;
+  position: fixed; inset: 0; z-index: 80; pointer-events: none;
 }
 .coach-overlay[hidden] { display: none !important; }
 .coach-spot {
@@ -1528,6 +1531,12 @@ kbd {
   box-shadow: 0 0 0 9999px var(--scrim);
   pointer-events: none;
   outline: 2px solid var(--accent);
+}
+/* Steps that ask you to use the page / notes panel: ring only, no dimming scrim. */
+.coach-overlay.coach-passthrough .coach-spot {
+  box-shadow: none;
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
 }
 .coach-card {
   position: absolute; width: 320px; pointer-events: auto;
@@ -1567,3 +1576,92 @@ kbd {
   background-size: 16px 16px;
   background-position: 0 0, 8px 8px;
 }
+
+/* ---- focus targets that are programmatically focused containers ------------- */
+.modal-card:focus, .coach-card:focus { outline: none; }
+
+/* ---- Verify: explicit outcome states (icon + text, never colour alone) ------- */
+.verify-state {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.02em;
+  padding: 2px 8px 2px 6px; border-radius: 999px;
+  border: 1px solid var(--line); color: var(--dim); background: transparent;
+}
+.verify-state .icon { display: block; }
+.verify-state.tone-good { color: var(--ok); border-color: rgba(61,220,151,0.45); }
+.verify-state.tone-bad { color: var(--danger); border-color: rgba(255,107,107,0.45); }
+.verify-state.tone-warn { color: var(--change); border-color: rgba(255,180,84,0.45); }
+.verify-pill .verify-state { margin-top: 6px; }
+.verify-pill .vp-sub { display: block; font-size: 11px; font-weight: 500; color: var(--faint); margin-top: 4px; max-width: 220px; line-height: 1.35; }
+.verify-pill .vp-value .vp-sub { display: inline; margin: 0; }
+.verify-headline {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  padding: 10px 12px; margin-bottom: 12px;
+  border: 1px solid var(--line); border-radius: 10px;
+}
+.verify-headline.tone-good { border-color: rgba(61,220,151,0.45); }
+.verify-headline.tone-bad { border-color: rgba(255,107,107,0.45); }
+.verify-headline.tone-warn { border-color: rgba(255,180,84,0.45); }
+.verify-headline .vh-reason { font-size: 12px; color: var(--dim); }
+.verify-problems {
+  display: grid; gap: 6px; margin: 0 0 12px; padding: 10px 12px;
+  border: 1px solid rgba(255,180,84,0.45); border-radius: 10px; font-size: 12px;
+}
+.verify-problems .vpb-row { display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+.verify-problems .vpb-text { color: var(--text); overflow-wrap: anywhere; flex: 1 1 160px; }
+.verify-problems .verify-retry { justify-self: start; }
+.verify-journey { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; }
+.verify-journey.tone-good { border-color: rgba(61,220,151,0.45); }
+.verify-journey.tone-bad { border-color: rgba(255,107,107,0.45); }
+.verify-journey.tone-warn { border-color: rgba(255,180,84,0.45); }
+.verify-journey .vj-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+.verify-journey .vj-head .vp-label { margin: 0; }
+.verify-journey .vj-name { font-weight: 600; font-size: 13px; }
+.verify-journey .vj-counts { font-size: 12px; color: var(--text); }
+.verify-journey .vj-detail, .verify-journey .vj-note { font-size: 11.5px; color: var(--dim); margin-top: 3px; }
+
+/* ---- Audit: where the report came from, and when it is stale ------------------ */
+.audit-source { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; font-size: 11px; color: var(--faint); margin-top: 4px; }
+.audit-source .as-label { font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; font-size: 10px; }
+.audit-source .as-url { color: var(--dim); overflow-wrap: anywhere; }
+.audit-stale {
+  margin-top: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.45;
+  border: 1px solid rgba(255,180,84,0.5); border-radius: 8px; color: var(--text);
+}
+.audit-stale[hidden] { display: none; }
+.finding.is-stale { opacity: 0.72; }
+.finding-stale {
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--change); border: 1px solid rgba(255,180,84,0.5); border-radius: 999px; padding: 0 6px;
+}
+.note-act:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ---- Notes: a failed bulk action stays visible and retryable ------------------ */
+.bulk-fail {
+  flex: 1 1 100%; display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  padding: 6px 8px; margin-bottom: 6px; font-size: 12px;
+  border: 1px solid rgba(255,107,107,0.5); border-radius: 8px;
+}
+.bulk-fail .bulk-fail-text { flex: 1 1 160px; color: var(--text); }
+
+/* ---- Settings: what is (not) connected, and what data tools cover ------------- */
+.status-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.status-item { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; align-items: baseline; }
+.status-name { font-weight: 600; font-size: 12.5px; }
+.status-badge {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase;
+  color: var(--change); border: 1px solid rgba(255,180,84,0.45); border-radius: 999px; padding: 1px 8px;
+}
+.status-detail { grid-column: 1 / -1; font-size: 11.5px; color: var(--dim); line-height: 1.4; }
+.data-scope { margin-top: 10px; }
+.data-scope-line { margin: 0 0 6px; font-size: 12px; color: var(--dim); line-height: 1.45; }
+.data-scope-line strong { color: var(--text); }
+
+/* ---- Hand-off: where the agent runs ------------------------------------------- */
+.handoff-notice {
+  display: none; margin-bottom: 12px; padding: 10px 12px; font-size: 12.5px; line-height: 1.45;
+  border: 1px solid var(--line); border-radius: 10px; color: var(--text);
+}
+.handoff-notice.is-blocked { border-color: rgba(255,180,84,0.5); }
+.handoff-notice .handoff-notice-line { margin: 0 0 6px; }
+.handoff-notice .handoff-notice-line:last-child { margin-bottom: 0; }

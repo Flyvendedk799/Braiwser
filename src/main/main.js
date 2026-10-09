@@ -2,7 +2,7 @@
 // Boots the store, registers IPC, installs the native menu, and creates the
 // shell window. The guest web project loads inside a <webview> in the renderer;
 // all persistence and AI calls flow through IPC to this process.
-const { app, BrowserWindow, nativeTheme, shell } = require('electron');
+const { app, BrowserWindow, nativeTheme } = require('electron');
 const path = require('path');
 const { createRepositories } = require('./store/repositories');
 const { migrateLegacyUserData } = require('./migrate');
@@ -10,19 +10,47 @@ const { installMenu } = require('./menu');
 const config = require('./config');
 const registerIpc = require('./ipc');
 const { isE2E } = require('./env');
+const { getE2EFinalizer } = require('./e2e-finalizer');
+
+const security = require('./security');
 
 let mainWindow = null;
-let videoSourceId = null; // the webContents the renderer may film
+
+// One process owns the JSON store (audit MB-03). A second launch hands over to the
+// running window and exits; db.js additionally revision-checks every write.
+const gotInstanceLock = isE2E() ? true : app.requestSingleInstanceLock();
+if (!gotInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+}
 
 // A replay we are filming must keep painting even if the user clicks away to
 // another window. Chromium otherwise throttles occluded/background renderers to
-// a crawl, which turns an export into a few frozen frames.
-app.commandLine.appendSwitch('disable-background-timer-throttling');
-app.commandLine.appendSwitch('disable-renderer-backgrounding');
-app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+// a crawl, which turns an export into a few frozen frames. That is only needed
+// WHILE filming, so throttling is switched off at runtime for the shell and the
+// filmed guest (see the throttle-scope note below) instead of for the whole app lifetime. The
+// process-wide switches remain only for the unattended E2E run.
+const KEEP_AWAKE = isE2E() || process.env.BRAIWSER_KEEP_AWAKE === '1';
+if (KEEP_AWAKE) {
+  app.commandLine.appendSwitch('disable-background-timer-throttling');
+  app.commandLine.appendSwitch('disable-renderer-backgrounding');
+  app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+}
 // On Windows the occlusion detector alone will park the compositor the moment
 // another window covers ours, which empties the capture stream mid-take.
 app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
+
+// The per-run throttling toggle lives with the display-media grant
+// (security/display-media.js + services/browser/throttle-scope.js): arming a
+// video export lifts throttling for the shell and the filmed guest only, and
+// ending the run (or a timeout / destroyed webContents) restores it.
 
 // Window chrome must not flash the wrong colour before the renderer paints.
 function shellBackground(theme) {
@@ -45,9 +73,13 @@ function createWindow(settings) {
       nodeIntegration: false,
       webviewTag: true,
       spellcheck: true,
-      backgroundThrottling: false,
+      backgroundThrottling: KEEP_AWAKE ? false : true,
+      // Feature-flag argv for the shell preload (agentRuntime facade); see security/index.js.
+      additionalArguments: security.shellAdditionalArguments(),
     },
   });
+  // Only registered shell windows may call privileged IPC / attach webviews.
+  security.registerShell(mainWindow.webContents);
 
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
   const e2e = isE2E();
@@ -56,19 +88,29 @@ function createWindow(settings) {
     mainWindow.webContents.on('console-message', (_e, level, message) => {
       console.log(`[renderer:${levels[level] || level}] ${message}`);
     });
-    // A crash mid-suite should still report how far it got.
+    // Every terminal state (done, crash, hang, load failure, main exception,
+    // window closed early, overall timeout) goes through ONE finalizer that
+    // prints the report and calls app.exit(1) unless the report is complete and
+    // fully passing. See e2e-finalizer.js for the report format.
+    const fin = getE2EFinalizer(app);
+    fin.arm();
     mainWindow.webContents.on('render-process-gone', (_e, details) => {
       console.log(`[render-process-gone] ${JSON.stringify(details)}`);
-      try {
-        const ipc = require('./ipc');
-        const partial = ipc.e2ePartial ? ipc.e2ePartial() : [];
-        const passed = partial.filter((c) => c.pass).length;
-        console.log('BRAIWSER_E2E_REPORT ' + JSON.stringify({ ok: false, crashed: true, passed, total: partial.length, checks: partial }));
-        console.log('CAOS_E2E_REPORT ' + JSON.stringify({ ok: false, crashed: true, passed, total: partial.length, checks: partial }));
-      } catch (_err) {
-        /* ignore */
-      }
-      setTimeout(() => app.quit(), 150);
+      fin.finalize('render-process-gone', { reason: `renderer gone: ${(details && details.reason) || 'unknown'}` });
+    });
+    let hangTimer = null;
+    mainWindow.webContents.on('unresponsive', () => {
+      if (hangTimer) return;
+      hangTimer = setTimeout(() => fin.finalize('unresponsive', { reason: 'renderer unresponsive for 30s' }), 30000);
+    });
+    mainWindow.webContents.on('responsive', () => { if (hangTimer) { clearTimeout(hangTimer); hangTimer = null; } });
+    mainWindow.webContents.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
+      if (isMainFrame && code !== -3) fin.finalize('load-failed', { reason: `load failed: ${code} ${desc} ${url}` });
+    });
+    mainWindow.on('closed', () => fin.finalize('incomplete-report', { reason: 'window closed before the suite finished' }));
+    process.on('uncaughtException', (err) => {
+      console.log('[main-exception] ' + ((err && err.stack) || err));
+      fin.finalize('main-exception', { reason: (err && err.message) || String(err) });
     });
   }
   if (process.argv.includes('--dev')) {
@@ -83,82 +125,33 @@ function createWindow(settings) {
     });
     mainWindow.webContents.on('render-process-gone', (_e, details) => {
       console.log(`[render-process-gone] ${JSON.stringify(details)}`);
-      // Print whatever the self-test had reached, then leave — a crash used to
-      // swallow the whole run and tell you nothing about where it got to.
-      try {
-        const ipc = require('./ipc');
-        const partial = ipc.e2ePartial ? ipc.e2ePartial() : [];
-        const passed = partial.filter((c) => c.pass).length;
-        console.log('CAOS_E2E_REPORT ' + JSON.stringify({ ok: false, crashed: true, passed, total: partial.length, checks: partial }));
-      } catch (_err) {
-        /* ignore */
-      }
-      setTimeout(() => app.quit(), 150);
     });
   }
-  // Screen capture for "export as video": the renderer asks to record, and we
-  // hand back the guest page's own frame — so the film is the page itself, at
-  // the page's own resolution, with none of our chrome in it and no cropping
-  // guesswork. The frame keeps streaming across cross-document navigations, so
-  // a journey that moves between pages films as one continuous take.
-  try {
-    const { session: electronSession, ipcMain: ipc, webContents } = require('electron');
-    ipc.removeHandler && ipc.removeHandler('caos:video.source');
-    ipc.handle('caos:video.source', (_e, id) => {
-      videoSourceId = typeof id === 'number' ? id : null;
-      return true;
-    });
-    electronSession.defaultSession.setDisplayMediaRequestHandler(
-      (request, callback) => {
-        // Only ever the page we were told to film, only when the renderer asked
-        // for it, never a picker and never the desktop.
-        if (videoSourceId == null) { callback({}); return; }
-        try {
-          const guest = webContents.fromId(videoSourceId);
-          if (!guest || guest.isDestroyed()) { callback({}); return; }
-          callback({ video: guest.mainFrame });
-        } catch (err) {
-          console.log('[video] ' + ((err && err.message) || err));
-          callback({});
-        }
-      },
-      { useSystemPicker: false }
-    );
-  } catch (err) {
-    console.log('[video] capture handler unavailable: ' + ((err && err.message) || err));
-  }
+  // Screen capture for "export as video" is a one-shot, frame-bound grant armed
+  // over caos:video.source (ipc/index.js) and redeemed by the display-media handler
+  // that security/index.js installs on every session. See security/display-media.js.
 
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 
-// The <webview>'s preload (the inspector engine) requires sibling modules via
-// relative paths. A sandboxed preload can't resolve those, so disable the
-// sandbox for attached webviews while keeping contextIsolation on.
-app.on('web-contents-created', (_e, contents) => {
-  contents.on('will-attach-webview', (_event, webPreferences) => {
-    webPreferences.sandbox = false;
-    webPreferences.contextIsolation = true;
-    webPreferences.nodeIntegration = false;
-    webPreferences.backgroundThrottling = false;
-  });
-  // Guest pages must not spawn uncontrolled in-app windows. Deny all popups;
-  // open vetted http/https links in the OS browser instead.
-  if (contents.getType() === 'webview') {
-    contents.setWindowOpenHandler(({ url }) => {
-      try {
-        const u = new URL(url);
-        if (u.protocol === 'http:' || u.protocol === 'https:') shell.openExternal(url);
-      } catch (_e) { /* ignore malformed URLs */ }
-      return { action: 'deny' };
-    });
-  }
-});
+// Web-contents policy lives in src/main/security: <webview> attach allow-list
+// (preload, isolation flags, partition, src), shell navigation lock, guest
+// navigation/popup rules, and default-deny permission handlers. The guest preload
+// still runs unsandboxed by default because it require()s sibling modules; set
+// BRAIWSER_SANDBOX_GUEST=1 (after `npm run build:guest`) to use the bundled,
+// sandboxed build instead.
+security.install();
 
 app.whenReady().then(() => {
+  if (!gotInstanceLock) return; // a second launch only hands over to the first
   // Carry a pre-rename (Chrome AI OS) store over on first launch as Braiwser.
   migrateLegacyUserData({ appDataDir: app.getPath('appData'), userDataDir: app.getPath('userData') });
 
   const repos = createRepositories(app.getPath('userData'));
+  const storeHealth = repos.health();
+  if (!storeHealth.ok) {
+    console.log('[store] attention needed: ' + JSON.stringify(storeHealth.problems.concat(storeHealth.maintenance.errors)));
+  }
   const paths = {
     inspector: path.join(__dirname, '..', 'webview', 'inspector.js'),
     welcome: path.join(__dirname, '..', 'renderer', 'welcome.html'),
@@ -187,6 +180,20 @@ app.whenReady().then(() => {
   const settings = repos.settings.get();
   applyNativeTheme(settings.theme);
   createWindow(settings);
+
+  // A damaged or unreadable data file is never overwritten; tell the user
+  // instead of silently showing an empty workspace.
+  if (!storeHealth.ok && !isE2E()) {
+    try {
+      const names = storeHealth.problems.map((p) => `${p.name}.json (${p.state})`).join(', ') || 'a data file';
+      require('electron').dialog.showMessageBox({
+        type: 'warning',
+        title: 'Braiwser data needs attention',
+        message: 'Some saved data could not be read, so it is open read-only.',
+        detail: `${names}\n\nNothing has been deleted or overwritten. Changes to the affected data will not be saved until it is restored or recovered from its backup.`,
+      }).catch(() => {});
+    } catch (_e) { /* ignore */ }
+  }
 
   try {
     require('./services/analytics').track(repos, 'install', { version: app.getVersion() });

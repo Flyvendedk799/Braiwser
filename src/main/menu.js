@@ -16,6 +16,9 @@ function dispatch(getWindow) {
   return (command, arg) => (_item, browserWindow) => {
     const win = browserWindow && !browserWindow.isDestroyed() ? browserWindow : getWindow();
     if (!win || win.isDestroyed()) return;
+    // Commands only ever go to a registered shell window (never DevTools, the
+    // PDF printer, or any other BrowserWindow that happens to hold focus).
+    if (!require('./security').isShellWebContents(win.webContents)) return;
     win.webContents.send('caos:command', { command, arg });
   };
 }

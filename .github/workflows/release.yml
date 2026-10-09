@@ -10,12 +10,23 @@ permissions:
 
 jobs:
   release:
-    name: build + publish
+    name: build + publish (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            asar: dist/linux-unpacked/resources/app.asar
+          - os: macos-latest
+            asar: dist/mac*/Braiwser.app/Contents/Resources/app.asar
+          - os: windows-latest
+            asar: dist/win-unpacked/resources/app.asar
+    env:
+      # The licence-verification PUBLIC key (Ed25519, PEM). It is public by design, so a
+      # repository variable is fine; a secret of the same name also works. The matching
+      # private key lives only with whoever issues licences (scripts/issue-license.js).
+      BRAIWSER_LICENSE_PUBLIC_KEY: ${{ vars.BRAIWSER_LICENSE_PUBLIC_KEY || secrets.BRAIWSER_LICENSE_PUBLIC_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -24,9 +35,28 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      - run: npm run test:unit
+
+      # Licence enforcement is a property of the BUILD, not of the environment the
+      # installed app runs in. This writes src/main/build-config.json (git-ignored),
+      # which electron-builder packs with src/**. It fails the job if the public key is
+      # missing, rather than shipping a build that enforces licences nobody can satisfy.
+      - name: Bake release configuration into the app
+        run: node scripts/gen-build-config.js --channel release
+
+      - name: Build unpacked app and verify the baked configuration
+        shell: bash
+        run: |
+          npm run dist:dir
+          shopt -s nullglob
+          files=(${{ matrix.asar }})
+          if [ "${#files[@]}" -eq 0 ]; then echo "::error::no app.asar found for ${{ matrix.asar }}"; exit 1; fi
+          node scripts/verify-packaged-config.js "${files[0]}" --channel release
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
       - name: Build and publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
-          BRAIWSER_ENFORCE_LICENSE: '1'
         run: npm run release

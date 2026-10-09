@@ -165,7 +165,8 @@ export function createLayersPanel(actions) {
       );
       return;
     }
-    const group = h('div', { class: 'layer-group' });
+    const group = h('div', { class: 'layer-group', role: 'listbox', 'aria-label': 'Layers in this container' });
+    group._layers = sibs;
     const stacked = sibs.some((s) => s.overlapping);
     sibs.forEach((s, i) => {
       const z = s.zIndex && s.zIndex !== 'auto' ? s.zIndex : null;
@@ -176,7 +177,7 @@ export function createLayersPanel(actions) {
           class: `layer-row ${s.isTarget ? 'is-target' : ''} ${s.hidden ? 'is-hidden' : ''}`,
           title: s.selector || '',
           role: 'option',
-          tabindex: '0',
+          tabindex: '-1', // roving: setStop() gives one row tabindex 0
           'aria-selected': s.isTarget ? 'true' : 'false',
           on: {
             click: (e) => {
@@ -186,11 +187,30 @@ export function createLayersPanel(actions) {
             mouseenter: () => { if (!drag) actions.hover(s); },
             // Keyboard focus highlights the layer on the page, the same way
             // hovering it does — otherwise the list is mouse-only.
-            focus: () => { if (!drag) actions.hover(s); },
+            focus: () => { setStop(group, row); if (!drag) actions.hover(s); },
             keydown: (e) => {
-              if (e.key !== 'Enter' && e.key !== ' ') return;
-              e.preventDefault();
-              actions.selectLayout(s);
+              // Enter/Space on one of the row's own buttons (raise, lower, hide)
+              // must reach that button, not select the row.
+              if (e.target !== e.currentTarget) return;
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                actions.selectLayout(s);
+              } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                const dir = e.key === 'ArrowDown' ? 1 : -1;
+                // Alt+Arrow is the keyboard way to reorder (drag has no keys).
+                if (e.altKey) reorderBy(i, dir);
+                else {
+                  const rows = Array.from(group.querySelectorAll('.layer-row'));
+                  const to = rows[i + dir];
+                  if (to) to.focus();
+                }
+              } else if (e.key === 'Home' || e.key === 'End') {
+                e.preventDefault();
+                const rows = Array.from(group.querySelectorAll('.layer-row'));
+                const to = e.key === 'Home' ? rows[0] : rows[rows.length - 1];
+                if (to) to.focus();
+              }
             },
           },
         },
@@ -208,6 +228,8 @@ export function createLayersPanel(actions) {
               ? h('button', {
                   class: 'layer-act',
                   title: 'Bring to front',
+                  'aria-label': 'Bring to front: ' + displayName(s),
+                  tabindex: '-1',
                   html: icon('chevron', 12),
                   style: { transform: 'rotate(-90deg)' },
                   on: { click: () => actions.zOrder(s, 'front') },
@@ -217,14 +239,18 @@ export function createLayersPanel(actions) {
               ? h('button', {
                   class: 'layer-act',
                   title: 'Send to back',
+                  'aria-label': 'Send to back: ' + displayName(s),
+                  tabindex: '-1',
                   html: icon('chevron', 12),
                   style: { transform: 'rotate(90deg)' },
                   on: { click: () => actions.zOrder(s, 'back') },
                 })
               : null,
             h('button', {
-              class: 'layer-act',
+              class: 'layer-act layer-act-eye',
               title: s.hidden ? 'Show on the page' : 'Hide on the page',
+              'aria-label': (s.hidden ? 'Show on the page: ' : 'Hide on the page: ') + displayName(s),
+              tabindex: '-1',
               html: icon(s.hidden ? 'eye-off' : 'eye', 12),
               on: { click: () => actions.toggleHidden(s) },
             }),
@@ -232,11 +258,33 @@ export function createLayersPanel(actions) {
         ]
       );
       row.addEventListener('pointerdown', (e) => startDrag(e, i, group, row));
-      const item = h('div', { class: 'layer-item' }, [row]);
+      row._layer = s;
+      const item = h('div', { class: 'layer-item', role: 'none' }, [row]);
       item._row = row;
       group.appendChild(item);
     });
     list.appendChild(group);
+    // One tab stop for the whole listbox: the selected layer, else the first.
+    const rows = Array.from(group.querySelectorAll('.layer-row'));
+    setStop(group, rows.find((r) => r.classList.contains('is-target')) || rows[0]);
+  }
+
+  // Exactly one row (plus its action buttons) is a tab stop; arrows move between
+  // rows. Called on focus so the stop follows the user.
+  function setStop(group, rowEl) {
+    Array.from(group.querySelectorAll('.layer-row')).forEach((r) => {
+      const on = r === rowEl;
+      r.tabIndex = on ? 0 : -1;
+      r.querySelectorAll('.layer-act').forEach((b) => { b.tabIndex = on ? 0 : -1; });
+    });
+  }
+
+  // Alt+Arrow on a layer: move it one slot, same payload as a drag.
+  function reorderBy(index, dir) {
+    const sibs = (current && current.siblings) || [];
+    const to = index + dir;
+    if (to < 0 || to >= sibs.length) return;
+    reorder(index, to);
   }
 
   // ---- drag to reorder ------------------------------------------------------
@@ -296,12 +344,44 @@ export function createLayersPanel(actions) {
     reorder(d.index, d.to);
   }
 
+  // Reorder payload (RF-08). `fromIndex`/`toIndex` are positions in the VISIBLE
+  // sibling list the guest serialized, which can differ from raw DOM child
+  // indexes (script/style/noscript/inspector nodes are skipped). So the moved
+  // layer and the layer at the destination slot are also named by selector, and
+  // by `nid` (parentId / nodeId — the guest resolves identity first, then
+  //   selector, and rejects a lost identity) and `fromDomIndex` when known. Sibling
+  //   rows are all content children, so a row's position IS the content index
+  //   the guest expects; `toIndex` is the final slot:
+  //   { parentSelector, parentId?, nodeId?, selector, fromIndex, toIndex,
+  //     destSelector, destId?, placement: 'before'|'after', fromDomIndex? }
   function reorder(from, to) {
     if (!current || !current.container) return;
-    actions.reorder({ parentSelector: current.container.selector, fromIndex: from, toIndex: to });
+    const sibs = current.siblings || [];
+    const moved = sibs[from];
+    const dest = sibs[to];
+    const payload = {
+      parentSelector: current.container.selector,
+      fromIndex: from,
+      toIndex: to,
+      selector: moved ? moved.selector : null,
+      destSelector: dest ? dest.selector : null,
+      placement: to > from ? 'after' : 'before',
+    };
+    if (current.container.nid != null) payload.parentId = current.container.nid;
+    if (moved && moved.nid != null) payload.nodeId = moved.nid;
+    if (dest && dest.nid != null) payload.destId = dest.nid;
+    if (moved && typeof moved.domIndex === 'number') payload.fromDomIndex = moved.domIndex;
+    actions.reorder(payload);
   }
 
   function setLayout(info) {
+    // Everything below rebuilds the DOM; keep keyboard focus on the same layer.
+    const active = document.activeElement;
+    let saved = null;
+    if (active && list.contains(active)) {
+      const rowEl = active.closest('.layer-row');
+      if (rowEl && rowEl._layer) saved = { selector: rowEl._layer.selector, index: Array.from(rowEl.parentElement.parentElement.children).indexOf(rowEl.parentElement) };
+    }
     if (!info) {
       current = null;
       layoutEmpty();
@@ -312,6 +392,11 @@ export function createLayersPanel(actions) {
     renderCrumbs(info);
     renderSummary(info);
     renderLayers(info);
+    if (saved && (!document.activeElement || !list.contains(document.activeElement))) {
+      const rows = Array.from(list.querySelectorAll('.layer-row'));
+      const hit = rows.find((r) => r._layer && r._layer.selector === saved.selector) || rows[Math.min(saved.index, rows.length - 1)];
+      if (hit) try { hit.focus({ preventScroll: true }); } catch (_e) { /* ignore */ }
+    }
   }
 
   layoutEmpty();

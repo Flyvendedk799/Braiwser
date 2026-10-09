@@ -6,6 +6,26 @@
 // Two things make it feel like an editor rather than a form: every property you
 // have touched is marked and individually revertible, and every number can be
 // scrubbed by dragging its label.
+//
+// Numbers and units (RF-07). A control's number and its unit always come from the
+// SAME source: the element's inline declaration when it is a length this panel
+// can express (2rem, 50%, 1.5em, 12px), otherwise the computed pixel value with
+// "px". Mixing the two used to show a computed 32px beside an inline "rem", so
+// merely focusing and leaving the field wrote 32rem. Each input also tracks
+// whether it is dirty; blur / change with nothing edited sends NOTHING. Changing
+// the unit converts the number deliberately (same rendered size) when the
+// conversion is knowable; when it is not, the field is cleared for a fresh value
+// rather than silently re-labelling the old one.
+//
+// Guest payload fields consumed here (all degrade gracefully when absent):
+//   info.specified[prop]   { raw, value, unit, source:'inline'|'computed', unsupported? }
+//                          the number+unit pair from ONE source (preferred)
+//   info.inline[prop]      the inline declaration, e.g. "2rem" (fallback when the
+//                          guest sends no `specified`)
+//   info.metrics           optional { rootFontSize, parentFontSize, parentWidth,
+//                          parentHeight } in px, used only to convert between units.
+//   info.session           { active, changed:[props] } (a style visit in progress)
+//   info.inlinePriority    { prop: 'important'|'' } (shown as a tooltip note)
 import { h, icon, clear } from '../lib/dom.js';
 import { displayName, selectorLabel } from '../lib/naming.js';
 
@@ -38,9 +58,51 @@ function num(v, places = 1) {
   return Math.round(parseFloat(m[1]) * f) / f;
 }
 
-function unitOf(v, fallback = 'px') {
-  const m = /[\d.](px|rem|em|%|vh|vw)\s*$/.exec(String(v || ''));
-  return m ? m[1] : fallback;
+const round = (n, places = 2) => {
+  const f = Math.pow(10, places);
+  return Math.round(n * f) / f;
+};
+
+// An inline length this panel can show faithfully: "2rem" -> {value:2, unit:'rem'}.
+export function parseLength(v) {
+  const m = /^\s*(-?(?:\d+\.?\d*|\.\d+))(px|rem|em|%)\s*$/i.exec(String(v == null ? '' : v));
+  return m ? { value: parseFloat(m[1]), unit: m[2].toLowerCase() } : null;
+}
+
+// Number + unit for a unit-bearing control, both from ONE source.
+export function lengthSource(prop, computed, inline, specified) {
+  const spec = specified && specified[prop];
+  if (spec && typeof spec === 'object') {
+    const unit = spec.unit === '' && spec.value === 0 ? 'px' : spec.unit;
+    if (spec.source === 'inline' && !spec.unsupported && Number.isFinite(spec.value) && SIZE_UNITS.includes(unit)) {
+      return { value: round(spec.value), unit, from: 'inline' };
+    }
+    // An inline value the panel cannot express (calc(), vw, var()…): never pair
+    // its unit with a number from somewhere else — show the computed px instead.
+    const px = Number.isFinite(spec.computedPx) ? spec.computedPx : null;
+    if (px != null) return { value: num(px), unit: 'px', from: 'computed' };
+  }
+  const inl = parseLength(inline && inline[prop]);
+  if (inl) return { value: round(inl.value), unit: inl.unit, from: 'inline' };
+  return { value: num((computed || {})[prop]), unit: 'px', from: 'computed' };
+}
+
+// Pixels per one unit, or null when the base is not known.
+function pxPer(unit, base) {
+  if (unit === 'px') return 1;
+  if (unit === 'rem') return base.root > 0 ? base.root : null;
+  if (unit === 'em') return base.em > 0 ? base.em : null;
+  if (unit === '%') return base.percent > 0 ? base.percent / 100 : null;
+  return null;
+}
+
+// Convert so the rendered size stays the same; null when a needed base is unknown.
+export function convertLength(value, from, to, base) {
+  if (from === to) return value;
+  const a = pxPer(from, base);
+  const b = pxPer(to, base);
+  if (a == null || b == null) return null;
+  return round((value * a) / b);
 }
 
 // rgb(a) -> #rrggbb, for <input type="color">, which speaks nothing else.
@@ -112,6 +174,7 @@ export function createStylePanel(actions) {
         h('button', {
           class: 'st-clear',
           title: 'Revert ' + (props.length > 1 ? 'these' : 'this') + ' to the page’s own CSS',
+          'aria-label': 'Revert ' + label + ' to the page’s own CSS',
           html: icon('close', 11),
           on: {
             click: () => {
@@ -153,59 +216,130 @@ export function createStylePanel(actions) {
     });
   }
 
+  // opts: { min, max, step, unit, width, units, label, convert, note }
+  //   convert(value, fromUnit, toUnit) -> number | null   (unit conversion)
+  //   note: tooltip explaining where the shown value came from
   function numberInput(prop, value, opts = {}) {
-    const { min, max, step, unit = 'px', width, units } = opts;
+    const { min, max, step, unit = 'px', width, units, label, convert, note } = opts;
+    const initial = value === '' || value == null ? '' : String(value);
     const input = h('input', {
       class: 'st-num',
       type: 'number',
-      value: value === '' ? '' : String(value),
+      value: initial,
       min: min != null ? String(min) : null,
       max: max != null ? String(max) : null,
       step: step != null ? String(step) : '1',
       style: width ? { width } : null,
+      'aria-label': label || prop,
+      title: note || null,
     });
     let currentUnit = unit;
+    // What the page already has: nothing is sent until the user departs from it.
+    let committedValue = initial;
+    let committedUnit = unit;
+    let liveDirty = false; // an input/scrub event pushed a live preview
+    let pending = null; // { value, unit }: number cleared by an unconvertible unit change
+    const isDirty = () => liveDirty || input.value !== committedValue || currentUnit !== committedUnit;
     const send = (commit) => {
       const v = input.value === '' ? '' : input.value + (currentUnit || '');
+      if (commit) {
+        committedValue = input.value;
+        committedUnit = currentUnit;
+        liveDirty = false;
+      }
+      pending = null;
       actions.apply({ [prop]: v }, commit);
     };
-    input.addEventListener('input', () => send(false));
-    input.addEventListener('change', () => send(true));
-    input.addEventListener('blur', () => send(true));
+    const settle = () => { if (isDirty()) send(true); };
+    input.addEventListener('input', () => {
+      // A half-typed "1e" reads as '' in a number input: that is not a request to
+      // clear the property.
+      if (input.validity && input.validity.badInput) return;
+      liveDirty = true;
+      send(false);
+    });
+    input.addEventListener('change', settle);
+    input.addEventListener('blur', settle);
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') input.blur();
     });
-    if (!units) return { el: input, input, setUnit: () => {}, getUnit: () => currentUnit };
+    // Programmatic edits (scrubbing) go through the same dirty bookkeeping.
+    const setValue = (v, commit) => {
+      input.value = String(v);
+      liveDirty = true;
+      send(commit);
+    };
+    if (!units) return { el: input, input, setValue, getUnit: () => currentUnit, isDirty };
 
     const sel = h(
       'select',
-      { class: 'st-unit' },
+      { class: 'st-unit', 'aria-label': (label || prop) + ' unit' },
       units.map((u) => h('option', { value: u, text: u }))
     );
     sel.value = unit;
     sel.addEventListener('change', () => {
-      currentUnit = sel.value;
+      const from = currentUnit;
+      const to = sel.value;
+      if (from === to) return;
+      if (input.value === '' && pending && pending.unit === to) {
+        // Back to the unit that was cleared: hand the old number back, unchanged.
+        currentUnit = to;
+        input.value = pending.value;
+        committedValue = pending.value;
+        committedUnit = to;
+        pending = null;
+        input.removeAttribute('title');
+        return;
+      }
+      if (input.value === '') {
+        currentUnit = to; // nothing to convert; the next number typed uses it
+        if (isDirty()) send(true);
+        return;
+      }
+      const typed = liveDirty || input.value !== committedValue;
+      if (typed) {
+        // The user entered this number on purpose: it keeps its value, and the
+        // unit they chose is applied to it.
+        currentUnit = to;
+        send(true);
+        return;
+      }
+      const converted = convert ? convert(parseFloat(input.value), from, to) : null;
+      if (converted == null || Number.isNaN(converted)) {
+        // The same rendered size is not computable (e.g. the parent's size is
+        // unknown). Do not re-label 500px as 500%: clear the field, send nothing,
+        // and wait for a value in the new unit.
+        pending = { value: input.value, unit: from };
+        currentUnit = to;
+        input.value = '';
+        input.placeholder = to;
+        committedValue = '';
+        committedUnit = to;
+        liveDirty = false;
+        input.title = 'Can’t convert to ' + to + ' without the surrounding size — type a value in ' + to + '.';
+        return;
+      }
+      currentUnit = to;
+      input.value = String(converted);
       send(true);
     });
-    return { el: h('div', { class: 'st-inline' }, [input, sel]), input, getUnit: () => currentUnit };
+    return { el: h('div', { class: 'st-inline' }, [input, sel]), input, setValue, getUnit: () => currentUnit, isDirty };
   }
 
   function numberRow(label, prop, value, opts = {}) {
-    const ctl = numberInput(prop, value, opts);
+    const ctl = numberInput(prop, value, { label, ...opts });
     const r = row(label, ctl.el, [prop]);
     const labelEl = r.querySelector('.st-label');
-    scrubbable(labelEl, () => ctl.input.value, (v, commit) => {
-      ctl.input.value = String(v);
-      actions.apply({ [prop]: v + (ctl.getUnit() || '') }, commit);
-    });
+    scrubbable(labelEl, () => ctl.input.value, (v, commit) => ctl.setValue(v, commit));
     return r;
   }
 
   function swatchRow(prop, value, { allowNone } = {}) {
-    const swatch = h('input', { class: 'st-color', type: 'color', value: hex(value) || '#000000' });
+    const swatch = h('input', { class: 'st-color', type: 'color', value: hex(value) || '#000000', 'aria-label': prop + ' colour picker' });
     const text = h('input', {
       class: 'st-hex',
       type: 'text',
+      'aria-label': prop + ' colour value',
       value: isTransparent(value) ? '' : hex(value) || '',
       placeholder: allowNone ? 'none' : '',
     });
@@ -226,6 +360,7 @@ export function createStylePanel(actions) {
         h('button', {
           class: 'st-swatch',
           title: cHex,
+          'aria-label': 'Use ' + cHex,
           style: { background: cHex },
           on: { click: () => push(cHex, true) },
         })
@@ -234,10 +369,10 @@ export function createStylePanel(actions) {
     return h('div', { class: 'st-color-block' }, [h('div', { class: 'st-color-wrap' }, [swatch, text]), palette]);
   }
 
-  function selectInput(prop, options, value) {
+  function selectInput(prop, options, value, label) {
     const sel = h(
       'select',
-      { class: 'st-select' },
+      { class: 'st-select', 'aria-label': label || prop },
       options.map(([v, label]) => h('option', { value: v, text: label }))
     );
     sel.value = options.some(([v]) => v === value) ? value : options[0][0];
@@ -246,7 +381,7 @@ export function createStylePanel(actions) {
   }
 
   function rangeInput(prop, value, { min = 0, max = 1, step = 0.05, unit = '' } = {}) {
-    const r = h('input', { class: 'st-range', type: 'range', min: String(min), max: String(max), step: String(step), value: String(value) });
+    const r = h('input', { class: 'st-range', 'aria-label': prop, type: 'range', min: String(min), max: String(max), step: String(step), value: String(value) });
     const out = h('span', { class: 'st-range-val', text: String(value) });
     r.addEventListener('input', () => {
       out.textContent = r.value;
@@ -267,6 +402,7 @@ export function createStylePanel(actions) {
           class: 'st-seg-btn' + (isOn ? ' on' : ''),
           text: label,
           title,
+          'aria-pressed': isOn ? 'true' : 'false',
           on: { click: () => actions.apply({ [prop]: isOn ? off : on }, true) },
         });
       })
@@ -277,15 +413,46 @@ export function createStylePanel(actions) {
     // padding / margin as four small boxes, in the order everyone reads them.
     const mk = (side) => {
       const prop = kind + '-' + side;
-      const ctl = numberInput(prop, num(c[prop]), { width: '44px' });
-      const label = h('span', { class: 'st-side-label' + (touched()[prop] != null ? ' changed' : ''), text: side[0].toUpperCase() });
-      scrubbable(label, () => ctl.input.value, (v, commit) => {
-        ctl.input.value = String(v);
-        actions.apply({ [prop]: v + 'px' }, commit);
+      const inl = touched()[prop];
+      const ctl = numberInput(prop, num(c[prop]), {
+        width: '44px',
+        label: kind + ' ' + side,
+        note: inl != null && !/^-?[\d.]+px$/.test(String(inl)) ? 'Page CSS: ' + inl + ' — shown as computed px' : null,
       });
+      const label = h('span', { class: 'st-side-label' + (touched()[prop] != null ? ' changed' : ''), text: side[0].toUpperCase() });
+      scrubbable(label, () => ctl.input.value, (v, commit) => ctl.setValue(v, commit));
       return h('div', { class: 'st-side' }, [label, ctl.el]);
     };
     return h('div', { class: 'st-sides' }, ['top', 'right', 'bottom', 'left'].map(mk));
+  }
+
+  // A unit-bearing length (font-size / width / height): number and unit are read
+  // from one source, and unit changes convert using what the guest can tell us.
+  function lengthRow(label, prop, range) {
+    const c = (info && info.computed) || {};
+    const src = lengthSource(prop, c, touched(), info && info.specified);
+    const m = (info && info.metrics) || {};
+    const ownFont = num(c['font-size'], 2) || null;
+    const base = {
+      root: m.rootFontSize || 16,
+      // font-size's em/% are relative to the PARENT's font size; width/height's
+      // em is the element's own font size.
+      em: prop === 'font-size' ? m.parentFontSize || null : ownFont,
+      percent: prop === 'font-size' ? m.parentFontSize || null : prop === 'height' ? m.parentHeight || null : m.parentWidth || null,
+    };
+    const spec = info && info.specified && info.specified[prop];
+    const raw = spec && spec.source === 'inline' ? spec.raw : touched()[prop];
+    const important = info && info.inlinePriority && info.inlinePriority[prop] === 'important' ? ' !important' : '';
+    const note = src.from === 'computed' && raw != null && raw !== ''
+      ? 'Page CSS: ' + raw + important + ' — can’t be shown as a plain length, so the computed px is shown'
+      : src.from === 'inline' ? 'Page CSS: ' + raw + important : null;
+    return numberRow(label, prop, src.value, {
+      ...range,
+      unit: src.unit,
+      units: SIZE_UNITS,
+      note,
+      convert: (v, from, to) => convertLength(v, from, to, base),
+    });
   }
 
   function group(title, children) {
@@ -308,6 +475,7 @@ export function createStylePanel(actions) {
         h('button', {
           class: 'st-up',
           title: 'Select the parent element',
+          'aria-label': 'Select the parent element',
           html: icon('chevron', 12),
           on: { click: () => actions.selectParent() },
         }),
@@ -374,9 +542,9 @@ export function createStylePanel(actions) {
 
     body.appendChild(
       group('Type', [
-        row('Font', selectInput('font-family', fontOptions, matchFont(fontOptions, inline['font-family'] || c['font-family'])), ['font-family']),
-        numberRow('Size', 'font-size', num(c['font-size']), { min: 1, max: 400, unit: unitOf(inline['font-size']), units: SIZE_UNITS }),
-        row('Weight', selectInput('font-weight', WEIGHTS.map((w) => [w, w || 'Keep current']), inline['font-weight'] || String(num(c['font-weight'], 0) || '')), ['font-weight']),
+        row('Font', selectInput('font-family', fontOptions, matchFont(fontOptions, inline['font-family'] || c['font-family']), 'Font'), ['font-family']),
+        lengthRow('Size', 'font-size', { min: 1, max: 400 }),
+        row('Weight', selectInput('font-weight', WEIGHTS.map((w) => [w, w || 'Keep current']), inline['font-weight'] || String(num(c['font-weight'], 0) || ''), 'Weight'), ['font-weight']),
         numberRow('Line height', 'line-height', num(c['line-height']), { min: 0, max: 400 }),
         numberRow('Letter spacing', 'letter-spacing', num(c['letter-spacing'], 2), { min: -20, max: 40, step: 0.1 }),
         row('Align', h('div', { class: 'st-seg' }, ALIGNS.map(([v, short, label]) =>
@@ -384,6 +552,8 @@ export function createStylePanel(actions) {
             class: 'st-seg-btn' + (c['text-align'] === v ? ' on' : ''),
             text: short,
             title: label,
+            'aria-label': label,
+            'aria-pressed': c['text-align'] === v ? 'true' : 'false',
             on: { click: () => actions.apply({ 'text-align': v }, true) },
           })
         )), ['text-align']),
@@ -402,8 +572,8 @@ export function createStylePanel(actions) {
         row('Background', swatchRow('background-color', c['background-color'], { allowNone: true }), ['background-color']),
         numberRow('Radius', 'border-radius', num(c['border-radius']), { min: 0, max: 400 }),
         row('Border', h('div', { class: 'st-inline' }, [
-          numberInput('border-width', num(c['border-width']), { min: 0, max: 40, width: '48px' }).el,
-          selectInput('border-style', [['solid', 'solid'], ['dashed', 'dashed'], ['dotted', 'dotted'], ['none', 'none']], c['border-style']),
+          numberInput('border-width', num(c['border-width']), { min: 0, max: 40, width: '48px', label: 'Border width' }).el,
+          selectInput('border-style', [['solid', 'solid'], ['dashed', 'dashed'], ['dotted', 'dotted'], ['none', 'none']], c['border-style'], 'Border style'),
         ]), ['border-width', 'border-style']),
         row('Border colour', swatchRow('border-color', c['border-color']), ['border-color']),
       ])
@@ -413,8 +583,8 @@ export function createStylePanel(actions) {
 
     body.appendChild(
       group('Size', [
-        numberRow('Width', 'width', num(c.width), { min: 0, max: 4000, unit: unitOf(inline.width), units: SIZE_UNITS }),
-        numberRow('Height', 'height', num(c.height), { min: 0, max: 4000, unit: unitOf(inline.height), units: SIZE_UNITS }),
+        lengthRow('Width', 'width', { min: 0, max: 4000 }),
+        lengthRow('Height', 'height', { min: 0, max: 4000 }),
         h('div', { class: 'st-hint', text: 'Drag a label sideways to scrub it. Shift for ×10, Alt for tenths.' }),
       ])
     );

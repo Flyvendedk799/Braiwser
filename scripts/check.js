@@ -32,7 +32,11 @@ function walk(dir, out = []) {
 }
 
 const files = walk(path.join(root, 'src'));
-const jsFiles = files.filter((f) => f.endsWith('.js'));
+// src/webview/dist holds the GENERATED guest bundle (npm run build:guest): it is
+// syntax-checked below but exempt from the hand-written-source invariants, and its
+// absence is fine (the bundle is opt-in and built before packaging).
+const GUEST_DIST = `${path.sep}webview${path.sep}dist${path.sep}`;
+const jsFiles = files.filter((f) => f.endsWith('.js') && !f.includes(GUEST_DIST));
 
 // 1. Parse every source file.
 for (const file of jsFiles) {
@@ -82,6 +86,44 @@ for (const file of jsFiles) {
   }
   if (!isRenderer && /^\s*import\s+.*\s+from\s+['"]/m.test(src)) {
     fail(`${rel} is main/webview code but uses ESM import — those load as CommonJS`);
+  }
+}
+
+// 6. Generated guest bundle, when present: must parse. Staleness only warns —
+// regenerate with `npm run build:guest` (packaging does it automatically).
+for (const file of files.filter((f) => f.includes(GUEST_DIST) && f.endsWith('.js'))) {
+  try {
+    execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' });
+    checked += 1;
+  } catch (err) {
+    fail(`syntax error in ${path.relative(root, file)}\n${(err.stderr || '').toString().trim()}`);
+  }
+}
+try {
+  const guest = require('./bundle-guest');
+  const status = guest.bundleStatus();
+  if (status === 'stale') console.warn('note: src/webview/dist/guest-preload.bundle.js is stale; run `npm run build:guest`');
+} catch (_err) { /* bundler is optional for the check */ }
+
+// 7. ESM adapters (.mjs). The agent MCP/CLI adapters and the opt-in skill package
+// are ES modules next to a CommonJS app; they may only live in the automation
+// directory or .agents, must parse, and must not use require().
+const ESM_HOMES = [path.join('src', 'main', 'services', 'automation'), '.agents'];
+const esmRoots = [path.join(root, 'src'), path.join(root, '.agents')].filter((d) => fs.existsSync(d));
+for (const file of esmRoots.flatMap((d) => walk(d)).filter((f) => f.endsWith('.mjs'))) {
+  const rel = path.relative(root, file);
+  if (!ESM_HOMES.some((home) => rel.startsWith(home + path.sep))) {
+    fail(`${rel} is an .mjs module outside the allowed ESM homes (${ESM_HOMES.join(', ')})`);
+    continue;
+  }
+  try {
+    execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' });
+    checked += 1;
+  } catch (err) {
+    fail(`syntax error in ${rel}\n${(err.stderr || '').toString().trim()}`);
+  }
+  if (/^\s*(?:const|let|var)\s+.*=\s*require\(/m.test(fs.readFileSync(file, 'utf8'))) {
+    fail(`${rel} is an ES module but uses require()`);
   }
 }
 

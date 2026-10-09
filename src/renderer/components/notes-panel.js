@@ -2,7 +2,19 @@
 // session. Each note shows its action colour-stripe, target, note text
 // (inline-editable), status toggle, priority, locate, and delete — plus a
 // checkbox so several notes can be triaged in one go.
-import { h, icon, clear, timeAgo, esc } from '../lib/dom.js';
+//
+// Ordering. Notes are numbered by their position in the FULL list (that number is
+// the pin number on the page), whatever filter is active. Dragging while a filter
+// is on therefore reorders within the full list: the dragged note lands next to
+// the note it was dropped on, and every hidden note keeps its place. The full
+// ordered id list is always what actions.reorder(ids, { filtered }) receives
+// (never just the visible subset), and the panel renumbers immediately.
+//
+// Bulk actions may report partial failure: actions.bulkUpdate / bulkRemove can
+// resolve to { failed: [note | id | { id, error }] } (or reject). Failed notes stay
+// selected and a visible "N of M failed - Retry" bar remains until it succeeds or
+// is dismissed.
+import { h, icon, clear, timeAgo, esc, guarded, toast } from '../lib/dom.js';
 import { emptyNotesMessage } from '../lib/persona.js';
 
 export function createNotesPanel(config, actions) {
@@ -15,6 +27,7 @@ export function createNotesPanel(config, actions) {
   let annotations = [];
   let editingId = null;
   let selected = new Set();
+  let bulkFailure = null; // { label, total, ids:Set, retry:() => Promise, error? }
 
   const searchInput = h('input', {
     class: 'input',
@@ -97,7 +110,17 @@ export function createNotesPanel(config, actions) {
   function buildBulkBar(items) {
     clear(bulkBar);
     const chosen = items.filter((a) => selected.has(a.id));
-    bulkBar.classList.toggle('show', chosen.length > 0);
+    // A failed bulk action stays on screen (even once its notes are gone from the
+    // selection) until it is retried successfully or dismissed.
+    if (bulkFailure && !annotations.some((a) => bulkFailure.ids.has(a.id))) bulkFailure = null;
+    bulkBar.classList.toggle('show', chosen.length > 0 || !!bulkFailure);
+    if (bulkFailure) {
+      bulkBar.appendChild(h('div', { class: 'bulk-fail', role: 'alert' }, [
+        h('span', { class: 'bulk-fail-text', text: `${bulkFailure.ids.size} of ${bulkFailure.total} could not be ${bulkFailure.label}.${bulkFailure.error ? ' ' + bulkFailure.error : ''}` }),
+        h('button', { class: 'btn btn-sm bulk-retry', text: 'Retry', on: { click: () => bulkFailure && bulkFailure.retry() } }),
+        h('button', { class: 'btn btn-sm btn-ghost', text: 'Dismiss', on: { click: () => { bulkFailure = null; render(); } } }),
+      ]));
+    }
     if (!chosen.length) return;
 
     const prio = h('select', { class: 'prio-select', 'aria-label': 'Set priority for selected notes' }, [
@@ -106,17 +129,56 @@ export function createNotesPanel(config, actions) {
     ]);
     prio.addEventListener('change', () => {
       if (!prio.value) return;
-      actions.bulkUpdate(chosen, { priority: prio.value });
+      runBulk('update', chosen, { priority: prio.value });
       prio.value = '';
     });
 
     bulkBar.appendChild(h('span', { class: 'bulk-count', text: `${chosen.length} selected` }));
-    bulkBar.appendChild(h('button', { class: 'btn btn-sm', text: 'Resolve', on: { click: () => actions.bulkUpdate(chosen, { status: 'resolved' }) } }));
-    bulkBar.appendChild(h('button', { class: 'btn btn-sm', text: 'Reopen', on: { click: () => actions.bulkUpdate(chosen, { status: 'open' }) } }));
+    bulkBar.appendChild(h('button', { class: 'btn btn-sm', text: 'Resolve', on: { click: () => runBulk('update', chosen, { status: 'resolved' }) } }));
+    bulkBar.appendChild(h('button', { class: 'btn btn-sm', text: 'Reopen', on: { click: () => runBulk('update', chosen, { status: 'open' }) } }));
     bulkBar.appendChild(prio);
     bulkBar.appendChild(h('span', { class: 'bulk-grow' }));
-    bulkBar.appendChild(h('button', { class: 'btn btn-sm btn-danger', text: 'Delete', on: { click: () => actions.bulkRemove(chosen) } }));
+    bulkBar.appendChild(h('button', { class: 'btn btn-sm btn-danger', text: 'Delete', on: { click: () => runBulk('remove', chosen) } }));
     bulkBar.appendChild(h('button', { class: 'btn btn-sm btn-ghost', text: 'Clear', on: { click: () => { selected.clear(); render(); } } }));
+  }
+
+  // Run a bulk action and keep any failure visible and retryable.
+  async function runBulk(kind, notes, patch) {
+    const label = kind === 'remove' ? 'deleted' : 'updated';
+    const fn = kind === 'remove' ? actions.bulkRemove : actions.bulkUpdate;
+    const total = notes.length;
+    let failedIds = null;
+    let error = '';
+    try {
+      const res = kind === 'remove' ? await fn(notes) : await fn(notes, patch);
+      if (res && Array.isArray(res.failed) && res.failed.length) {
+        failedIds = new Set(res.failed.map((f) => (f && typeof f === 'object' ? f.id : f)).filter(Boolean));
+        const firstErr = res.failed.find((f) => f && typeof f === 'object' && f.error);
+        if (firstErr) error = String(firstErr.error);
+      } else if (res === false || (res && res.ok === false)) {
+        failedIds = new Set(notes.map((n) => n.id));
+        error = (res && res.error) || '';
+      }
+    } catch (err) {
+      failedIds = new Set(notes.map((n) => n.id));
+      error = String((err && err.message) || err).replace(/^Error invoking remote method '[^']+':\s*/, '');
+    }
+    if (!failedIds || !failedIds.size) {
+      bulkFailure = null;
+      render();
+      return;
+    }
+    // Leave exactly the failed notes selected, so Retry (or the user) can act on them.
+    selected = new Set(failedIds);
+    bulkFailure = {
+      label,
+      total,
+      ids: failedIds,
+      error,
+      retry: () => runBulk(kind, annotations.filter((a) => failedIds.has(a.id)), patch),
+    };
+    render();
+    toast(`${failedIds.size} of ${total} notes could not be ${label}`, 'error', 5000);
   }
 
   function targetLabel(a) {
@@ -161,6 +223,35 @@ export function createNotesPanel(config, actions) {
     });
   }
 
+  // Move fromId next to targetId in the FULL order (before it, or after it).
+  // Notes hidden by a filter are not touched: they keep their slots.
+  function moveNote(fromId, targetId, before) {
+    const ids = annotations.map((n) => n.id);
+    const from = ids.indexOf(fromId);
+    if (from < 0 || ids.indexOf(targetId) < 0) return;
+    ids.splice(from, 1);
+    const to = ids.indexOf(targetId);
+    ids.splice(before ? to : to + 1, 0, fromId);
+    if (ids.every((id, i) => id === annotations[i].id)) return; // dropped where it was
+    const prev = annotations;
+    const byId = new Map(annotations.map((n) => [n.id, n]));
+    annotations = ids.map((id) => byId.get(id));
+    render(); // renumber at once so the list matches the pins the app is about to redraw
+    const undo = (err) => {
+      annotations = prev;
+      render();
+      if (err !== false) toast('Could not reorder notes' + (err && err.message ? ': ' + err.message : ''), 'error', 5000);
+    };
+    try {
+      const out = actions.reorder(ids, { filtered: !!(actionFilter.size || statusFilter !== 'all' || query) });
+      if (out && typeof out.then === 'function') {
+        out.then((res) => { if (res === false || (res && res.ok === false)) undo(res && res.error ? new Error(res.error) : null); }, undo);
+      }
+    } catch (err) {
+      undo(err);
+    }
+  }
+
   function noteCard(a, index) {
     const color = (actionMap[a.action] && actionMap[a.action].color) || 'var(--comment)';
     const resolved = (a.status || 'open') === 'resolved';
@@ -194,12 +285,8 @@ export function createNotesPanel(config, actions) {
           hideDropLine();
           const fromId = e.dataTransfer.getData('text/braiwser-note');
           if (!fromId || fromId === a.id || !actions.reorder) return;
-          const ids = filtered().map((n) => n.id);
-          const from = ids.indexOf(fromId);
-          const to = ids.indexOf(a.id);
-          if (from < 0 || to < 0) return;
-          ids.splice(to, 0, ids.splice(from, 1)[0]);
-          actions.reorder(ids);
+          const rect = card.getBoundingClientRect();
+          moveNote(fromId, a.id, e.clientY < rect.top + rect.height / 2);
         },
       },
     });
@@ -210,7 +297,7 @@ export function createNotesPanel(config, actions) {
       type: 'checkbox',
       checked: isSelected,
       title: 'Select for bulk actions',
-      'aria-label': 'Select this note',
+      'aria-label': 'Select note #' + (index + 1),
     });
     check.addEventListener('change', () => {
       if (check.checked) selected.add(a.id);
@@ -220,12 +307,12 @@ export function createNotesPanel(config, actions) {
 
     const hasSelector = !!(a.target && a.target.selector);
     const actsRow = h('div', { class: 'note-actions' }, [
-      h('button', { class: 'note-act', title: 'Locate on page', 'aria-label': 'Locate on page', html: icon('locate', 15), on: { click: () => actions.locate(a) } }),
-      hasSelector ? h('button', { class: 'note-act', title: 'Copy selector', 'aria-label': 'Copy selector', html: icon('copy', 15), on: { click: () => actions.copySelector(a) } }) : null,
-      actions.suggestFix ? h('button', { class: 'note-act', title: 'AI: suggest a fix', 'aria-label': 'Suggest a fix with AI', html: icon('ai', 15), on: { click: () => actions.suggestFix(a) } }) : null,
+      h('button', { class: 'note-act', title: 'Locate on page', 'aria-label': 'Locate on page', html: icon('locate', 15), on: { click: guarded(() => actions.locate(a), 'Locate') } }),
+      hasSelector ? h('button', { class: 'note-act', title: 'Copy selector', 'aria-label': 'Copy selector', html: icon('copy', 15), on: { click: guarded(() => actions.copySelector(a), 'Copy selector') } }) : null,
+      actions.suggestFix ? h('button', { class: 'note-act', title: 'AI: suggest a fix', 'aria-label': 'Suggest a fix with AI', html: icon('ai', 15), on: { click: guarded(() => actions.suggestFix(a), 'Suggest a fix') } }) : null,
       h('button', { class: 'note-act', title: 'Edit note', 'aria-label': 'Edit note', html: icon('edit', 15), on: { click: () => startEdit(a) } }),
-      h('button', { class: `note-act ${resolved ? 'on' : ''}`, title: resolved ? 'Reopen' : 'Mark resolved', 'aria-label': resolved ? 'Reopen note' : 'Mark note resolved', html: icon('check', 15), on: { click: () => actions.toggleStatus(a) } }),
-      h('button', { class: 'note-act danger', title: 'Delete', 'aria-label': 'Delete note', html: icon('trash', 15), on: { click: () => actions.remove(a) } }),
+      h('button', { class: `note-act ${resolved ? 'on' : ''}`, title: resolved ? 'Reopen' : 'Mark resolved', 'aria-label': resolved ? 'Reopen note' : 'Mark note resolved', html: icon('check', 15), on: { click: guarded(() => actions.toggleStatus(a), 'Update note') } }),
+      h('button', { class: 'note-act danger', title: 'Delete', 'aria-label': 'Delete note', html: icon('trash', 15), on: { click: guarded(() => actions.remove(a), 'Delete note') } }),
     ]);
 
     const top = h('div', { class: 'note-top' }, [
@@ -246,7 +333,7 @@ export function createNotesPanel(config, actions) {
       const ta = h('textarea', { class: 'note-edit', value: a.note });
       const finish = (save) => {
         editingId = null;
-        if (save) actions.editNote(a, ta.value.trim());
+        if (save) guarded(() => actions.editNote(a, ta.value.trim()), 'Save note')();
         else render();
       };
       ta.addEventListener('keydown', (e) => {
@@ -264,7 +351,7 @@ export function createNotesPanel(config, actions) {
       h('option', { value: p, text: p[0].toUpperCase() + p.slice(1), ...(p === prio ? { selected: 'selected' } : {}) })
     ));
     prioSelect.value = prio;
-    prioSelect.addEventListener('change', () => actions.setPriority(a, prioSelect.value));
+    prioSelect.addEventListener('change', guarded(() => actions.setPriority(a, prioSelect.value), 'Set priority'));
 
     const vis = a.visibility === 'client' ? 'client' : 'internal';
     const visSelect = h('select', { class: 'vis-select', 'aria-label': 'Visibility' }, [
@@ -272,9 +359,9 @@ export function createNotesPanel(config, actions) {
       h('option', { value: 'client', text: 'Client-facing' }),
     ]);
     visSelect.value = vis;
-    visSelect.addEventListener('change', () => {
-      if (actions.setVisibility) actions.setVisibility(a, visSelect.value);
-    });
+    visSelect.addEventListener('change', guarded(() => {
+      if (actions.setVisibility) return actions.setVisibility(a, visSelect.value);
+    }, 'Set visibility'));
 
     const currentUrl = actions.currentUrl ? actions.currentUrl() : null;
     const offPage = !!(currentUrl && a.url && a.url !== currentUrl);

@@ -5,6 +5,22 @@
 //
 // The same narrative drives both, so the PDF and the Markdown never disagree.
 
+const { scrubRecording, scrubDeep, collectSecretValues } = require('./scrub');
+
+// Both reports read the recording ONLY through this: secret step values (and any
+// echo of them in lastRun results) are removed before a single field is read, and
+// stray line breaks cannot restructure the Markdown.
+function prepare(recording, lastRun) {
+  const rec = scrubRecording(recording) || {};
+  const run = scrubDeep(lastRun || null, collectSecretValues(recording && recording.steps));
+  return { rec: rec && typeof rec === 'object' ? rec : {}, run };
+}
+
+const LINE_BREAKS = new RegExp('[\r\n' + String.fromCharCode(0x2028, 0x2029) + ']+', 'g');
+function oneLine(v) {
+  return String(v == null ? '' : v).replace(LINE_BREAKS, ' ');
+}
+
 function pad(n) {
   return String(n).padStart(2, '0');
 }
@@ -37,7 +53,7 @@ function targetLabel(step) {
 }
 
 function valueLabel(step) {
-  if (step.secret) return '•••••• (password, not recorded)';
+  if (step.secret) return '•••••• (secret - the value is never stored or exported)';
   if (typeof step.value === 'boolean') return step.value ? 'checked' : 'unchecked';
   if (step.value == null || step.value === '') return '(cleared)';
   return '“' + truncate(step.value, 80) + '”';
@@ -104,12 +120,12 @@ function buildNarrative(recording, lastRun) {
       n: i + 1,
       at: t0 != null && at != null ? offset(at - t0) : '',
       verb: d.verb,
-      detail: d.detail,
+      detail: oneLine(d.detail),
       type: step.type,
       selector: step.selector || '',
       result: run ? (run.ok ? 'ok' : 'failed') : '',
-      error: run && run.error ? String(run.error) : '',
-      actual: run && run.actual != null ? String(run.actual) : '',
+      error: run && run.error ? oneLine(run.error) : '',
+      actual: run && run.actual != null ? oneLine(run.actual) : '',
     };
   });
   const duration = t0 != null && steps.length ? when(steps[steps.length - 1].ts) - t0 : null;
@@ -146,7 +162,8 @@ function durationLabel(ms) {
 }
 
 // ---- markdown ------------------------------------------------------------------
-function toRecordingMarkdown(recording, lastRun) {
+function toRecordingMarkdown(rawRecording, rawLastRun) {
+  const { rec: recording, run: lastRun } = prepare(rawRecording, rawLastRun);
   const narrative = buildNarrative(recording, lastRun);
   const sum = summarise(recording, lastRun, narrative);
   const out = [];
@@ -206,7 +223,8 @@ function esc(v) {
   return String(v == null ? '' : v).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
 
-function toRecordingHtml(recording, lastRun) {
+function toRecordingHtml(rawRecording, rawLastRun) {
+  const { rec: recording, run: lastRun } = prepare(rawRecording, rawLastRun);
   const narrative = buildNarrative(recording, lastRun);
   const sum = summarise(recording, lastRun, narrative);
   const rows = narrative.rows
@@ -223,7 +241,9 @@ function toRecordingHtml(recording, lastRun) {
     .join('\n');
 
   return `<!doctype html>
-<html><head><meta charset="utf-8"><title>${esc(sum.name)}</title>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+<title>${esc(sum.name)}</title>
 <style>
   * { box-sizing: border-box; }
   body { font: 12px/1.5 -apple-system, Segoe UI, Roboto, sans-serif; color: #14161c; margin: 0; padding: 28px 32px; }

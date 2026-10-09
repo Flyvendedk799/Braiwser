@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Buttons</title>
+<style>
+#wrap{position:relative;width:200px;height:50px;margin:12px 0}
+#covered{position:absolute;left:0;top:0;width:200px;height:50px}
+#overlay{position:absolute;left:0;top:0;width:200px;height:50px;background:rgba(0,0,0,.4)}
+</style></head>
+<body>
+<main>
+  <button id="enabled" type="button" onclick="document.getElementById('log').textContent='enabled clicked'">Enabled action</button>
+  <button id="disabled" type="button" disabled onclick="document.getElementById('log').textContent='DISABLED CLICKED'">Disabled action</button>
+  <div id="wrap">
+    <button id="covered" type="button" onclick="document.getElementById('log').textContent='COVERED CLICKED'">Covered action</button>
+    <div id="overlay"></div>
+  </div>
+  <div role="status" id="log">idle</div>
+</main>
+</body></html>

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "skillId": "fixture-preview",
+  "version": "1.0.0",
+  "inputKeys": ["name"],
+  "maxDurationMs": 30000,
+  "steps": [
+    { "id": "s1", "type": "navigate", "url": "{{origin}}/preview.html" },
+    { "id": "s2", "type": "fill", "target": { "by": "label", "value": "Display name" }, "inputKey": "name" },
+    { "id": "s3", "type": "click", "target": { "by": "role", "role": "button", "name": "Preview" } },
+    { "id": "s4", "type": "assert", "target": { "by": "role", "role": "status", "name": "Status" }, "kind": "text", "op": "equals", "expected": "Previewed: Ada" }
+  ]
+}

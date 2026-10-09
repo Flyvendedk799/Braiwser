@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Sign in</title></head>
+<body>
+<main>
+  <h1>Sign in</h1>
+  <form onsubmit="return false" aria-label="Sign in">
+    <label>Email <input id="email" type="email" name="email"></label>
+    <label>Password <input id="pw" type="password" name="password"></label>
+    <label>Verification code <input id="otp" type="text" name="code" autocomplete="one-time-code"></label>
+    <label>Card number <input id="card" type="text" name="cardnumber"></label>
+    <label>Nickname <input id="nick" type="text" name="nick"></label>
+    <button id="go" type="submit">Sign in</button>
+  </form>
+  <div role="alert" id="err" hidden>Invalid credentials</div>
+</main>
+</body></html>

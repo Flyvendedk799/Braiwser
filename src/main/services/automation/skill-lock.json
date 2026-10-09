@@ -1,0 +1,10 @@
+{
+  "lockVersion": 1,
+  "skills": {
+    "verify-journey@1.0.0": "sha256:96207f8ee2017fdf940ac046758e0dfad0e564082d6cbba4ae0f74e13e297e1a",
+    "review-responsive@1.0.0": "sha256:8b8d3521b1e4bd3b21774a913dce6d5aa53f0b3e1d9384fd978cc6f86a70915d",
+    "compare-fix@1.0.0": "sha256:d24d7980c84c436afcd1144cd1e1e57179c168592ba275eaca8fd7626c75361a",
+    "extract-table@1.0.0": "sha256:1465b6ca21ff190274a806675f6b967c34daaf8dc0439ed7adbb2248985770ca",
+    "handoff-repro@1.0.0": "sha256:a9bcb01d01c7bb8a81caab1e026ab6d5814fd0b781733105d7a056d2c630918e"
+  }
+}

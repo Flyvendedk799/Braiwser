@@ -46,11 +46,14 @@ function applyTemplate(templateId, { session, annotations, project, consoleError
   return lines.join('\n');
 }
 
+// Built-in agent adapters. `exe` + `args` are what actually runs (shell:false,
+// placeholders substituted into finished arguments); `command` is the display /
+// settings string and is recognised as this adapter when saved unchanged.
 const AGENT_PRESETS = [
-  { id: 'claude', label: 'Claude Code', command: 'claude -p "{promptPath}"' },
-  { id: 'codex', label: 'Codex CLI', command: 'codex "{promptPath}"' },
-  { id: 'cursor', label: 'Cursor Agent (shell)', command: 'cursor-agent -p "{promptPath}"' },
-  { id: 'cat', label: 'Preview only (cat)', command: 'cat "{promptPath}"' },
+  { id: 'claude', label: 'Claude Code', command: 'claude -p "{promptPath}"', exe: 'claude', args: ['-p', '{promptPath}'] },
+  { id: 'codex', label: 'Codex CLI', command: 'codex "{promptPath}"', exe: 'codex', args: ['{promptPath}'] },
+  { id: 'cursor', label: 'Cursor Agent', command: 'cursor-agent -p "{promptPath}"', exe: 'cursor-agent', args: ['-p', '{promptPath}'] },
+  { id: 'cat', label: 'Preview only (cat)', command: 'cat "{promptPath}"', exe: 'cat', args: ['{promptPath}'] },
 ];
 
 module.exports = { listTemplates, applyTemplate, AGENT_PRESETS };

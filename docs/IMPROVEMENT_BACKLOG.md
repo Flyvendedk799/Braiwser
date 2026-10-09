@@ -1,3 +1,5 @@
+> **Historical planning document.** It records plans made earlier in the project and may describe work that is done, changed or abandoned. For what the code does today see README.md and docs/ARCHITECTURE.md.
+
 # Braiwser — improvement backlog (from ultracode review wf_9644bfd6)
 
 > **Historical.** Every batch below is applied. This file records the review that

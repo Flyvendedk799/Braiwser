@@ -1,4 +1,8 @@
-// Integrations: create issues from notes + webhook notify + CI starter.
+// Integrations: DRAFT builders only. This file turns notes into issue payloads
+// (GitHub / Linear / Jira), builds webhook and Slack message bodies, and writes a CI
+// workflow starter. It does not authenticate with any tracker, create an issue,
+// deliver a webhook or retry anything: the caller (or the user, by copy and paste)
+// has to send what it returns.
 const fs = require('fs');
 const path = require('path');
 
@@ -59,7 +63,13 @@ function createIssueDraft(repos, { provider, annotationId, sessionId }) {
   else draft = buildGithubIssue(annotation, session);
   repos.auditLog.append('integration.issue_draft', { provider: draft.provider, annotationId });
   repos.analytics.track('integration_issue', { provider: draft.provider });
-  return { ok: true, draft };
+  return {
+    ok: true,
+    draft,
+    created: false,
+    status: 'draft',
+    note: `This is a draft only. Nothing was sent to ${draft.provider}; copy it into the tracker or send it from your own tooling.`,
+  };
 }
 
 function slackPayload(text) {

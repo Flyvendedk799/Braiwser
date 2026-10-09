@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Preview</title></head>
+<body>
+<main>
+  <h1>Preview your name</h1>
+  <label>Display name <input id="name" type="text" data-testid="display-name"></label>
+  <button id="preview" type="button">Preview</button>
+  <div role="status" aria-label="Status" id="status">Idle</div>
+</main>
+<script>
+document.getElementById('preview').addEventListener('click', function () {
+  document.getElementById('status').textContent = 'Previewed: ' + document.getElementById('name').value;
+});
+</script>
+</body></html>
