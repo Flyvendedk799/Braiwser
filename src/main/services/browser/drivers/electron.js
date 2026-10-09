@@ -1,4 +1,5 @@
 'use strict';
+const IDLE_RELEASE_MS = 750; // how long an idle page keeps its debugger lease
 // Electron-embedded driver: main-owned guest registry + CDP observation / input.
 //
 // STATUS: implemented against the contract and unit-tested with fake
@@ -28,7 +29,7 @@ const probe = require('../../../../webview/probe');
 const obs = require('./observe');
 const { CdpPointer } = require('./cdp-pointer');
 
-const { driverError, clipText, fingerprintOf } = obs;
+const { driverError, clipText, fingerprintOf, parseKey, validateNavigationUrl, normalizeFocus } = obs;
 
 const DRIVER_VERSION = '0.1.0';
 const ACTIONS = Object.freeze(['click', 'fill', 'press', 'check', 'navigate']);
@@ -81,6 +82,8 @@ class ElectronPage extends EventEmitter {
     this._snapshots = new obs.SnapshotStore();
     this._lease = null;
     this._ctx = null;
+    this._busy = 0; // in-flight CDP users (sends, pointer actions) of the lease
+    this._idleTimer = null;
     this._lane = Promise.resolve();
     this._disposed = false;
     this._wire();
@@ -177,7 +180,19 @@ class ElectronPage extends EventEmitter {
     this._emitSession({ type: 'paused', reason: clipText(reason || 'detached', 40) });
   }
 
+  // The debugger is a shared resource (full-page capture, DevTools). Hold the lease only while work is
+  // in flight and give it back shortly after, so an idle page never blocks other features.
+  _scheduleIdleRelease() {
+    if (this._idleTimer) clearTimeout(this._idleTimer);
+    this._idleTimer = setTimeout(() => {
+      this._idleTimer = null;
+      if (this._busy === 0) this._dropLease();
+    }, IDLE_RELEASE_MS);
+    if (this._idleTimer.unref) this._idleTimer.unref();
+  }
+
   _dropLease() {
+    if (this._idleTimer) { clearTimeout(this._idleTimer); this._idleTimer = null; }
     const lease = this._lease;
     this._lease = null;
     this._ctx = null;
@@ -207,6 +222,7 @@ class ElectronPage extends EventEmitter {
   // ---- CDP plumbing -------------------------------------------------------------------
   async _send(method, params) {
     const lease = await this._acquire();
+    this._busy++;
     try {
       return await lease.send(method, params);
     } catch (err) {
@@ -215,6 +231,9 @@ class ElectronPage extends EventEmitter {
         throw driverError('UNAVAILABLE', 'The page debugger disconnected; observe again.', { detail: 'DRIVER_DISCONNECTED', retry: true });
       }
       throw err;
+    } finally {
+      this._busy--;
+      this._scheduleIdleRelease();
     }
   }
 
@@ -280,7 +299,7 @@ class ElectronPage extends EventEmitter {
   // ---- navigation ------------------------------------------------------------------------
   async navigate(url, { signal, timeoutMs } = {}) {
     this._assertUsable();
-    const target = require('./playwright').validateNavigationUrl(url);
+    const target = validateNavigationUrl(url);
     if (signal && signal.aborted) return { outcome: 'cancelled', url: this.url() };
     const timeout = Math.max(1000, Math.min(60000, Number(timeoutMs) || 15000));
     let stopped = null;
@@ -460,7 +479,7 @@ class ElectronPage extends EventEmitter {
     }
     const epochBefore = this.documentEpoch;
     if (action.kind === 'navigate') {
-      const target = require('./playwright').validateNavigationUrl(action.url);
+      const target = validateNavigationUrl(action.url);
       control.check();
       control.beforeDispatch();
       const nav = await this.navigate(target, { signal: control.signal || undefined, timeoutMs: action.timeoutMs });
@@ -479,7 +498,7 @@ class ElectronPage extends EventEmitter {
     }
     let printable = false;
     if (action.kind === 'press') {
-      printable = require('./playwright').parseKey(action.key).printable;
+      printable = parseKey(action.key).printable;
     }
     const { ref, live } = await this._prepare(cmd, action, control, printable);
     const evidence = [];
@@ -488,6 +507,7 @@ class ElectronPage extends EventEmitter {
     let dispatched = false;
     const guarded = { signal: control.signal, check: () => control.check(), beforeDispatch: () => { control.beforeDispatch(); dispatched = true; } };
     const pointer = new CdpPointer(await this._acquire());
+    this._busy++;
     try {
       try {
         if (action.kind === 'check') {
@@ -520,7 +540,7 @@ class ElectronPage extends EventEmitter {
         try { err.dispatched = true; err.effectUnknown = true; } catch (_e) { /* frozen */ }
         throw err;
       }
-    } finally { pointer.close(); }
+    } finally { pointer.close(); this._busy--; this._scheduleIdleRelease(); }
     let expectOutcome = null;
     if (action.expect && typeof action.expect === 'object') {
       const { timeoutMs: _t, ...assertion } = action.expect;
@@ -713,21 +733,6 @@ function countFrames(tree) {
   let n = 1;
   for (const child of (tree && tree.childFrames) || []) n += countFrames(child);
   return n;
-}
-
-function normalizeFocus(focus) {
-  if (focus == null) return null;
-  // The broker passes `focus` as a plain string (a text search over names / context).
-  if (typeof focus === 'string') return focus.trim() ? { text: clipText(focus, 200) } : null;
-  if (typeof focus !== 'object' || Array.isArray(focus)) {
-    throw driverError('UNSUPPORTED', 'focus must be an object.', { detail: 'FOCUS_INVALID' });
-  }
-  const out = {};
-  if (focus.role != null) out.role = clipText(focus.role, 40).toLowerCase();
-  if (focus.name != null) out.name = clipText(focus.name, 200);
-  if (focus.text != null) out.text = clipText(focus.text, 200);
-  if (focus.exact === true) out.exact = true;
-  return Object.keys(out).length ? out : null;
 }
 
 class ElectronSession {

@@ -34,7 +34,7 @@ const path = require('node:path');
 const probe = require('../../../../webview/probe');
 const obs = require('./observe');
 
-const { driverError, clipText, fingerprintOf } = obs;
+const { driverError, clipText, fingerprintOf, parseKey, validateNavigationUrl, normalizeFocus } = obs;
 
 const DRIVER_VERSION = '1.0.0';
 const MODES = Object.freeze(['headless', 'visible']);
@@ -45,65 +45,6 @@ const MAX_REFS = 600;
 const NOOP_CONTROL = Object.freeze({ check() {}, beforeDispatch() {}, signal: null });
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const rid = (prefix) => `${prefix}_${crypto.randomBytes(8).toString('hex')}`;
-
-const NAMED_KEYS = new Set(['Enter', 'Tab', 'Escape', 'Backspace', 'Delete', 'ArrowUp', 'ArrowDown', 'ArrowLeft',
-  'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'Space', 'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8',
-  'F9', 'F10', 'F11', 'F12']);
-const MODIFIERS = new Set(['Shift', 'Alt', 'Control', 'Meta']);
-
-// Parse "Shift+Tab" / "a" / "Control+a". Returns { printable } or throws UNSUPPORTED.
-function parseKey(key) {
-  if (typeof key !== 'string' || !key || key.length > 40) {
-    throw driverError('UNSUPPORTED', 'Unsupported key.', { detail: 'KEY_UNSUPPORTED' });
-  }
-  const parts = key.split('+');
-  const main = parts.pop();
-  if (!parts.every((p) => MODIFIERS.has(p))) {
-    throw driverError('UNSUPPORTED', 'Unsupported key modifier.', { detail: 'KEY_UNSUPPORTED' });
-  }
-  const single = Array.from(main).length === 1;
-  if (!single && !NAMED_KEYS.has(main)) {
-    throw driverError('UNSUPPORTED', 'Unsupported key.', { detail: 'KEY_UNSUPPORTED' });
-  }
-  // Control/Alt/Meta chords are only allowed with a single character (Control+a, Meta+c): never with
-  // named keys (Control+Alt+Delete, Alt+F4) which act on the browser or OS rather than the page.
-  if (!single && parts.some((p) => p !== 'Shift')) {
-    throw driverError('UNSUPPORTED', 'Unsupported key chord.', { detail: 'KEY_UNSUPPORTED' });
-  }
-  const printable = (single || main === 'Space') && !parts.some((p) => p === 'Control' || p === 'Meta' || p === 'Alt');
-  return { printable };
-}
-
-function validateNavigationUrl(raw) {
-  if (typeof raw !== 'string' || !raw || raw.length > 2048) {
-    throw driverError('DENIED', 'Navigation URL is missing or too long.', { detail: 'URL_INVALID' });
-  }
-  let u;
-  try { u = new URL(raw); } catch (_e) { throw driverError('DENIED', 'Navigation URL is not valid.', { detail: 'URL_INVALID' }); }
-  if (u.protocol === 'about:' && u.href === 'about:blank') return u.href;
-  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
-    throw driverError('DENIED', `Navigation scheme ${u.protocol} is not allowed.`, { detail: 'URL_SCHEME_DENIED' });
-  }
-  if (u.username || u.password) {
-    throw driverError('DENIED', 'Navigation URLs may not embed credentials.', { detail: 'URL_CREDENTIALS_DENIED' });
-  }
-  return u.href;
-}
-
-function normalizeFocus(focus) {
-  if (focus == null) return null;
-  // The broker passes `focus` as a plain string (a text search over names / context).
-  if (typeof focus === 'string') return focus.trim() ? { text: clipText(focus, 200) } : null;
-  if (typeof focus !== 'object' || Array.isArray(focus)) {
-    throw driverError('UNSUPPORTED', 'focus must be an object.', { detail: 'FOCUS_INVALID' });
-  }
-  const out = {};
-  if (focus.role != null) out.role = clipText(focus.role, 40).toLowerCase();
-  if (focus.name != null) out.name = clipText(focus.name, 200);
-  if (focus.text != null) out.text = clipText(focus.text, 200);
-  if (focus.exact === true) out.exact = true;
-  return Object.keys(out).length ? out : null;
-}
 
 function isTimeout(err) {
   return !!err && (err.name === 'TimeoutError' || /Timeout \d+ms exceeded/.test(String(err.message)));

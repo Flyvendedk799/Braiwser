@@ -1,3 +1,4 @@
+import { DEFAULT_TIMERS } from './timers.js';
 // A replay driver bound to ONE webview. Everything a replay does to a page —
 // navigating, sending a step, reading the URL, waiting for acknowledgements —
 // goes through the guest element captured in the operation context, never
@@ -29,7 +30,7 @@ function addAbort(signal, fn) {
   return () => signal.removeEventListener('abort', fn);
 }
 
-export function createReplayDriver({ ctx, getUrl, timers = { setTimeout, clearTimeout } }) {
+export function createReplayDriver({ ctx, getUrl, timers = DEFAULT_TIMERS }) {
   const wv = ctx.wv;
   const urlNow = () => {
     let u = '';

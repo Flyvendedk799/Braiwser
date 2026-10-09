@@ -1,3 +1,4 @@
+import { DEFAULT_TIMERS } from './timers.js';
 // One request/reply exchange with ONE guest webview. Listeners are attached to
 // (and removed from) the element passed in, never a mutable "active webview"
 // global, so a tab switch mid-request can neither misroute the reply nor leak
@@ -5,7 +6,7 @@
 
 // Resolves with the first `replyChannel` payload, or `fallback` after timeoutMs
 // (or immediately if the send throws).
-export function requestFromGuest(wv, { channel, payload, replyChannel, timeoutMs = 3000, fallback = null, accept, timers = { setTimeout, clearTimeout } }) {
+export function requestFromGuest(wv, { channel, payload, replyChannel, timeoutMs = 3000, fallback = null, accept, timers = DEFAULT_TIMERS }) {
   return new Promise((resolve) => {
     if (!wv) { resolve(fallback); return; }
     let done = false;

@@ -9,10 +9,11 @@
 //    ({ tabId, docGen, url, title, viewport, runId, at }) so a later "Add as
 //    note" or "Locate" is bound to that page, not to whatever is current.
 import { auditOutcome } from './run-report.js';
+import { DEFAULT_TIMERS } from './timers.js';
 
 export const AUDIT_TIMEOUT_MS = 15000;
 
-export function createAuditRunner({ send, staleReason, getViewport, timeoutMs = AUDIT_TIMEOUT_MS, timers = { setTimeout, clearTimeout }, now = () => new Date().toISOString() }) {
+export function createAuditRunner({ send, staleReason, getViewport, timeoutMs = AUDIT_TIMEOUT_MS, timers = DEFAULT_TIMERS, now = () => new Date().toISOString() }) {
   let pending = null; // { ctx, resolve, timer }
 
   function settle(result) {

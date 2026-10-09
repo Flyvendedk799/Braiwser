@@ -63,10 +63,20 @@ async function captureFullPage(wc, options) {
   try {
     // exclusive: viewport emulation must not interleave with driver input.
     // allowBorrow keeps the previous behaviour of working next to a foreign client.
-    lease = broker.acquire(wc, { owner: 'capture-fullpage', exclusive: true, allowBorrow: true });
+    // A busy debugger is usually a driver action finishing or about to hand its
+    // lease back, so wait briefly before settling for the viewport.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        lease = broker.acquire(wc, { owner: 'capture-fullpage', exclusive: true, allowBorrow: true });
+        break;
+      } catch (err) {
+        if (!(err && err.code === 'DEBUGGER_BUSY') || attempt >= (o.busyRetries == null ? 5 : o.busyRetries)) throw err;
+        await sleep(o.busyWaitMs == null ? 300 : o.busyWaitMs);
+      }
+    }
   } catch (err) {
     const fallback = await viewportFallback(wc);
-    if (fallback) return { ...fallback, note: `full-page capture unavailable (${err.code || err.message})` };
+    if (fallback) return { ...fallback, note: `full-page capture unavailable (${err.code}: ${err.message})` };
     return { ok: false, error: String((err && err.message) || err) };
   }
 
@@ -121,7 +131,7 @@ async function captureFullPage(wc, options) {
     // so the fallback really is the unmodified viewport.
     await restore();
     const fallback = await viewportFallback(wc);
-    if (fallback) return fallback;
+    if (fallback) return { ...fallback, note: `full-page capture failed (${(e && (e.code || e.message)) || e}); showing the viewport only` };
     return { ok: false, error: String((e && e.message) || e) };
   } finally {
     await restore();

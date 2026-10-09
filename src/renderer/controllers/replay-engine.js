@@ -11,6 +11,7 @@
 //    (later steps would act on the wrong page); ordinary step failures
 //    (missing element, failed assertion) do not.
 import { buildReplayReport, stepLabel, stepTarget } from './run-report.js';
+import { DEFAULT_TIMERS } from './timers.js';
 
 // String comparison shared with the replay engine's assert ops.
 export function compareStr(op, actual, expected) {
@@ -42,7 +43,7 @@ export function pauseAfterStep(prev, next, { baseDelay, forVideo, fast }) {
 }
 
 // A sleep that ends early when the signal aborts.
-export function abortableSleep(ms, signal, timers = { setTimeout, clearTimeout }) {
+export function abortableSleep(ms, signal, timers = DEFAULT_TIMERS) {
   return new Promise((resolve) => {
     if (signal && signal.aborted) { resolve(); return; }
     const t = timers.setTimeout(done, ms);

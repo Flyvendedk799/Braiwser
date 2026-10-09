@@ -56,8 +56,8 @@ export function validateManifest(m) {
       if (s.recording && !(m.recordings && m.recordings[s.recording])) problems.push(`${where}: unknown recording ${s.recording}`);
       if (typeof s.url === 'string' && !/^\{(primary|evil|baseline|candidate)\}\//.test(s.url)) problems.push(`${where}: urls must use a {site} placeholder`);
       if (typeof s.url === 'string') {
-        const site = /^\{(\w+)\}/.exec(s.url)[1];
-        if (!t.sites.includes(site)) problems.push(`${where}: url uses undeclared site ${site}`);
+        const found = /^\{(\w+)\}/.exec(s.url);
+        if (found && !t.sites.includes(found[1])) problems.push(`${where}: url uses undeclared site ${found[1]}`);
       }
     }
     if (typeof t.adversarial !== 'boolean' && t.adversarial !== undefined) problems.push(`${where}: adversarial flag`);

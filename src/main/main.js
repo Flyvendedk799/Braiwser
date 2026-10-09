@@ -160,6 +160,24 @@ app.whenReady().then(() => {
   };
   registerIpc({ repos, paths, getWindow: () => mainWindow });
 
+  // Agent runtime: the single broker shared by the UI, MCP, CLI and skills. Built
+  // only when the feature flag is on; see services/browser/bootstrap.js.
+  let agentRuntime = null;
+  try {
+    agentRuntime = require('./services/browser/bootstrap').startAgentRuntime({
+      repos,
+      userDataDir: app.getPath('userData'),
+      getWindow: () => mainWindow,
+      enabled: security.agentRuntimeEnabled(),
+      isE2E: isE2E(),
+      log: (m) => console.log(m),
+    });
+    registerIpc.agentBroker = agentRuntime.broker;
+    app.on('before-quit', () => { agentRuntime.close().catch(() => {}); });
+  } catch (err) {
+    console.log('[agent-runtime] unavailable: ' + ((err && err.message) || err));
+  }
+
   // Credentials, once the window is on its way up rather than before it. Both of
   // these load the ESM auth library, and neither is worth delaying first paint
   // for: the migration moves any plaintext API key into the encrypted store, and
@@ -180,6 +198,7 @@ app.whenReady().then(() => {
   const settings = repos.settings.get();
   applyNativeTheme(settings.theme);
   createWindow(settings);
+  if (agentRuntime && agentRuntime.enabled && mainWindow) agentRuntime.attachHost(mainWindow.webContents);
 
   // A damaged or unreadable data file is never overwritten; tell the user
   // instead of silently showing an empty workspace.
@@ -211,7 +230,10 @@ app.whenReady().then(() => {
   });
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow(repos.settings.get());
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow(repos.settings.get());
+      if (agentRuntime && agentRuntime.enabled && mainWindow) agentRuntime.attachHost(mainWindow.webContents);
+    }
   });
 });
 

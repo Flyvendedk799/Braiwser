@@ -417,7 +417,7 @@ function createBroker(options = {}) {
       if ([...sessions.values()].filter((s) => s.ownerId === principal.id).length >= limits.maxSessionsPerPrincipal) throw dtoError('UNAVAILABLE', 'per-principal session limit reached', { detail: 'SESSION_CAP' });
       const driver = drivers[v.driver];
       if (!driver) throw dtoError('UNAVAILABLE', `driver '${v.driver}' is not installed`, { detail: 'NO_DRIVER' });
-      const caps = driver.capabilities();
+      const caps = driver.capabilities({ mode: v.mode });
       if (Array.isArray(caps.modes) && !caps.modes.includes(v.mode)) throw dtoError('UNSUPPORTED', `driver does not support mode '${v.mode}'`, { detail: 'MODE_UNSUPPORTED' });
       const sessionId = C.newId('session');
       const grant = policy.createGrant(v.grant, principal, { sessionId });
