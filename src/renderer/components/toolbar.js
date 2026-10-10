@@ -2,15 +2,26 @@
 // screenshot, AI, settings. It renders once and exposes an update() to reflect
 // state (active mode, recording, nav availability). All actions are delegated
 // back to the controller via the `actions` callback bag.
-import { h, icon, clear, menu } from '../lib/dom.js';
+//
+// Every action is wrapped so a thrown error or a rejected promise surfaces as an
+// error toast ("Audit failed: …") instead of vanishing as an unhandled rejection
+// — the controller's async handlers can fail (IPC, disk, a closed webview).
+import { h, icon, clear, menu, guarded } from '../lib/dom.js';
 
-export function createToolbar(actions) {
+export function createToolbar(rawActions) {
+  const actions = new Proxy(rawActions, {
+    get(target, name) {
+      const fn = target[name];
+      return typeof fn === 'function' ? guarded(fn.bind(target), actionLabel(name)) : fn;
+    },
+  });
   const suggestions = h('datalist', { id: 'caos-address-suggestions' });
   const addressInput = h('input', {
     type: 'text',
     spellcheck: 'false',
     list: 'caos-address-suggestions',
     placeholder: 'Search or enter address',
+    'aria-label': 'Address',
     title: 'Enter a URL, a bare domain, an absolute path, or a search phrase',
     on: {
       keydown: (e) => {
@@ -26,7 +37,7 @@ export function createToolbar(actions) {
     title: 'Bookmark this page',
     'aria-label': 'Bookmark this page',
     html: icon('star', 16),
-    on: { click: actions.toggleBookmark },
+    on: { click: (e) => actions.toggleBookmark(e) },
   });
 
   const btn = (cfg) =>
@@ -35,7 +46,7 @@ export function createToolbar(actions) {
       title: cfg.title || cfg.label || '',
       'aria-label': cfg.title || cfg.label || '',
       html: cfg.icon ? icon(cfg.icon, cfg.size || 16) + (cfg.label ? `<span>${cfg.label}</span>` : '') : `<span>${cfg.label}</span>`,
-      on: { click: cfg.onClick },
+      on: { click: (e) => (cfg.onClick ? cfg.onClick(e) : undefined) },
     });
 
   const undoBtn = btn({ icon: 'undo', title: 'Undo the last page edit', onClick: actions.undo });
@@ -172,6 +183,10 @@ export function createToolbar(actions) {
     drawBtn.classList.toggle('active', mode === 'draw');
     arrangeBtn.classList.toggle('active', mode === 'arrange');
     assertBtn.classList.toggle('active', mode === 'assert');
+    // Mode buttons are toggles: say which one is on, not just colour it.
+    [[inspectBtn, 'inspect'], [editBtn, 'edit'], [drawBtn, 'draw'], [arrangeBtn, 'arrange'], [assertBtn, 'assert']].forEach(([b, m]) =>
+      b.setAttribute('aria-pressed', mode === m ? 'true' : 'false'));
+    recBtn.setAttribute('aria-pressed', recording ? 'true' : 'false');
     assertBtn.classList.toggle('hot', mode === 'assert' && !!recording);
     recBtn.classList.toggle('active', !!recording);
     recBtn.querySelector('span').textContent = recording ? 'Stop' : 'Record';
@@ -241,6 +256,12 @@ export function createToolbar(actions) {
   }
 
   return { root, update, setAddress, setSuggestions, focusAddress, deviceAnchor: () => deviceBtn, applyChrome };
+}
+
+// "toggleMode" -> "Toggle mode": the verb shown in a failure toast.
+function actionLabel(name) {
+  const words = String(name).replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase();
+  return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
 function profileTooltip({ aiProvider, providerReady, profileName }) {

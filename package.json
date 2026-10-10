@@ -4,23 +4,44 @@
   "private": true,
   "description": "Braiwser — an annotation-first inspector browser for agentic UI review and testing. Open any web project, click any element, leave notes, audit accessibility, record journeys, and hand the whole review to a coding agent.",
   "main": "src/main/main.js",
+  "bin": {
+    "braiwser-agent": "src/main/services/automation/cli.mjs",
+    "braiwser-mcp": "src/main/services/automation/sidecar.mjs"
+  },
   "author": "Braiwser",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
+    "mcp": "node src/main/services/automation/sidecar.mjs",
+    "agent": "node src/main/services/automation/cli.mjs",
+    "bench:agent": "node scripts/benchmark-agent-browser.js",
     "check": "node scripts/check.js",
     "e2e": "node scripts/e2e.js",
-    "test": "npm run check && npm run e2e",
+    "license:keypair": "node scripts/gen-license-keypair.js",
+    "license:issue": "node scripts/issue-license.js",
+    "test": "npm run check && npm run test:unit && npm run e2e",
+    "build:guest": "node scripts/bundle-guest.js",
+    "predist": "npm run build:guest",
     "dist": "electron-builder",
+    "predist:dir": "npm run build:guest",
     "dist:dir": "electron-builder --dir",
-    "release": "electron-builder --publish always"
+    "prerelease": "npm run build:guest",
+    "release": "electron-builder --publish always",
+    "test:unit": "node --test \"test/**/*.test.js\" \"test/**/*.test.cjs\" \"test/**/*.test.mjs\" \"src/**/*.test.js\""
   },
   "build": {
     "appId": "com.braiwser.app",
     "productName": "Braiwser",
-    "files": ["src/**/*", "package.json", "schema/**/*"],
-    "directories": { "output": "dist" },
+    "files": [
+      "src/**/*",
+      "src/webview/dist/**/*",
+      "package.json",
+      "schema/**/*"
+    ],
+    "directories": {
+      "output": "dist"
+    },
     "publish": [
       {
         "provider": "github",
@@ -30,19 +51,42 @@
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "hardenedRuntime": true,
       "gatekeeperAssess": false
     },
-    "win": { "target": ["nsis"] },
-    "linux": { "target": ["AppImage"] }
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ]
+    },
+    "asarUnpack": [
+      "src/main/services/automation/**/*",
+      "node_modules/@modelcontextprotocol/**/*",
+      "node_modules/zod/**/*"
+    ]
   },
   "devDependencies": {
-    "electron": "^33.2.0",
-    "electron-builder": "^25.1.8"
+    "electron": "44.7.0",
+    "electron-builder": "^25.1.8",
+    "jsdom": "30.1.2"
   },
   "dependencies": {
     "@flyvendedk799/ai-auth": "github:Flyvendedk799/ai-auth",
-    "electron-updater": "^6.3.9"
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "electron-updater": "^6.3.9",
+    "playwright-core": "1.64.0",
+    "zod": "4.6.5"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

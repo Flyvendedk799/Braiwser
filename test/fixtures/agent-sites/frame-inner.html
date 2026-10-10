@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Inner frame</title></head>
+<body>
+  <label>Inner note <input id="note" type="text" name="note"></label>
+  <button id="inner-btn" type="button">Inner action</button>
+  <div role="status" id="inner-status">inner idle</div>
+<script>
+document.getElementById('inner-btn').addEventListener('click', function () {
+  document.getElementById('inner-status').textContent = 'inner clicked';
+});
+</script>
+</body></html>

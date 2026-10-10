@@ -1,22 +1,43 @@
-// Enterprise / marketplace foundations: SSO config shape, SCIM stubs, templates.
+// Enterprise surface: what exists and what does not.
+//
+// NOT IMPLEMENTED: single sign-on (SAML/OIDC), SCIM provisioning and self-hosted
+// sync. This repository contains no authentication, token validation, identity
+// provider integration or provisioning endpoint, and no server. Earlier versions
+// of this file reported `sso.ready: true` and a SCIM endpoint string, and let a
+// caller "enforce" SSO by writing a flag that nothing read; both implied
+// capabilities that do not exist. Every status below says `not-implemented`, and
+// configuring SSO is refused rather than silently recorded.
+//
+// What is real: the built-in handoff/checklist templates and the bundle schema.
+const fs = require('fs');
+const path = require('path');
+
+const NOT_IMPLEMENTED_NOTE =
+  'Single sign-on, SCIM provisioning and self-hosted sync are not implemented in this version.';
+
+// Templates shipped inside the app. (They were labelled "community" presets, but
+// there is no community catalogue or publishing flow.)
 const MARKETPLACE_TEMPLATES = [
   {
     id: 'agent-ui-fix',
     kind: 'handoff',
     label: 'UI fix for coding agents',
-    description: 'Community preset: selector-precise UI repairs.',
+    description: 'Built-in preset: selector-precise UI repairs.',
+    source: 'built-in',
   },
   {
     id: 'qa-a11y',
     kind: 'checklist',
     label: 'QA accessibility checklist',
-    description: 'Community preset mirroring WCAG-oriented review.',
+    description: 'Built-in preset mirroring WCAG-oriented review.',
+    source: 'built-in',
   },
   {
     id: 'agency-launch',
     kind: 'checklist',
     label: 'Agency launch pack',
-    description: 'Pre-launch client review checklist.',
+    description: 'Built-in pre-launch client review checklist.',
+    source: 'built-in',
   },
 ];
 
@@ -24,49 +45,42 @@ function enterpriseStatus(repos) {
   const license = repos.license.get();
   return {
     sso: {
-      enforced: !!license.ssoEnforced,
-      provider: license.ssoProvider || null,
-      ready: true,
+      enforced: false,
+      provider: null,
+      ready: false,
+      status: 'not-implemented',
     },
     scim: {
-      enabled: !!license.scimEnabled,
-      endpoint: '/api/scim/v2',
+      enabled: false,
+      endpoint: null,
+      status: 'not-implemented',
     },
-    selfHostedSync: !!license.selfHostedSync,
+    selfHostedSync: { enabled: false, status: 'not-implemented' },
+    note: NOT_IMPLEMENTED_NOTE,
     tier: license.tier || 'free',
   };
 }
 
-function setSsoConfig(repos, { enforced, provider }) {
-  repos.license.set({
-    ...repos.license.get(),
-    ssoEnforced: !!enforced,
-    ssoProvider: provider || 'oidc',
-  });
-  repos.auditLog.append('enterprise.sso', { enforced: !!enforced, provider });
-  return enterpriseStatus(repos);
+// Refused: there is nothing to configure. Nothing is written, so no stored flag can
+// later be mistaken for an active control.
+function setSsoConfig(repos) {
+  return {
+    ok: false,
+    status: 'not-implemented',
+    error: 'Single sign-on is not implemented in this version.',
+    ...enterpriseStatus(repos),
+  };
 }
 
 function listMarketplace() {
   return MARKETPLACE_TEMPLATES.slice();
 }
 
+// The published interchange schema, read from the file that ships with the app so
+// this can never drift from schema/braiwser-bundle.v1.json.
 function openSchema() {
-  return {
-    $schema: 'https://json-schema.org/draft/2020-12/schema',
-    $id: 'https://braiwser.app/schema/braiwser-bundle.v1.json',
-    title: 'Braiwser project bundle',
-    type: 'object',
-    required: ['format', 'version', 'project'],
-    properties: {
-      format: { const: 'braiwser-bundle' },
-      version: { type: 'integer', minimum: 1 },
-      project: { type: 'object' },
-      sessions: { type: 'array' },
-      annotations: { type: 'array' },
-      recordings: { type: 'array' },
-    },
-  };
+  const file = path.join(__dirname, '..', '..', '..', 'schema', 'braiwser-bundle.v1.json');
+  return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
 
 module.exports = {
@@ -75,4 +89,5 @@ module.exports = {
   listMarketplace,
   openSchema,
   MARKETPLACE_TEMPLATES,
+  NOT_IMPLEMENTED_NOTE,
 };

@@ -7,6 +7,77 @@
 // and owns the overlay UI: element picking, freehand region drawing, the note
 // popup with action tags, restored annotation pins, and the DOM-tree serializer.
 // The shell keeps the canonical annotation list and does all export.
+//
+// Logic that has to be unit-testable on its own lives in sibling modules:
+//   • inspector.dom.js      — the ONE definition of "content child", node ids
+//   • inspector.textedit.js — text editing that keeps child nodes / attributes
+//   • inspector.layers.js   — bounded sweep for the Layers overlap flags
+//   • inspector.history.js  — undo / redo size budget
+//
+// ---- GUEST <-> HOST PROTOCOL: additions (all backward compatible) ------------
+// Existing channels and payload fields are unchanged; everything below is
+// additive, so an older renderer keeps working.
+//
+// caos:ready  { url, title, + documentId, devicePixelRatio }
+//   documentId is random per document; use it to drop replies from a stale page.
+//
+// Coordinate spaces (CE-13). Every annotation target that carries a `box` is now
+// tagged when the guest sends it:
+//   target.space   'viewport' (element boxes: client coords at capture time)
+//                  'page'     (drawn-region boxes: client + scroll at capture)
+//   target.capture { scrollX, scrollY, dpr, viewport:{w,h}, page:{w,h}, documentId }
+//   target.pageBox  (elements only) the same box in page coords
+// caos:request-boxes  { requestId, space: 'page'|'viewport', annotations: [...] }
+//   -> caos:boxes     { requestId, space, url, documentId, capturedAt,
+//                       scroll:{x,y}, dpr, viewport:{w,h}, page:{w,h},
+//                       visualViewport:{scale,offsetLeft,offsetTop}|null,
+//                       boxes:[ {x,y,w,h,space,source:'live'|'stored'} | null ] }
+//   Boxes are re-measured NOW in the requested space (elements re-resolved,
+//   regions converted using the current scroll origin). The legacy
+//   caos:request-page-boxes -> caos:page-boxes (bare array, page space) stays.
+//
+// Structure edits (RF-08, CE-11). Children are always counted through ONE filter
+// (script/style/noscript and Braiwser's own nodes are not children), the same one
+// the DOM-tree serializer uses, so tree indexes and handler indexes agree.
+// caos:dom-tree nodes now also carry
+//   nid        opaque, per-document node id (send it back to name the node)
+//   index      position among the parent's content children (what the panel shows)
+//   domIndex   real index among ALL element children of the parent
+// caos:reorder-sibling { parentSelector | parentId,
+//                        nodeId | selector | fromIndex | fromDomIndex,   // source
+//                        toIndex }                                        // final content index
+// caos:move-into       { nodeId | selector, parentSelector | parentId,
+//                        index | toIndex (content index) | domIndex | beforeId | beforeSelector }
+//   Identity (id, then selector) wins; indexes are used only when the host sent
+//   no identity. A named node that no longer resolves REJECTS the request.
+//   Both reply  caos:structure-result { op:'reorder'|'move-into', ok, reason?, id? }.
+// caos:edit annotations: `target` is the SOURCE element as described BEFORE the
+//   edit (immutable); the post-edit selector is in edit.details.previewSelector.
+//
+// Style (RF-07, CE-10). caos:style-picked adds
+//   inlinePriority { prop: 'important'|'' }
+//   specified      { prop: { raw, value, unit, source:'inline'|'computed', unsupported? } }
+//     number+unit always come from the SAME source (inline when present, otherwise
+//     the computed px value) — pair these, never computed number + inline unit.
+//   session        { active, annId, changed:[props] }
+//   caos:apply-style ignores values equal to the current inline value (no-op
+//   commits do nothing), and an empty value reverts the property to what the
+//   element had inline BEFORE the session (not just removes it). A session that
+//   returns to its baseline retracts its note (caos:edit-undo).
+//
+// History. caos:edit-stacks { undo, redo, + dropped } — dropped counts entries
+//   evicted by the per-document budget or pruned after the page removed their
+//   element; they can no longer be undone.
+//
+// Layers. caos:layout-picked.container adds  overlapComplete:boolean (false = the
+//   overlap sweep hit its work cap, so `overlapping:false` rows mean "unknown"),
+//   nid; each sibling row and every nodeBrief adds nid, siblings also domIndex.
+//   Sibling rows are ALL content children, so row position === index === what
+//   caos:reorder-sibling expects.
+// caos:style-picked also adds textHasMarkup (the element has inline child elements;
+//   caos:set-text then edits the existing text nodes in place and keeps them).
+// caos:edit-undo / caos:annotation-update are used as before; a style session that
+//   returns to its baseline sends caos:edit-undo for its note.
 
 const { ipcRenderer } = require('electron');
 const anchor = require('./anchor');
@@ -14,6 +85,10 @@ const elementExport = require('./element-export');
 const recorder = require('./recorder');
 const replay = require('./replay');
 const audit = require('./audit');
+const dom = require('./inspector.dom');
+const textedit = require('./inspector.textedit');
+const layers = require('./inspector.layers');
+const history = require('./inspector.history');
 
 (function () {
   'use strict';
@@ -40,9 +115,12 @@ const audit = require('./audit');
   // ---- edit-mode state ---------------------------------------------------------
   let editSel = null; // the element being styled / typed into
   let editBox = null; // its outline
-  let editingText = null; // { el, before } while contenteditable is on
-  let styleSession = null; // { el, annId, restore, props } — one note per element
+  let editingText = null; // { el, before: textState, token } while contenteditable is on
+  let styleSession = null; // { el, annId, restore, original, props } — one note per element
   let redoStack = []; // undone edits, waiting to be re-applied
+  let droppedHistory = 0; // entries evicted by the history budget (reported to the host)
+  const nodeRegistry = dom.createNodeRegistry(); // stable ids for tree nodes
+  const documentId = 'd' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
   let insertLineEl = null; // the "it lands here" bar at the placeholder's edge
   let savedUserSelect = null; // page's own user-select, restored when tools go off
   const editStack = []; // applied edits: { type, annId, undo }
@@ -70,13 +148,7 @@ const audit = require('./audit');
     return s + '  ·  ' + Math.round(r.width) + '×' + Math.round(r.height);
   }
 
-  function isOwnUI(el) {
-    try {
-      return !!(el && el.closest && el.closest('[data-caos], #__caos_root'));
-    } catch (_e) {
-      return false;
-    }
-  }
+  const isOwnUI = dom.isOwnUI;
 
   // ---- overlay UI -----------------------------------------------------------
   function ensureUI() {
@@ -353,6 +425,7 @@ const audit = require('./audit');
       tag: el.nodeName.toLowerCase(),
       id: el.id || null,
       classes: Array.prototype.slice.call(el.classList || []),
+      nid: nodeRegistry.idFor(el),
       ...namingHints(el),
     };
   }
@@ -396,14 +469,6 @@ const audit = require('./audit');
     return chain;
   }
 
-  function rectsOverlap(a, b) {
-    const ix = Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left));
-    const iy = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
-    const inter = ix * iy;
-    if (inter <= 0) return false;
-    const minArea = Math.min(a.width * a.height, b.width * b.height) || 1;
-    return inter / minArea > 0.3;
-  }
 
   function containerKind(cs) {
     const display = cs.display || '';
@@ -420,13 +485,18 @@ const audit = require('./audit');
     return { kind: 'block', detail: 'block flow' };
   }
 
+  // Returns the sibling rows; the array also carries `.overlapComplete` (false
+  // when the overlap sweep hit its work cap, so a `false` flag means "unknown").
   function layerList(parent, targetEl) {
-    const kids = Array.prototype.filter.call(parent.children, (c) => c.nodeType === 1 && !isOwnUI(c));
+    // The same filter the DOM-tree serializer uses, so a row's position here is
+    // the index the reorder handlers expect.
+    const kids = elChildren(parent);
     const boxes = kids.map((k) => k.getBoundingClientRect());
-    return kids.map((k, i) => {
+    const sweep = layers.computeOverlaps(boxes);
+    const rows = kids.map((k, i) => {
       const r = boxes[i];
       const kcs = getComputedStyle(k);
-      const overlapping = boxes.some((r2, j) => j !== i && rectsOverlap(r, r2));
+      const overlapping = sweep.overlapping[i];
       return {
         selector: anchor.cssPath(k),
         tag: k.nodeName.toLowerCase(),
@@ -438,9 +508,13 @@ const audit = require('./audit');
         zIndex: kcs.zIndex,
         overlapping,
         isTarget: k === targetEl,
+        nid: nodeRegistry.idFor(k),
+        domIndex: dom.domIndex(parent, k),
         ...namingHints(k),
       };
     });
+    rows.overlapComplete = sweep.complete;
+    return rows;
   }
 
   function describeLayout(el) {
@@ -460,6 +534,8 @@ const audit = require('./audit');
         kind: k.kind,
         detail: k.detail,
         childCount: siblings.length,
+        overlapComplete: siblings.overlapComplete !== false,
+        nid: nodeRegistry.idFor(parent),
         ...namingHints(parent),
       };
     }
@@ -496,14 +572,24 @@ const audit = require('./audit');
   const ARRANGE_COLOR = '#3ddc97';
   const DRAG_CLICK_MAX = 4; // px — under this, a drag on the selection is a click-through
 
-  function elChildren(parent, excludeEl) {
-    return Array.prototype.filter.call(
-      parent.children,
-      (c) => c.nodeType === 1 && !isOwnUI(c) && c !== excludeEl
-    );
-  }
-  function indexIn(parent, el) {
-    return elChildren(parent).indexOf(el);
+  // The ONE child filter (see inspector.dom.js): script/style/noscript and our
+  // own overlay nodes are not children. The serializer, the Layers list, every
+  // drag and every host-driven reorder count children through this.
+  const elChildren = dom.contentChildren;
+  const indexIn = dom.contentIndex;
+
+  // Where `el` sits now, as a function that puts it back exactly: before the very
+  // same next sibling when that is still there, otherwise at its content index.
+  function positionRestorer(el) {
+    const parent = el.parentNode;
+    const next = el.nextSibling;
+    const idx = parent && parent.nodeType === 1 ? indexIn(parent, el) : -1;
+    return () => {
+      if (!parent || !document.documentElement.contains(parent)) return;
+      if (next && next.parentNode === parent) parent.insertBefore(el, next);
+      else if (idx >= 0) dom.insertAtContentIndex(parent, el, idx);
+      else parent.appendChild(el);
+    };
   }
 
   function ensureArrangeUI() {
@@ -696,45 +782,88 @@ const audit = require('./audit');
       kind: 'edit',
       action: entry.action || 'change',
       note: entry.note,
-      target: anchor.describe(el),
+      // A structural edit passes the element as it was BEFORE the mutation: the
+      // target is the source the agent must change, not wherever the live
+      // preview happens to have put it (CE-11).
+      target: entry.target || anchor.describe(el),
       edit: { type: entry.type, css: entry.css || '', details: entry.details || {} },
     };
     // The change is already applied, so "where the element is right now" IS the
-    // redo — one generic snapshot covers moves, styles, text and hiding alike.
-    const stackEntry = { type: entry.type, annId, undo: entry.undo, redo: entry.redo || restorePoint(el), ann, el };
+    // redo — one generic snapshot covers moves, styles and hiding alike. Edits
+    // whose redo is more than that (text) supply their own.
+    const stackEntry = {
+      type: entry.type,
+      annId,
+      undo: entry.undo,
+      redo: entry.redo || restorePoint(el),
+      ann,
+      el,
+      cost: entry.cost || 0,
+    };
+    pruneHistory(); // edits whose element the page already removed are dead weight
     editStack.push(stackEntry);
     redoStack = []; // a fresh edit forks the history
+    enforceHistoryBudget();
     send(ann);
     updateArrangeBar();
     syncArrange();
-    pushTree();
+    pushTreeSoon();
     pushStacks();
     return stackEntry;
   }
 
   // Everything an element needs to be put back exactly as it is at this moment:
-  // where it sits, what inline style it carries, and (for a text leaf) its copy.
+  // where it sits and what inline style it carries. (Text has its own exact-node
+  // snapshot — see inspector.textedit.js — and passes its own redo.)
   function restorePoint(el) {
-    const parent = el.parentElement;
-    const next = el.nextElementSibling;
+    const parent = el.parentNode;
+    const next = el.nextSibling;
     const style = el.getAttribute('style');
-    const text = el.children.length === 0 ? el.textContent : null;
     return () => {
       try {
-        if (parent && document.documentElement.contains(parent) && (el.parentElement !== parent || el.nextElementSibling !== next)) {
-          parent.insertBefore(el, next && next.parentElement === parent ? next : null);
+        if (parent && document.documentElement.contains(parent) && (el.parentNode !== parent || el.nextSibling !== next)) {
+          parent.insertBefore(el, next && next.parentNode === parent ? next : null);
         }
         if (style == null) el.removeAttribute('style');
         else el.setAttribute('style', style);
-        if (text != null && el.children.length === 0 && el.textContent !== text) el.textContent = text;
       } catch (_e) {
         /* the element may be gone */
       }
     };
   }
 
+  // ---- history budget -----------------------------------------------------------
+  // Entries hold live DOM references, so the stacks are bounded per document
+  // (entry count and estimated bytes). The oldest edits are evicted first; their
+  // notes stay with the host, they just can no longer be undone from here.
+  function enforceHistoryBudget() {
+    const lost = history.trimStack(editStack).length + history.trimStack(redoStack).length;
+    if (lost) droppedHistory += lost;
+    return lost;
+  }
+
+  // After a same-document navigation (SPA route change) the elements of some
+  // edits are simply gone; undoing them could only throw.
+  function pruneHistory() {
+    const alive = (e) => !e.el || e.el.isConnected !== false;
+    const lost = history.pruneDisconnected(editStack, alive).length + history.pruneDisconnected(redoStack, alive).length;
+    if (lost) droppedHistory += lost;
+    return lost;
+  }
+
+  function resetHistory() {
+    droppedHistory += editStack.length + redoStack.length;
+    editStack.length = 0;
+    redoStack = [];
+    styleSession = null;
+  }
+
   function pushStacks() {
-    ipcRenderer.sendToHost('caos:edit-stacks', { undo: editStack.length, redo: redoStack.length });
+    ipcRenderer.sendToHost('caos:edit-stacks', {
+      undo: editStack.length,
+      redo: redoStack.length,
+      dropped: droppedHistory,
+    });
   }
 
   function undoLastEdit() {
@@ -747,6 +876,7 @@ const audit = require('./audit');
       /* element may be gone — nothing to revert */
     }
     redoStack.push(entry);
+    enforceHistoryBudget();
     ipcRenderer.sendToHost('caos:edit-undo', { id: entry.annId });
     afterHistoryChange();
   }
@@ -760,6 +890,7 @@ const audit = require('./audit');
       /* element may be gone */
     }
     editStack.push(entry);
+    enforceHistoryBudget();
     send(entry.ann); // same id: the note comes back exactly as it was
     afterHistoryChange();
   }
@@ -768,7 +899,7 @@ const audit = require('./audit');
     updateArrangeBar();
     syncArrange();
     syncEditBox();
-    pushTree();
+    pushTreeSoon();
     pushStacks();
     if (editSel) pushStyle(editSel);
   }
@@ -787,7 +918,7 @@ const audit = require('./audit');
     ipcRenderer.sendToHost('caos:edit-undo', { id: entry.annId });
     updateArrangeBar();
     syncArrange();
-    pushTree();
+    pushTreeSoon();
     return true;
   }
 
@@ -866,6 +997,9 @@ const audit = require('./audit');
       grabDY: e.clientY - r.top,
       moved: false,
       startIndex: parent ? indexIn(parent, el) : -1,
+      startDomIndex: parent ? dom.domIndex(parent, el) : -1,
+      // Put the node back before the very sibling it started in front of.
+      restorePos: parent ? positionRestorer(el) : null,
       // The selector as the SOURCE still spells it: after the move a structural
       // path would describe the new position, not the code the agent must edit.
       selBefore: anchor.cssPath(el),
@@ -1033,33 +1167,67 @@ const audit = require('./audit');
       syncArrange(); // dropped back where it started — nothing to record
       return;
     }
-    const toSel = anchor.cssPath(parentNow);
-    const n = elChildren(parentNow).length;
-    const undo = () => {
-      const kids = elChildren(origParent, el);
-      origParent.insertBefore(el, kids[startIndex] || null);
+    // The live preview already moved the node. Everything the agent reads must be
+    // spelled in SOURCE terms, so put the node back for a moment, describe it and
+    // both containers as the source code has them, then land it again (CE-11).
+    const landNext = el.nextSibling;
+    const toDomIndex = dom.domIndex(parentNow, el);
+    d.restorePos();
+    const src = {
+      target: anchor.describe(el),
+      fromSel: anchor.cssPath(origParent),
+      toSel: anchor.cssPath(parentNow),
+      fromIndex: startIndex,
+      fromDomIndex: d.startDomIndex,
     };
-    if (reparented) {
-      const fromSel = anchor.cssPath(origParent);
-      commitEdit(el, {
+    src.selector = src.target.selector;
+    parentNow.insertBefore(el, landNext && landNext.parentNode === parentNow ? landNext : null);
+    commitStructure(el, src, {
+      reparented,
+      toIndex: endIndex,
+      toDomIndex,
+      count: elChildren(parentNow).length,
+      undo: d.restorePos,
+    });
+    pickLayout(el); // the hierarchy panel is showing the old order otherwise
+  }
+
+  // Record a finished structural edit (reorder among siblings or move into another
+  // container). `src` is the element and its containers described BEFORE the move;
+  // `dst` is where it landed. The annotation target is the immutable source; the
+  // post-move selector only lives in details.previewSelector.
+  function commitStructure(el, src, dst) {
+    const preview = anchor.cssPath(el);
+    const details = {
+      parentSelector: src.toSel,
+      fromIndex: src.fromIndex,
+      toIndex: dst.toIndex,
+      fromDomIndex: src.fromDomIndex,
+      toDomIndex: dst.toDomIndex,
+      sourceSelector: src.selector,
+      previewSelector: preview,
+    };
+    if (dst.reparented) {
+      details.fromParentSelector = src.fromSel;
+      return commitEdit(el, {
         type: 'reparent',
+        target: src.target,
         note:
-          'Move `' + d.selBefore + '` out of `' + fromSel + '` and into `' + toSel + '` at position ' +
-          (endIndex + 1) + ' of ' + n + '.',
-        details: { fromParentSelector: fromSel, parentSelector: toSel, fromIndex: startIndex, toIndex: endIndex },
-        undo,
-      });
-    } else {
-      commitEdit(el, {
-        type: 'reorder',
-        note:
-          'Move `' + d.selBefore + '` from position ' + (startIndex + 1) + ' to position ' + (endIndex + 1) +
-          ' (of ' + n + ') inside `' + toSel + '`.',
-        details: { parentSelector: toSel, fromIndex: startIndex, toIndex: endIndex },
-        undo,
+          'Move `' + src.selector + '` out of `' + src.fromSel + '` and into `' + src.toSel + '` at position ' +
+          (dst.toIndex + 1) + ' of ' + dst.count + '.',
+        details,
+        undo: dst.undo,
       });
     }
-    pickLayout(el); // the hierarchy panel is showing the old order otherwise
+    return commitEdit(el, {
+      type: 'reorder',
+      target: src.target,
+      note:
+        'Move `' + src.selector + '` from position ' + (src.fromIndex + 1) + ' to position ' + (dst.toIndex + 1) +
+        ' (of ' + dst.count + ') inside `' + src.toSel + '`.',
+      details,
+      undo: dst.undo,
+    });
   }
 
   // Escape / a stolen pointer: put the page back exactly as it was.
@@ -1069,10 +1237,7 @@ const audit = require('./audit');
     arrangeDrag = null;
     endDrag(d, null);
     try {
-      if (d.moved && d.kind === 'reorder' && d.parent && d.startIndex >= 0) {
-        const kids = elChildren(d.parent, d.el);
-        d.parent.insertBefore(d.el, kids[d.startIndex] || null);
-      }
+      if (d.moved && d.kind === 'reorder' && d.restorePos) d.restorePos();
       d.restoreStyle();
     } catch (_e) {
       /* element may be gone */
@@ -1343,18 +1508,23 @@ const audit = require('./audit');
     const kids = elChildren(parent);
     if (from < 0 || to < 0 || to >= kids.length) return;
     const ref = kids[delta > 0 ? to + 1 : to] || null;
+    // Describe the source BEFORE touching the DOM (CE-11).
+    const src = {
+      target: anchor.describe(el),
+      fromSel: anchor.cssPath(parent),
+      toSel: anchor.cssPath(parent),
+      fromIndex: from,
+      fromDomIndex: dom.domIndex(parent, el),
+    };
+    src.selector = src.target.selector;
+    const restore = positionRestorer(el);
     parent.insertBefore(el, ref === el ? el.nextElementSibling : ref);
-    const parentSel = anchor.cssPath(parent);
-    commitEdit(el, {
-      type: 'reorder',
-      note:
-        'Move `' + anchor.cssPath(el) + '` from position ' + (from + 1) + ' to position ' + (to + 1) +
-        ' (of ' + kids.length + ') inside `' + parentSel + '`.',
-      details: { parentSelector: parentSel, fromIndex: from, toIndex: to },
-      undo: () => {
-        const k2 = elChildren(parent, el);
-        parent.insertBefore(el, k2[from] || null);
-      },
+    commitStructure(el, src, {
+      reparented: false,
+      toIndex: to,
+      toDomIndex: dom.domIndex(parent, el),
+      count: kids.length,
+      undo: restore,
     });
   }
 
@@ -1783,6 +1953,42 @@ const audit = require('./audit');
     return b;
   }
 
+  // An edit that is applied right now lives on the element we edited, wherever
+  // the preview put it. Its stored target is the SOURCE position, which in the
+  // edited DOM may spell a different element (CE-11), so never re-resolve it.
+  function liveElementFor(ann) {
+    if (!ann || ann.kind !== 'edit' || !ann.id) return null;
+    for (let i = editStack.length - 1; i >= 0; i--) {
+      const e = editStack[i];
+      if (e.annId === ann.id && e.el && e.el.isConnected) return e.el;
+    }
+    return null;
+  }
+
+  const normText = (t) => String(t == null ? '' : t).trim().replace(/\s+/g, ' ').slice(0, 120);
+
+  // anchor.resolve() trusts a selector that still matches something. When the
+  // page has shifted underneath (siblings reordered, items inserted) the selector
+  // can match a different element than the one the note is about. If the match no
+  // longer carries the stored text but exactly one element of that tag does, that
+  // element is the better answer; otherwise keep what anchor found.
+  function resolveAnnotationTarget(target) {
+    const el = anchor.resolve(target);
+    if (!el || !target || !target.text || !target.tag) return el;
+    try {
+      const wanted = normText(target.text);
+      if (el.nodeName.toLowerCase() === target.tag && normText(el.innerText || el.textContent) === wanted) return el;
+      const cands = Array.prototype.filter.call(
+        document.getElementsByTagName(target.tag),
+        (c) => !isOwnUI(c) && normText(c.innerText || c.textContent) === wanted
+      );
+      if (cands.length === 1) return cands[0];
+    } catch (_e) {
+      /* keep anchor's answer */
+    }
+    return el;
+  }
+
   // Group the session's notes by the thing they are attached to, so an element
   // with four notes wears one bubble that says 4 — not four overlapping pins.
   function groupAnnotations(annotations) {
@@ -1791,7 +1997,7 @@ const audit = require('./audit');
     for (const ann of annotations) {
       const target = ann && ann.target;
       let el = null;
-      if (target && !isRegionTarget(target)) el = anchor.resolve(target);
+      if (target && !isRegionTarget(target)) el = liveElementFor(ann) || resolveAnnotationTarget(target);
       const key = el || 'region:' + JSON.stringify((target && target.box) || {});
       let g = byKey.get(key);
       if (!g) {
@@ -1823,7 +2029,7 @@ const audit = require('./audit');
             anchor.highlight(null, { duration: 1200, color, box: viewportBox(g.target) });
             return;
           }
-          const live = g.el && document.documentElement.contains(g.el) ? g.el : anchor.resolve(g.target);
+          const live = g.el && document.documentElement.contains(g.el) ? g.el : resolveAnnotationTarget(g.target);
           if (!live) return;
           anchor.highlight(live, { duration: 700, color });
           openElementNote(live, { existing: g.anns.length });
@@ -1936,7 +2142,7 @@ const audit = require('./audit');
     }
     let el = pin.el;
     if (!el || !document.documentElement.contains(el)) {
-      el = pin.target ? anchor.resolve(pin.target) : null;
+      el = pin.target ? resolveAnnotationTarget(pin.target) : null;
       pin.el = el;
     }
     if (el) return cornerOf(el.getBoundingClientRect());
@@ -1986,36 +2192,42 @@ const audit = require('./audit');
 
   function serializeTree(rootEl, maxDepth) {
     let budget = TREE_MAX_NODES;
-    function walk(el, depth) {
+    function walk(el, depth, index) {
       if (!el || el.nodeType !== 1) return null;
       const tag = el.nodeName ? el.nodeName.toLowerCase() : '';
-      if (tag === 'script' || tag === 'style' || tag === 'noscript') return null;
-      if (isOwnUI(el)) return null;
+      if (!dom.isContentElement(el) && el !== rootEl) return null;
       const node = {
         tag,
         id: el.id || null,
         classes: Array.prototype.slice.call(el.classList || []),
         selector: anchor.cssPath(el),
+        // Stable identity + both index spaces: `index` counts content children
+        // (what the panel shows and the reorder handlers expect), `domIndex` is
+        // the real position among all element children.
+        nid: nodeRegistry.idFor(el),
+        index,
+        domIndex: el.parentElement ? dom.domIndex(el.parentElement, el) : 0,
         // heading / label / text / hidden / childCount — everything the panels
         // need to call this row "Hero" instead of "div.x7".
         ...namingHints(el),
         children: [],
       };
       if (depth < maxDepth && budget > 0) {
-        for (let i = 0; i < el.children.length; i++) {
+        const kids = elChildren(el); // the same filter the handlers use
+        for (let i = 0; i < kids.length; i++) {
           if (budget <= 0) {
             node.truncated = true;
             break;
           }
           budget--;
-          const child = walk(el.children[i], depth + 1);
+          const child = walk(kids[i], depth + 1, i);
           if (child) node.children.push(child);
         }
       }
       return node;
     }
     try {
-      return walk(rootEl, 0);
+      return walk(rootEl, 0, 0);
     } catch (_e) {
       return null;
     }
@@ -2093,12 +2305,14 @@ const audit = require('./audit');
   function startTextEdit(el, point) {
     if (!isTextEditable(el)) return false;
     finishTextEdit();
-    editingText = { el, before: el.textContent };
+    // Exact child nodes + text data, so Undo/Cancel put the very same nodes back
+    // (inline emphasis, nested links and their listeners included).
+    const before = textedit.captureTextState(el);
+    if (!before) return false; // too large to snapshot losslessly — refuse to edit
+    editingText = { el, before, token: null };
     try {
-      el.setAttribute('contenteditable', 'plaintext-only');
-      el.style.setProperty('outline', '2px solid ' + EDIT_COLOR);
-      el.style.setProperty('outline-offset', '1px');
-      el.style.setProperty('user-select', 'text'); // the page-wide lock stops here
+      // Saved BEFORE the temporary overrides so a no-op edit restores verbatim.
+      editingText.token = textedit.beginEditing(el, { color: EDIT_COLOR });
       el.focus();
       // Put the caret where the pointer was, not at the start of the line.
       if (point && document.caretRangeFromPoint) {
@@ -2123,10 +2337,10 @@ const audit = require('./audit');
     if (e.key === 'Escape') {
       e.stopPropagation();
       e.preventDefault();
-      const { el, before } = editingText;
+      const { el, before, token } = editingText;
       editingText = null;
-      cleanupTextEdit(el);
-      el.textContent = before;
+      cleanupTextEdit(el, token);
+      textedit.restoreTextState(before); // cancel: the original nodes, not a flattened copy
       pushStyle(el);
       return;
     }
@@ -2139,13 +2353,9 @@ const audit = require('./audit');
     }
   }
 
-  function cleanupTextEdit(el) {
+  function cleanupTextEdit(el, token) {
     try {
-      el.removeAttribute('contenteditable');
-      el.style.removeProperty('outline');
-      el.style.removeProperty('outline-offset');
-      el.style.removeProperty('user-select');
-      if (!el.getAttribute('style')) el.removeAttribute('style');
+      textedit.endEditing(el, token);
       el.removeEventListener('blur', finishTextEdit);
       el.removeEventListener('keydown', onTextKey, true);
     } catch (_e) {
@@ -2159,21 +2369,48 @@ const audit = require('./audit');
     if (!t) return;
     editingText = null;
     const el = t.el;
-    const after = el.textContent;
-    cleanupTextEdit(el);
-    if (after === t.before) return;
-    const before = t.before;
+    cleanupTextEdit(el, t.token);
+    const afterState = textedit.captureTextState(el, { maxNodes: Infinity });
+    const after = afterState.text;
+    const before = t.before.text;
+    if (after === before) {
+      // Same words. Make sure the nodes are exactly the original ones too (a
+      // no-op edit must not leave a rebuilt DOM behind).
+      textedit.restoreTextState(t.before);
+      return;
+    }
+    commitTextEdit(el, t.before, afterState);
+  }
+
+  // Record a text edit whose before/after are exact node states.
+  function commitTextEdit(el, beforeState, afterState) {
+    const before = beforeState.text;
+    const after = afterState.text;
     commitEdit(el, {
       type: 'text',
       action: 'change',
+      // Identity of the element as it was before the copy changed.
+      target: textTarget(el, beforeState),
       note:
         'Change the copy of `' + anchor.cssPath(el) + '` from “' + trim60(before) + '” to “' + trim60(after) + '”.',
       details: { before: before, after: after },
-      undo: () => {
-        el.textContent = before;
-      },
+      cost: (beforeState.bytes + afterState.bytes) * 2,
+      undo: () => textedit.restoreTextState(beforeState),
+      redo: () => textedit.restoreTextState(afterState),
     });
     pushStyle(el);
+  }
+
+  // describe() reads innerText/textContent, so describe the element with its old
+  // words: the annotation's stored text then matches the unchanged source page.
+  function textTarget(el, beforeState) {
+    const t = anchor.describe(el);
+    try {
+      t.text = String(beforeState.text).trim().replace(/\s+/g, ' ').slice(0, 120);
+    } catch (_e) {
+      /* keep describe()'s text */
+    }
+    return t;
   }
 
   function trim60(v) {
@@ -2184,28 +2421,69 @@ const audit = require('./audit');
   // ---- style edits ---------------------------------------------------------------
   // One note per element per visit: changing five properties on a heading is one
   // request ("restyle the heading"), not five.
+  //
+  // The session remembers, per property, what the element carried inline BEFORE
+  // the first touch (`original`), and `props` holds only the properties whose
+  // current value differs from that baseline. So:
+  //   • reverting a property restores its original inline value + priority (or
+  //     removes it if it was never inline) and drops it from `props`;
+  //   • setting a property back to its original value is the same as reverting;
+  //   • when `props` is empty at commit time the session is back at baseline and
+  //     its note is retracted, not left claiming a change nobody wants (CE-10).
   function startStyleSession(el) {
-    styleSession = { el, annId: null, restore: styleSnapshot(el), props: {} };
+    styleSession = { el, annId: null, restore: styleSnapshot(el), original: {}, props: {} };
   }
 
   function endStyleSession() {
     styleSession = null;
   }
 
+  // "red !important" -> { value: 'red', priority: 'important' }
+  function splitPriority(raw) {
+    const s = String(raw).trim();
+    const m = /^(.*?)\s*!\s*important$/i.exec(s);
+    return m ? { value: m[1], priority: 'important' } : { value: s, priority: '' };
+  }
+
+  function styleKey(o) {
+    return o.value + (o.priority ? ' !' + o.priority : '');
+  }
+
   function applyStyle(el, props, commit) {
     if (!el || isOwnUI(el)) return;
-    if (!styleSession || styleSession.el !== el) {
+    const fresh = !styleSession || styleSession.el !== el;
+    const s = fresh ? null : styleSession;
+    // A call that changes nothing must not even open a session: focusing and
+    // leaving a field is not an edit (RF-07).
+    if (fresh && !stylePropsChange(el, props)) {
+      if (commit) pushStyle(el);
+      return;
+    }
+    if (fresh) {
       finishTextEdit();
       startStyleSession(el);
     }
+    const sess = s || styleSession;
     for (const prop in props) {
-      const value = props[prop];
-      if (value == null || value === '') {
-        el.style.removeProperty(prop);
-        delete styleSession.props[prop];
-      } else {
-        el.style.setProperty(prop, value);
-        styleSession.props[prop] = value;
+      const raw = props[prop];
+      const style = el.style;
+      const cur = { value: style.getPropertyValue(prop), priority: style.getPropertyPriority(prop) };
+      if (!(prop in sess.original)) sess.original[prop] = cur;
+      const orig = sess.original[prop];
+      if (raw == null || raw === '') {
+        // Revert: back to what was there before this visit, priority included.
+        if (orig.value) style.setProperty(prop, orig.value, orig.priority);
+        else style.removeProperty(prop);
+        delete sess.props[prop];
+        continue;
+      }
+      const next = splitPriority(raw);
+      if (next.value !== cur.value || next.priority !== cur.priority) style.setProperty(prop, next.value, next.priority);
+      const now = { value: style.getPropertyValue(prop), priority: style.getPropertyPriority(prop) };
+      if (styleKey(now) === styleKey(orig)) {
+        delete sess.props[prop]; // the same as before the visit — not a change
+      } else if (styleKey(now) !== styleKey(cur) || !(prop in sess.props)) {
+        sess.props[prop] = next; // authored text; the browser accepted it
       }
     }
     if (commit) commitStyleSession();
@@ -2214,14 +2492,45 @@ const audit = require('./audit');
     pushStyle(el);
   }
 
+  // Would applying `props` to `el` change any inline declaration?
+  function stylePropsChange(el, props) {
+    for (const prop in props) {
+      const raw = props[prop];
+      const curVal = el.style.getPropertyValue(prop);
+      const curPri = el.style.getPropertyPriority(prop);
+      if (raw == null || raw === '') {
+        // nothing to revert in a session we have not started
+        continue;
+      }
+      const next = splitPriority(raw);
+      if (next.value !== curVal || next.priority !== curPri) return true;
+    }
+    return false;
+  }
+
   function commitStyleSession() {
     const s = styleSession;
-    if (!s || !Object.keys(s.props).length) return;
-    const css = Object.keys(s.props)
-      .map((k) => k + ': ' + s.props[k] + ';')
-      .join(' ');
+    if (!s) return;
+    const keys = Object.keys(s.props);
+    if (!keys.length) {
+      // Back at baseline. If a note was already filed for this visit, take it
+      // back — the preview and the exported change request must agree.
+      if (s.annId) {
+        const entry = editStack.filter((x) => x.annId === s.annId)[0];
+        if (entry) retractEdit(entry);
+        s.annId = null;
+      }
+      return;
+    }
+    const withPri = (o) => o.value + (o.priority ? ' !important' : '');
+    const css = keys.map((k) => k + ': ' + withPri(s.props[k]) + ';').join(' ');
     const note = 'Restyle `' + anchor.cssPath(s.el) + '` — apply: ' + css;
-    const details = { props: JSON.parse(JSON.stringify(s.props)) };
+    const details = { props: {}, original: {} };
+    for (const k of keys) {
+      details.props[k] = withPri(s.props[k]);
+      const o = s.original[k];
+      details.original[k] = o && o.value ? withPri(o) : null;
+    }
     if (!s.annId) {
       const entry = commitEdit(s.el, {
         type: 'style',
@@ -2257,17 +2566,12 @@ const audit = require('./audit');
       const cs = getComputedStyle(el);
       const r = el.getBoundingClientRect();
       const inline = {};
-      for (let i = 0; i < el.style.length; i++) inline[el.style[i]] = el.style.getPropertyValue(el.style[i]);
-      ipcRenderer.sendToHost('caos:style-picked', {
-        selector: anchor.cssPath(el),
-        brief: nodeBrief(el),
-        editableText: isTextEditable(el),
-        text: isTextEditable(el) ? el.textContent : '',
-        box: { w: Math.round(r.width), h: Math.round(r.height) },
-        inline,
-        pageFonts: pageFonts(),
-        pageColors: pageColors(),
-        computed: {
+      const inlinePriority = {};
+      for (let i = 0; i < el.style.length; i++) {
+        inline[el.style[i]] = el.style.getPropertyValue(el.style[i]);
+        inlinePriority[el.style[i]] = el.style.getPropertyPriority(el.style[i]);
+      }
+      const computed = {
           'font-family': cs.fontFamily,
           'font-size': cs.fontSize,
           'font-weight': cs.fontWeight,
@@ -2295,11 +2599,78 @@ const audit = require('./audit');
           width: cs.width,
           height: cs.height,
           display: cs.display,
+      };
+      const sess = styleSession && styleSession.el === el ? styleSession : null;
+      ipcRenderer.sendToHost('caos:style-picked', {
+        selector: anchor.cssPath(el),
+        brief: nodeBrief(el),
+        editableText: isTextEditable(el),
+        text: isTextEditable(el) ? el.textContent : '',
+        textHasMarkup: el.children.length > 0,
+        box: { w: Math.round(r.width), h: Math.round(r.height) },
+        inline,
+        inlinePriority,
+        specified: specifiedLengths(el, inline, computed),
+        session: {
+          active: !!sess,
+          annId: sess ? sess.annId : null,
+          changed: sess ? Object.keys(sess.props) : [],
         },
+        pageFonts: pageFonts(),
+        pageColors: pageColors(),
+        computed,
       });
     } catch (_e) {
       /* ignore */
     }
+  }
+
+  // Numeric style controls need a number AND a unit from the SAME source. The
+  // computed value is always px; the inline value may be 2rem, 50%, 1.5, calc()…
+  // Mixing the computed number with the inline unit turns 2rem (32px computed)
+  // into 32rem. So, per property:
+  //   inline present and a plain <number><unit>  -> that number + unit
+  //   inline present but not parseable (calc/var) -> unsupported (show raw, do
+  //                                                  not offer a number field)
+  //   nothing inline                              -> the computed px value
+  const LENGTH_PROPS = [
+    'font-size', 'line-height', 'letter-spacing', 'border-radius', 'border-width',
+    'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+    'margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'width', 'height',
+  ];
+  const LENGTH_RE = /^\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)\s*([a-z%]*)\s*$/i;
+
+  function specifiedLengths(el, inline, computed) {
+    const out = {};
+    for (const prop of LENGTH_PROPS) {
+      const comp = computed[prop];
+      const compNum = parseFloat(comp);
+      const entry = { computed: comp, computedPx: isFinite(compNum) ? compNum : null };
+      // longhands resolve through shorthands (padding: 8px -> padding-top)
+      const raw = el.style.getPropertyValue(prop) || inline[prop] || '';
+      if (raw) {
+        const m = LENGTH_RE.exec(raw);
+        if (m) {
+          entry.source = 'inline';
+          entry.raw = raw;
+          entry.value = parseFloat(m[1]);
+          entry.unit = m[2].toLowerCase();
+        } else {
+          entry.source = 'inline';
+          entry.raw = raw;
+          entry.value = null;
+          entry.unit = null;
+          entry.unsupported = true;
+        }
+      } else {
+        entry.source = 'computed';
+        entry.raw = comp;
+        entry.value = isFinite(compNum) ? compNum : null;
+        entry.unit = isFinite(compNum) ? 'px' : null;
+      }
+      out[prop] = entry;
+    }
+    return out;
   }
 
   let _colorsCache = null;
@@ -2422,7 +2793,37 @@ const audit = require('./audit');
     }
   }
 
+  // ---- coordinate spaces (CE-13) -------------------------------------------------
+  // Element boxes are viewport (client) coordinates at the moment of capture; a
+  // drawn region's box is PAGE coordinates (client + scroll). Tag them so nobody
+  // has to guess, and say what the scroll origin / scale was when it was taken.
+  function captureContext() {
+    const de = document.documentElement || {};
+    const vv = window.visualViewport;
+    return {
+      scrollX: window.scrollX || 0,
+      scrollY: window.scrollY || 0,
+      dpr: window.devicePixelRatio || 1,
+      viewport: { w: window.innerWidth, h: window.innerHeight },
+      page: { w: Math.max(de.scrollWidth || 0, window.innerWidth || 0), h: Math.max(de.scrollHeight || 0, window.innerHeight || 0) },
+      visualViewport: vv ? { scale: vv.scale, offsetLeft: vv.offsetLeft, offsetTop: vv.offsetTop } : null,
+      documentId,
+    };
+  }
+
+  function tagTarget(target) {
+    if (!target || !target.box || target.space) return;
+    const region = isRegionTarget(target);
+    const cx = captureContext();
+    target.space = region ? 'page' : 'viewport';
+    if (!region) {
+      target.pageBox = { x: target.box.x + cx.scrollX, y: target.box.y + cx.scrollY, w: target.box.w, h: target.box.h };
+    }
+    target.capture = cx;
+  }
+
   function send(annotation) {
+    tagTarget(annotation.target);
     annotation.url = location.href;
     annotation.title = document.title || location.href;
     annotation.ts = new Date().toISOString();
@@ -2486,6 +2887,31 @@ const audit = require('./audit');
       sizeCanvas();
       queuePinSync();
     });
+    // Per-document history budget: a full navigation tears the document down, so
+    // release every reference now; a same-document navigation (SPA route change,
+    // back/forward) only prunes the edits whose element the page has removed.
+    window.addEventListener('pagehide', () => {
+      resetHistory();
+      clearPins();
+      lastPickedEl = editSel = arrangeSel = null;
+    });
+    const onSameDocNav = () => {
+      setTimeout(() => {
+        if (pruneHistory()) {
+          updateArrangeBar();
+          pushStacks();
+        }
+      }, 0);
+    };
+    window.addEventListener('popstate', onSameDocNav);
+    window.addEventListener('hashchange', onSameDocNav);
+    try {
+      if (window.navigation && window.navigation.addEventListener) {
+        window.navigation.addEventListener('navigatesuccess', onSameDocNav);
+      }
+    } catch (_e) {
+      /* Navigation API unavailable */
+    }
     window.addEventListener(
       'scroll',
       () => {
@@ -2493,7 +2919,12 @@ const audit = require('./audit');
       },
       true
     );
-    ipcRenderer.sendToHost('caos:ready', { url: location.href, title: document.title });
+    ipcRenderer.sendToHost('caos:ready', {
+      url: location.href,
+      title: document.title,
+      documentId,
+      devicePixelRatio: window.devicePixelRatio || 1,
+    });
   }
 
   // ---- host message wiring --------------------------------------------------
@@ -2582,7 +3013,7 @@ const audit = require('./audit');
         ipcRenderer.sendToHost('caos:highlight-ack', { ok: true });
         return;
       }
-      const el = anchor.resolve(target);
+      const el = resolveAnnotationTarget(target);
       if (el) {
         // Same courtesy the region path gets: a flash you cannot see is not a
         // located element. Instant, since the flash is position:fixed.
@@ -2623,89 +3054,136 @@ const audit = require('./audit');
     }
   });
 
+  // ---- host-driven structure edits (Layers / Sections panels) -------------------
+  // Both handlers resolve the nodes by IDENTITY first (see inspector.dom.js
+  // resolveChild), count children through the canonical filter, describe the
+  // source BEFORE mutating, and answer with caos:structure-result.
+  function reportStructure(op, ok, reason, extra) {
+    ipcRenderer.sendToHost('caos:structure-result', Object.assign({ op, ok, reason: reason || null }, extra || {}));
+    return ok;
+  }
+
+  function resolveContainer(p) {
+    let parent = null;
+    if (p.parentId != null) parent = nodeRegistry.lookup(p.parentId);
+    if (!parent && p.parentSelector) {
+      try {
+        parent = document.querySelector(p.parentSelector);
+      } catch (_e) {
+        parent = null;
+      }
+    }
+    return parent && parent.nodeType === 1 && !isOwnUI(parent) ? parent : null;
+  }
+
   // Move a container's child from one index to another (DOM order — this is
   // what actually drives row/column and default paint order for that parent).
+  function reorderSibling(p) {
+    const parent = resolveContainer(p);
+    if (!parent) return reportStructure('reorder', false, 'parent-not-found');
+    const node = dom.resolveChild(document, nodeRegistry, parent, p, 'from');
+    if (!node) return reportStructure('reorder', false, 'source-not-found');
+    const kids = elChildren(parent);
+    const from = kids.indexOf(node);
+    const to = p.toIndex;
+    if (!Number.isInteger(to) || to < 0 || to >= kids.length) return reportStructure('reorder', false, 'bad-index');
+    if (from === to) return reportStructure('reorder', false, 'no-change');
+    // Everything the agent will read is spelled for the page as it is NOW,
+    // before the preview moves anything.
+    const src = {
+      target: anchor.describe(node),
+      fromSel: anchor.cssPath(parent),
+      toSel: anchor.cssPath(parent),
+      fromIndex: from,
+      fromDomIndex: dom.domIndex(parent, node),
+    };
+    src.selector = src.target.selector;
+    const restore = positionRestorer(node);
+    const ref = kids[to > from ? to + 1 : to] || null;
+    parent.insertBefore(node, ref);
+    const entry = commitStructure(node, src, {
+      reparented: false,
+      toIndex: to,
+      toDomIndex: dom.domIndex(parent, node),
+      count: kids.length,
+      undo: restore,
+    });
+    pushTreeSoon();
+    // Refocus on whatever was selected before the move (usually — but not
+    // always — the moved node itself) using the LIVE reference, not a
+    // re-derived selector: reordering can shift nth-of-type-based selectors
+    // for every reshuffled sibling, not just the one that moved.
+    const targetEl = lastPickedEl && document.documentElement.contains(lastPickedEl) ? lastPickedEl : node;
+    pickLayout(targetEl);
+    return reportStructure('reorder', true, null, { id: entry && entry.annId });
+  }
+
+  // A Sections drag that crossed into another container (or just moved within one).
+  function moveInto(p) {
+    const el = dom.resolveChild(document, nodeRegistry, null, p, 'from');
+    const parent = resolveContainer(p);
+    if (!el || isOwnUI(el)) return reportStructure('move-into', false, 'source-not-found');
+    if (!dom.isContentElement(el)) return reportStructure('move-into', false, 'source-not-found');
+    if (!parent) return reportStructure('move-into', false, 'parent-not-found');
+    if (el === parent || el.contains(parent)) return reportStructure('move-into', false, 'cycle');
+    if (NOT_A_CONTAINER.test(parent.nodeName.toLowerCase())) return reportStructure('move-into', false, 'not-a-container');
+    const origParent = el.parentElement;
+    if (!origParent) return reportStructure('move-into', false, 'source-not-found');
+
+    // The insertion point, in the destination's own coordinate system.
+    let ref;
+    if (p.beforeId != null || p.beforeSelector != null) {
+      const before = dom.resolveChild(document, nodeRegistry, parent, p, 'before');
+      if (!before || before === el) return reportStructure('move-into', false, 'destination-not-found');
+      ref = before;
+    } else if (Number.isInteger(p.domIndex)) {
+      ref = Array.prototype.filter.call(parent.children, (c) => c !== el)[p.domIndex] || null;
+    } else {
+      const idx = Number.isInteger(p.index) ? p.index : p.toIndex;
+      ref = Number.isInteger(idx) ? elChildren(parent, el)[idx] || null : null;
+    }
+
+    const startIndex = indexIn(origParent, el);
+    const src = {
+      target: anchor.describe(el),
+      fromSel: anchor.cssPath(origParent),
+      toSel: anchor.cssPath(parent),
+      fromIndex: startIndex,
+      fromDomIndex: dom.domIndex(origParent, el),
+    };
+    src.selector = src.target.selector;
+    const restore = positionRestorer(el);
+    parent.insertBefore(el, ref);
+    const endIndex = indexIn(parent, el);
+    const reparented = parent !== origParent;
+    if (!reparented && endIndex === startIndex) {
+      restore();
+      return reportStructure('move-into', false, 'no-change');
+    }
+    const entry = commitStructure(el, src, {
+      reparented,
+      toIndex: endIndex,
+      toDomIndex: dom.domIndex(parent, el),
+      count: elChildren(parent).length,
+      undo: restore,
+    });
+    pickLayout(el);
+    return reportStructure('move-into', true, null, { id: entry && entry.annId });
+  }
+
   ipcRenderer.on('caos:reorder-sibling', (_e, payload) => {
     try {
-      const p = payload || {};
-      const parent = p.parentSelector && document.querySelector(p.parentSelector);
-      if (!parent) return;
-      const kids = Array.prototype.filter.call(parent.children, (c) => c.nodeType === 1 && !isOwnUI(c));
-      const from = p.fromIndex,
-        to = p.toIndex;
-      if (from == null || to == null || from < 0 || from >= kids.length || to < 0 || to >= kids.length || from === to) return;
-      const node = kids[from];
-      const ref = kids[to > from ? to + 1 : to] || null;
-      const selBefore = anchor.cssPath(node);
-      parent.insertBefore(node, ref);
-      commitEdit(node, {
-        type: 'reorder',
-        note:
-          'Move `' + selBefore + '` from position ' + (from + 1) + ' to position ' + (to + 1) +
-          ' (of ' + kids.length + ') inside `' + (p.parentSelector || anchor.cssPath(parent)) + '`.',
-        details: { parentSelector: p.parentSelector || anchor.cssPath(parent), fromIndex: from, toIndex: to },
-        undo: () => {
-          const k2 = elChildren(parent, node);
-          parent.insertBefore(node, k2[from] || null);
-        },
-      });
-      pushTree();
-      // Refocus on whatever was selected before the move (usually — but not
-      // always — the moved node itself) using the LIVE reference, not a
-      // re-derived selector: reordering can shift nth-of-type-based selectors
-      // for every reshuffled sibling, not just the one that moved.
-      const targetEl = lastPickedEl && document.documentElement.contains(lastPickedEl) ? lastPickedEl : node;
-      pickLayout(targetEl);
-    } catch (_e) {
-      /* ignore */
+      reorderSibling(payload || {});
+    } catch (_err) {
+      reportStructure('reorder', false, 'error');
     }
   });
 
-  // A Sections drag that crossed into another container.
   ipcRenderer.on('caos:move-into', (_e, payload) => {
     try {
-      const p = payload || {};
-      const el = p.selector && document.querySelector(p.selector);
-      const parent = p.parentSelector && document.querySelector(p.parentSelector);
-      if (!el || !parent || isOwnUI(el) || isOwnUI(parent) || el === parent || el.contains(parent)) return;
-      const origParent = el.parentElement;
-      if (!origParent) return;
-      const startIndex = indexIn(origParent, el);
-      const selBefore = anchor.cssPath(el);
-      const fromSel = anchor.cssPath(origParent);
-      const kids = elChildren(parent, el);
-      parent.insertBefore(el, kids[p.index] || null);
-      const endIndex = indexIn(parent, el);
-      if (parent === origParent) {
-        if (endIndex === startIndex) return;
-        commitEdit(el, {
-          type: 'reorder',
-          note:
-            'Move `' + selBefore + '` from position ' + (startIndex + 1) + ' to position ' + (endIndex + 1) +
-            ' inside `' + fromSel + '`.',
-          details: { parentSelector: fromSel, fromIndex: startIndex, toIndex: endIndex },
-          undo: () => {
-            const k2 = elChildren(origParent, el);
-            origParent.insertBefore(el, k2[startIndex] || null);
-          },
-        });
-      } else {
-        const toSel = anchor.cssPath(parent);
-        commitEdit(el, {
-          type: 'reparent',
-          note:
-            'Move `' + selBefore + '` out of `' + fromSel + '` and into `' + toSel + '` at position ' +
-            (endIndex + 1) + ' of ' + elChildren(parent).length + '.',
-          details: { fromParentSelector: fromSel, parentSelector: toSel, fromIndex: startIndex, toIndex: endIndex },
-          undo: () => {
-            const k2 = elChildren(origParent, el);
-            origParent.insertBefore(el, k2[startIndex] || null);
-          },
-        });
-      }
-      pickLayout(el);
+      moveInto(payload || {});
     } catch (_err) {
-      /* ignore */
+      reportStructure('move-into', false, 'error');
     }
   });
 
@@ -2786,37 +3264,34 @@ const audit = require('./audit');
       const p = payload || {};
       const el = p.selector ? document.querySelector(p.selector) : editSel;
       if (!el || typeof p.text !== 'string' || !isTextEditable(el)) return;
-      const before = el.textContent;
-      if (before === p.text) return;
-      el.textContent = p.text;
-      commitEdit(el, {
-        type: 'text',
-        action: 'change',
-        note: 'Change the copy of `' + anchor.cssPath(el) + '` from “' + trim60(before) + '” to “' + trim60(p.text) + '”.',
-        details: { before, after: p.text },
-        undo: () => {
-          el.textContent = before;
-        },
-      });
-      pushStyle(el);
+      if (el.textContent === p.text) return;
+      finishTextEdit();
+      const beforeState = textedit.captureTextState(el);
+      if (!beforeState) return;
+      // Edit the existing text nodes in place — never textContent, which would
+      // flatten <strong>/<a>/<em> children and drop their listeners (CE-09).
+      if (!textedit.applyTextDiff(el, p.text)) return;
+      commitTextEdit(el, beforeState, textedit.captureTextState(el, { maxNodes: Infinity }));
     } catch (_err) {
       /* ignore */
     }
   });
 
-  ipcRenderer.on('caos:start-recording', () => {
-    recorder.start((step) => ipcRenderer.sendToHost('caos:rec-step', step));
-  });
-
-  ipcRenderer.on('caos:stop-recording', () => {
-    recorder.stop();
-  });
+  // recorder.js owns the recording protocol: caos:start-recording
+  // { recordingId, ownerTabId }, caos:stop-recording, caos:recording-status, and
+  // it announces every new document as inactive so the host can re-arm it.
+  recorder.attachIpc(ipcRenderer);
 
   ipcRenderer.on('caos:replay-step', async (_e, payload) => {
     const p = payload || {};
     let r;
     try {
-      const opts = p.opts || {};
+      // The host's replay options (secrets, actionTimeoutMs, allowSuggested, fast…)
+      // go to executeStep untouched; top-level spellings are accepted too.
+      const opts = Object.assign({}, p.opts || {});
+      for (const k of ['secrets', 'actionTimeoutMs', 'allowSuggested']) {
+        if (opts[k] === undefined && p[k] !== undefined) opts[k] = p[k];
+      }
       if (!opts.fast) {
         try { replay.cursor.show(); } catch (_e) { /* ignore */ }
       }
@@ -2824,7 +3299,13 @@ const audit = require('./audit');
     } catch (err) {
       r = { ok: false, error: String((err && err.message) || err) };
     }
-    ipcRenderer.sendToHost('caos:replay-ack', { index: p.index, ok: !!r.ok, error: r.error, actual: r.actual });
+    // Forward the WHOLE result (status, effect, needsPostcondition, reason…), not
+    // just ok/error/actual; the correlation fields stay authoritative.
+    const result = r && typeof r === 'object' ? r : { ok: false, error: 'no result' };
+    ipcRenderer.sendToHost(
+      'caos:replay-ack',
+      Object.assign({}, result, { index: p.index, runId: p.runId, stepIndex: p.stepIndex, ok: !!result.ok })
+    );
   });
 
   ipcRenderer.on('caos:replay-cursor', (_e, payload) => {
@@ -2859,6 +3340,19 @@ const audit = require('./audit');
     } catch (_e) {
       /* ignore */
     }
+  }
+
+  // Edits publish the tree again, and one gesture can touch several handlers
+  // (commit + panel refocus): serialising up to 2500 nodes once per tick, not once
+  // per call, keeps big pages responsive.
+  let treeQueued = false;
+  function pushTreeSoon() {
+    if (treeQueued) return;
+    treeQueued = true;
+    queueMicrotask(() => {
+      treeQueued = false;
+      pushTree();
+    });
   }
 
   // Hide / show an element from the Sections list. Hiding records a removal
@@ -2896,7 +3390,7 @@ const audit = require('./audit');
           undo: restore,
         });
       }
-      pushTree();
+      pushTreeSoon();
     } catch (_err) {
       /* ignore */
     }
@@ -2905,22 +3399,69 @@ const audit = require('./audit');
   // Resolve each annotation to a live PAGE-coordinate box for full-page
   // screenshot compositing. Elements are resolved fresh; region boxes are
   // already stored in page coordinates.
-  ipcRenderer.on('caos:request-page-boxes', (_e, annotations) => {
-    const boxes = (annotations || []).map((a) => {
+  // Fresh boxes in an explicitly named coordinate space, measured right now.
+  // Elements are re-resolved and re-measured; regions (stored in page space) are
+  // converted with the CURRENT scroll origin. The reply says what the scroll
+  // origin / scale were, so a screenshot taken around this call can be matched.
+  function measureBoxes(annotations, space) {
+    const sx = window.scrollX || 0;
+    const sy = window.scrollY || 0;
+    const toSpace = (b, from, source) => {
+      if (!b) return null;
+      let x = b.x;
+      let y = b.y;
+      if (from === 'page' && space === 'viewport') {
+        x -= sx;
+        y -= sy;
+      } else if (from === 'viewport' && space === 'page') {
+        x += sx;
+        y += sy;
+      }
+      return { x, y, w: b.w, h: b.h, space, source };
+    };
+    return (annotations || []).map((a) => {
       try {
         const target = a && a.target;
-        if (isRegionTarget(target) || (a && a.kind === 'region' && target && target.box)) return target.box;
-        const el = target ? anchor.resolve(target) : null;
+        if (!target) return null;
+        if (isRegionTarget(target) || (a.kind === 'region' && target.box)) return toSpace(target.box, 'page', 'stored');
+        const el = resolveAnnotationTarget(target);
         if (el) {
           const r = el.getBoundingClientRect();
-          return { x: r.left + window.scrollX, y: r.top + window.scrollY, w: r.width, h: r.height };
+          return toSpace({ x: r.left, y: r.top, w: r.width, h: r.height }, 'viewport', 'live');
         }
-        if (a && a.target && a.target.box) return a.target.box;
+        // Last resort: the stored element box, in the space it was captured in.
+        if (target.box) return toSpace(target.box, target.space === 'page' ? 'page' : 'viewport', 'stored');
       } catch (_err) {
         /* ignore */
       }
       return null;
     });
+  }
+
+  ipcRenderer.on('caos:request-boxes', (_e, payload) => {
+    const p = payload || {};
+    const space = p.space === 'viewport' ? 'viewport' : 'page';
+    const cx = captureContext();
+    ipcRenderer.sendToHost('caos:boxes', {
+      requestId: p.requestId == null ? null : p.requestId,
+      space,
+      url: location.href,
+      documentId,
+      capturedAt: Date.now(),
+      scroll: { x: cx.scrollX, y: cx.scrollY },
+      dpr: cx.dpr,
+      viewport: cx.viewport,
+      page: cx.page,
+      visualViewport: cx.visualViewport,
+      boxes: measureBoxes(p.annotations, space),
+    });
+  });
+
+  ipcRenderer.on('caos:request-page-boxes', (_e, annotations) => {
+    // Legacy reply: a bare array of page-space boxes. (A stored ELEMENT box used
+    // to be returned as-is here even though it is viewport space; measureBoxes
+    // converts it.) New callers should use caos:request-boxes.
+    const boxes = measureBoxes(annotations, 'page').map((b) => (b ? { x: b.x, y: b.y, w: b.w, h: b.h } : null));
     ipcRenderer.sendToHost('caos:page-boxes', boxes);
   });
 

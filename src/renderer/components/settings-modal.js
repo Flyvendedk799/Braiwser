@@ -1,7 +1,104 @@
 // Settings + onboarding modals: appearance, local profile, provider choice,
 // per-provider model + API key management, replay delay, and the
 // restore-annotations toggle.
-import { h, modal, icon, toast } from '../lib/dom.js';
+//
+// Honesty about what is and is not connected: this build is local-first. Cloud
+// sync only records an email and queues encrypted snapshots ON THIS DEVICE (no
+// hosted endpoint exists), team invitations are local records, billing/checkout
+// processes no payment, SSO/SCIM are not implemented, and integrations only build
+// drafts. The copy below says so instead of implying otherwise, and the "Your data
+// on this device" section states exactly what Export and Delete cover.
+//
+// Optional actions (rendered only when supplied by app.js):
+//   exportAccountData() -> Promise
+//   deleteAccountData() -> Promise<{ ok, deleted, remaining, errors, notCovered }>   (billing.deleteAccountData)
+//   dataInventory?()    -> Promise<inventory>                                       (billing.dataInventory)
+//   licenseStatus?()    -> Promise<{ tier, pro, error?, build?:{ channel, enforced, proUnlockedForAll } }>
+// The delete result is shown as it is: what was erased, anything that REMAINS or
+// failed, and what the tool can never cover — never an unconditional "all deleted".
+import { h, modal, icon, toast, confirmDialog } from '../lib/dom.js';
+
+// What the account-data tools cover. The real list comes from the main process
+// (billing.dataInventory); this is the conservative description used until it
+// arrives, or when no inventory action is wired.
+export const DEFAULT_NOT_COVERED = [
+  'Files you exported or saved elsewhere (reports, bundles, screenshots, videos).',
+  'Handoff request files written into your own project folders (.braiwser).',
+  'Cookies, cache and site data held by the embedded browser for pages you visited.',
+  'Sign-ins owned by other tools (the claude or codex CLI login on this machine).',
+  'Anything held by third-party AI providers if you ran an AI task with your own credential.',
+];
+export const DEFAULT_DATA_SCOPE = {
+  exports: ['the data Braiwser stores on this machine (projects, sessions, notes, recordings, comments, bookmarks, history, settings, audit log); API keys and sign-ins are never exported'],
+  erases: ['the same stored data, personal settings, the Pro license key and saved credentials'],
+  notCovered: DEFAULT_NOT_COVERED,
+};
+
+// billing.dataInventory() -> { exports, erases, notCovered } as display strings.
+export function scopeFromInventory(inv) {
+  if (!inv || typeof inv !== 'object') return { ...DEFAULT_DATA_SCOPE };
+  const cols = Array.isArray(inv.collections) ? inv.collections : [];
+  const label = (c) => c.label + (Number.isFinite(c.count) ? ' (' + c.count + ')' : '');
+  const exports = cols.filter((c) => c.exported).map(label);
+  const erases = cols.filter((c) => c.erased).map(label);
+  const settingsList = Array.isArray(inv.settings) ? inv.settings : [];
+  if (settingsList.some((x) => x.exported)) exports.push('personal settings');
+  if (settingsList.some((x) => x.erased)) erases.push('personal settings');
+  if (inv.license) {
+    if (inv.license.exported) exports.push('license: ' + inv.license.exported);
+    if (inv.license.erased) erases.push('the Pro license');
+  }
+  if (Array.isArray(inv.secretFiles) && inv.secretFiles.length) erases.push('stored credentials and key files (' + inv.secretFiles.join(', ') + ')');
+  return {
+    exports: exports.length ? exports : DEFAULT_DATA_SCOPE.exports,
+    erases: erases.length ? erases : DEFAULT_DATA_SCOPE.erases,
+    notCovered: Array.isArray(inv.notCovered) && inv.notCovered.length ? inv.notCovered.map(String) : DEFAULT_NOT_COVERED,
+  };
+}
+
+// The honest summary of a deleteAccountData() result.
+//   -> { ok, erased:[string], remaining:[string], errors:[string], notCovered:[string] }
+export function describeDeleteResult(res, inv) {
+  const names = {};
+  ((inv && inv.collections) || []).forEach((c) => { names[c.id] = c.label; });
+  const nameOf = (id) => names[id] || id;
+  const counts = (o) => Object.entries(o || {}).filter(([, n]) => Number(n) > 0).map(([id, n]) => nameOf(id) + ' (' + n + ')');
+  const r = res && typeof res === 'object' ? res : {};
+  const remaining = counts(r.remaining);
+  const errors = Array.isArray(r.errors) ? r.errors.map(String) : [];
+  return {
+    ok: !!(r.ok && !remaining.length && !errors.length),
+    erased: counts(r.deleted),
+    remaining,
+    errors,
+    notCovered: Array.isArray(r.notCovered) && r.notCovered.length ? r.notCovered.map(String) : DEFAULT_NOT_COVERED,
+  };
+}
+
+// One line about the licence/build, honest about a free or development build.
+export function describeLicense(st) {
+  if (!st) return 'Free tier active until a Pro key is activated.';
+  const build = st.build || {};
+  if (st.pro) return 'Pro active (' + st.tier + ')';
+  const bits = [];
+  if (st.error) bits.push('The saved license key is not valid (' + st.error + ').');
+  if (build.proUnlockedForAll) {
+    bits.push('This is a ' + (build.channel && build.channel !== 'release' ? build.channel : 'free/development') + ' build: Pro features are unlocked for everyone and no license is needed or checked.');
+  } else {
+    bits.push('Free tier active until a Pro key is activated.');
+  }
+  return bits.join(' ');
+}
+
+// Features that exist as local scaffolding only. Shown so nobody mistakes them
+// for working services.
+export const LOCAL_ONLY_FEATURES = [
+  { name: 'Cloud sync', state: 'Local only', detail: 'Nothing is uploaded and nothing syncs between devices; this is not a backup.' },
+  { name: 'Team invitations', state: 'Local record', detail: 'Adding a member only writes a row on this device. No invitation is sent and roles are not enforced.' },
+  { name: 'Billing and seats', state: 'Not connected', detail: 'No payment is taken and no subscription is managed from this app.' },
+  { name: 'Enterprise SSO / SCIM', state: 'Not available', detail: 'Single sign-on and user provisioning are not implemented.' },
+  { name: 'Integrations', state: 'Drafts only', detail: 'Issue, webhook and CI payloads are prepared for you to send; nothing is delivered automatically.' },
+];
 
 // Four ways to pay for a call. The two subscriptions are listed first because
 // they need no key pasted anywhere: if `claude` or `codex` is signed in on this
@@ -208,11 +305,11 @@ export function openSettingsModal({ settings, providers, actions }) {
   agencyName.addEventListener('change', () => persist({ agency: { ...(settings.agency || {}), name: agencyName.value.trim() } }));
   general.appendChild(field('Agency / studio name', agencyName, 'Used on client packs and HTML reports.'));
 
-  const licenseInput = h('input', { class: 'input mono', type: 'text', value: settings.licenseKey || '', placeholder: 'BRW1.… Pro license key' });
-  const licenseStatus = h('div', { class: 'field-hint', text: 'Free tier active until a Pro key is activated.' });
+  const licenseInput = h('input', { class: 'input mono', type: 'text', value: settings.licenseKey || '', placeholder: 'BRW1.… Pro license key', 'aria-label': 'Pro license key' });
+  const licenseStatus = h('div', { class: 'field-hint', role: 'status', text: describeLicense(null) });
   if (actions.licenseStatus) {
-    actions.licenseStatus().then((st) => {
-      if (st && st.pro) licenseStatus.textContent = `Pro active (${st.tier})`;
+    Promise.resolve().then(() => actions.licenseStatus()).then((st) => {
+      licenseStatus.textContent = describeLicense(st);
     }).catch(() => {});
   }
   const licenseRow = h('div', { class: 'provider-setup-row' }, [
@@ -235,6 +332,7 @@ export function openSettingsModal({ settings, providers, actions }) {
   ]);
   advanced.appendChild(field('Pro license', licenseRow, null));
   advanced.appendChild(licenseStatus);
+  advanced.appendChild(h('div', { class: 'field-hint', text: 'License keys are checked on this device. Braiwser does not take payments or manage subscriptions.' }));
 
   const analyticsToggle = h('input', { type: 'checkbox', checked: !!settings.analyticsOptIn });
   analyticsToggle.addEventListener('change', () => persist({ analyticsOptIn: analyticsToggle.checked }));
@@ -244,33 +342,106 @@ export function openSettingsModal({ settings, providers, actions }) {
   crashToggle.addEventListener('change', () => persist({ crashReportsOptIn: crashToggle.checked }));
   privacy.appendChild(switchField('Crash breadcrumbs', 'Opt-in. Stores local crash notes to include in diagnostics you choose to share.', crashToggle));
 
-  const syncEmail = h('input', { class: 'input', type: 'email', value: (settings.sync && settings.sync.accountEmail) || '', placeholder: 'you@company.com' });
+  const syncEmail = h('input', { class: 'input', type: 'email', value: (settings.sync && settings.sync.accountEmail) || '', placeholder: 'you@company.com', 'aria-label': 'Email to record for local sync queue' });
   const syncRow = h('div', { class: 'provider-setup-row' }, [
     syncEmail,
     h('button', {
       class: 'btn btn-sm',
-      text: 'Sign in',
+      text: 'Save email',
+      title: 'Record this email on this device. This does not sign you in anywhere.',
       on: {
         click: async () => {
           if (!actions.syncSignIn) return;
-          const res = await actions.syncSignIn(syncEmail.value.trim());
-          toast(res && res.ok ? 'Sync account saved' : (res && res.error) || 'Sign-in failed', res && res.ok ? 'success' : 'error');
+          try {
+            const res = await actions.syncSignIn(syncEmail.value.trim());
+            toast(res && res.ok ? 'Email saved on this device — nothing is uploaded' : (res && res.error) || 'Could not save the email', res && res.ok ? 'success' : 'error');
+          } catch (err) { toast('Could not save the email: ' + errText(err), 'error', 5000); }
         },
       },
     }),
     h('button', {
       class: 'btn btn-sm btn-ghost',
-      text: 'Sign out',
+      text: 'Clear',
+      title: 'Forget the saved email and stop queueing snapshots',
       on: {
         click: async () => {
-          if (actions.syncSignOut) await actions.syncSignOut();
-          syncEmail.value = '';
-          toast('Signed out of sync', 'info');
+          try {
+            if (actions.syncSignOut) await actions.syncSignOut();
+            syncEmail.value = '';
+            toast('Saved email cleared', 'info');
+          } catch (err) { toast('Could not clear the email: ' + errText(err), 'error', 5000); }
         },
       },
     }),
   ]);
-  advanced.appendChild(field('Optional cloud sync (experimental)', syncRow, 'Local-first. Sign-in queues encrypted snapshots — there is no hosted sync endpoint yet.'));
+  advanced.appendChild(field('Cloud sync — local only, experimental', syncRow, 'There is no hosted sync service yet. Saving an email only records it on this device and queues encrypted snapshots locally. Nothing is uploaded, nothing syncs between devices, and this is not a backup.'));
+
+  // ---- What is (not) connected ----
+  const statusList = h('ul', { class: 'status-list', 'aria-label': 'Cloud, team and billing features' });
+  LOCAL_ONLY_FEATURES.forEach((f) => {
+    statusList.appendChild(h('li', { class: 'status-item' }, [
+      h('span', { class: 'status-name', text: f.name }),
+      h('span', { class: 'status-badge', text: f.state }),
+      h('span', { class: 'status-detail', text: f.detail }),
+    ]));
+  });
+  advanced.appendChild(field('Cloud, team and billing', statusList, 'This build is local-first: the items above are not connected to any hosted service.'));
+
+  // ---- Your data on this device (export / delete) ----
+  if (actions.exportAccountData || actions.deleteAccountData) {
+    let scope = { ...DEFAULT_DATA_SCOPE };
+    let inventory = null;
+    const scopeBox = h('div', { class: 'data-scope' });
+    const resultBox = h('div', { class: 'data-result', role: 'status' });
+    const line = (label, items) => h('p', { class: 'data-scope-line' }, [h('strong', { text: label + ' ' }), h('span', { text: items.join('; ') + '.' })]);
+    const renderScope = () => {
+      scopeBox.textContent = '';
+      scopeBox.appendChild(line('Export includes:', scope.exports));
+      scopeBox.appendChild(line('Delete erases:', scope.erases));
+      scopeBox.appendChild(line('Not covered by either:', scope.notCovered));
+    };
+    renderScope();
+    if (actions.dataInventory) {
+      Promise.resolve().then(() => actions.dataInventory()).then((inv) => {
+        if (!inv || typeof inv !== 'object') return;
+        inventory = inv;
+        scope = scopeFromInventory(inv);
+        renderScope();
+      }).catch(() => { /* keep the conservative description */ });
+    }
+    const renderResult = (res) => {
+      const d = describeDeleteResult(res, inventory);
+      resultBox.textContent = '';
+      resultBox.className = 'data-result ' + (d.ok ? 'is-ok' : 'is-partial');
+      resultBox.appendChild(h('p', { class: 'data-scope-line' }, [h('strong', { text: d.ok ? 'Erased. ' : 'Not everything was erased. ' }), h('span', { text: d.erased.length ? d.erased.join(', ') + '.' : 'Nothing was stored in those categories.' })]));
+      if (d.remaining.length) resultBox.appendChild(line('Still present:', d.remaining));
+      if (d.errors.length) resultBox.appendChild(line('Problems:', d.errors));
+      resultBox.appendChild(line('Not covered, still yours to remove:', d.notCovered));
+      return d;
+    };
+    const dataRow = h('div', { class: 'input-row' }, [
+      actions.exportAccountData
+        ? h('button', { class: 'btn btn-sm', html: icon('download', 14) + '<span>Export my data</span>', on: { click: async () => {
+            try { await actions.exportAccountData(); } catch (err) { toast('Could not export: ' + errText(err), 'error', 5000); }
+          } } })
+        : null,
+      actions.deleteAccountData
+        ? h('button', { class: 'btn btn-sm btn-danger', html: icon('trash', 14) + '<span>Delete account data…</span>', on: { click: async () => {
+            const ok = await confirmDialog({
+              title: 'Delete account data?',
+              message: 'This permanently erases ' + scope.erases.join('; ') + '. It cannot be undone and does not cover: ' + scope.notCovered.join(' ') + ' Export first if you want a copy.',
+              confirmLabel: 'Delete account data',
+            });
+            if (!ok) return;
+            try {
+              const d = renderResult(await actions.deleteAccountData());
+              toast(d.ok ? 'Account data erased — see what is not covered below' : 'Some data could not be erased — see details below', d.ok ? 'success' : 'error', 6000);
+            } catch (err) { toast('Could not delete: ' + errText(err), 'error', 5000); }
+          } } })
+        : null,
+    ]);
+    privacy.appendChild(field('Your data on this device', h('div', {}, [dataRow, scopeBox, resultBox]), null));
+  }
 
   // ---- Agent hand-off command ----
   const agentInput = h('input', { class: 'input mono', type: 'text', value: settings.agentCommand || '', placeholder: 'e.g. claude -p "Apply the changes in {promptPath}"' });
@@ -393,15 +564,28 @@ export function openOnboardingModal({ settings, actions, onComplete }) {
   if (sampleBtn) sampleBtn.setAttribute('data-testid', 'onboarding-sample');
 }
 
+// A labelled field. The label is wired to its control (for/id for a single
+// input, otherwise role=group + aria-labelledby) and the hint is its description.
+let fieldSeq = 0;
 function field(label, control, hint) {
-  return h('div', { class: 'field' }, [
-    h('label', { class: 'field-label', text: label }),
-    control,
-    hint ? h('div', { class: 'field-hint', text: hint }) : null,
-  ]);
+  const n = ++fieldSeq;
+  const labelEl = h('label', { class: 'field-label', text: label, id: 'caos-field-label-' + n });
+  const hintEl = hint ? h('div', { class: 'field-hint', id: 'caos-field-hint-' + n, text: hint }) : null;
+  const tag = control && control.tagName;
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') {
+    if (!control.id) control.id = 'caos-field-' + n;
+    labelEl.setAttribute('for', control.id);
+    if (hintEl) control.setAttribute('aria-describedby', hintEl.id);
+  } else if (control && control.setAttribute) {
+    if (!control.getAttribute('role')) control.setAttribute('role', 'group');
+    control.setAttribute('aria-labelledby', labelEl.id);
+    if (hintEl) control.setAttribute('aria-describedby', hintEl.id);
+  }
+  return h('div', { class: 'field' }, [labelEl, control, hintEl]);
 }
 
 function switchField(label, hint, input) {
+  if (!input.getAttribute('aria-label')) input.setAttribute('aria-label', label);
   return h('div', { class: 'field' }, [
     h('div', { class: 'toggle-row' }, [
       h('div', {}, [

@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Frames</title></head>
+<body>
+<main>
+  <h1>Frames</h1>
+  <button id="outer-btn" type="button">Outer action</button>
+  <iframe id="same" title="same origin" src="frame-inner.html" width="400" height="120"></iframe>
+  <iframe id="cross" title="cross origin" width="400" height="120"></iframe>
+</main>
+<script>
+var q = new URLSearchParams(location.search);
+if (q.get('x')) document.getElementById('cross').src = 'http://127.0.0.1:' + q.get('x') + '/frame-inner.html';
+</script>
+</body></html>

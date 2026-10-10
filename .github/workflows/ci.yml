@@ -5,11 +5,24 @@ on:
     branches: ['**']
   pull_request:
 
+# What each job proves:
+#   unit      static check + the deterministic unit suite (offline, no Electron)
+#   e2e       the real app, driven on Linux, Windows AND macOS (behavioural, not just
+#             "it packages"), plus a gate showing a renderer crash turns the launcher red
+#   package   the unpacked app builds on every OS, carries the build-time licence
+#             config, passes the same e2e suite from the packaged binary, and the
+#             crash gate also holds for the packaged app
+#
+# scripts/e2e.js judges the app's JSON report, not only its exit status, and exits
+#   0 passed | 1 failed | 2 timed out | 3 harness error
+# so the crash gates below demand exactly 1: a launcher that could not even inject the
+# crash (3) must not count as "failed as expected".
+
 jobs:
-  test:
-    name: check + e2e
+  unit:
+    name: check + unit
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -25,21 +38,26 @@ jobs:
       - name: Static check
         run: npm run check
 
-      # The e2e suite drives a real Electron window with trusted input events,
-      # so it needs a display. Xvfb gives it one; the suite exits non-zero when
-      # any check fails.
-      - name: End-to-end suite
-        run: xvfb-run -a --server-args="-screen 0 1600x1200x24" npm run e2e
+      - name: Unit tests
+        run: npm run test:unit
 
-  package:
-    name: package (${{ matrix.os }})
-    needs: test
+  e2e:
+    name: e2e (${{ matrix.os }})
+    needs: unit
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          # The suite drives a real Electron window with trusted input events, so Linux
+          # needs a display: Xvfb provides one. Windows and macOS runners have a desktop.
+          - os: ubuntu-latest
+            display: xvfb-run -a --server-args="-screen 0 1600x1200x24"
+          - os: windows-latest
+            display: ''
+          - os: macos-latest
+            display: ''
 
     steps:
       - uses: actions/checkout@v4
@@ -51,18 +69,105 @@ jobs:
 
       - run: npm ci
 
+      - name: End-to-end suite (dev tree)
+        shell: bash
+        run: ${{ matrix.display }} npm run e2e
+
+      # Gate: kill the renderer mid-suite on purpose. The launcher MUST report failure
+      # (exit 1). If this step ever goes green on a crash, the e2e gate above is blind.
+      - name: Gate - an intentional renderer crash fails the launcher (dev tree)
+        shell: bash
+        env:
+          BRAIWSER_E2E_CRASH: '1'
+        run: |
+          set +e
+          ${{ matrix.display }} node scripts/e2e.js
+          code=$?
+          set -e
+          if [ "$code" -ne 1 ]; then
+            echo "::error::expected the launcher to fail with exit code 1 after an intentional renderer crash, got $code"
+            exit 1
+          fi
+          echo "launcher failed with exit code 1 as required"
+
+  package:
+    name: package (${{ matrix.os }})
+    needs: unit
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            display: xvfb-run -a --server-args="-screen 0 1600x1200x24"
+            asar: dist/linux-unpacked/resources/app.asar
+            app: dist/linux-unpacked/braiwser
+          - os: windows-latest
+            display: ''
+            asar: dist/win-unpacked/resources/app.asar
+            app: dist/win-unpacked/Braiwser.exe
+          - os: macos-latest
+            display: ''
+            asar: dist/mac*/Braiwser.app/Contents/Resources/app.asar
+            app: dist/mac*/Braiwser.app/Contents/MacOS/Braiwser
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # The licence posture is baked in at build time (src/main/build-config.js). CI
+      # builds enforce licences like a release, but keep the e2e bypass and demo keys so
+      # the packaged smoke test can drive Pro features. They are never published.
+      - name: Generate build config (ci channel)
+        run: node scripts/gen-build-config.js --channel ci
+
       # --dir builds the unpacked app: it proves the bundle is complete and
       # launchable on every platform without spending time on installers.
       - name: Build unpacked app
         run: npm run dist:dir
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
 
-      # Run the same suite against the packaged artifact on Linux. This is what
-      # catches bundling faults the dev tree can't — most importantly that the
+      - name: Packaged build carries the licence config
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(${{ matrix.asar }})
+          if [ "${#files[@]}" -eq 0 ]; then echo "::error::no app.asar found for ${{ matrix.asar }}"; exit 1; fi
+          node scripts/verify-packaged-config.js "${files[0]}" --channel ci
+
+      # The same suite, against the packaged artifact, on every OS. This is what
+      # catches bundling faults the dev tree can't - most importantly that the
       # webview's inspector preload still loads from inside app.asar.
       - name: End-to-end suite against the packaged app
-        if: matrix.os == 'ubuntu-latest'
+        shell: bash
         run: |
-          xvfb-run -a --server-args="-screen 0 1600x1200x24" \
-            env BRAIWSER_E2E=1 CAOS_E2E=1 ./dist/linux-unpacked/braiwser --no-sandbox
+          shopt -s nullglob
+          apps=(${{ matrix.app }})
+          if [ "${#apps[@]}" -eq 0 ]; then echo "::error::no packaged app found for ${{ matrix.app }}"; exit 1; fi
+          ${{ matrix.display }} node scripts/e2e.js --app "${apps[0]}"
+
+      - name: Gate - an intentional renderer crash fails the launcher (packaged app)
+        shell: bash
+        env:
+          BRAIWSER_E2E_CRASH: '1'
+        run: |
+          shopt -s nullglob
+          apps=(${{ matrix.app }})
+          set +e
+          ${{ matrix.display }} node scripts/e2e.js --app "${apps[0]}"
+          code=$?
+          set -e
+          if [ "$code" -ne 1 ]; then
+            echo "::error::expected the launcher to fail with exit code 1 after an intentional renderer crash, got $code"
+            exit 1
+          fi
+          echo "launcher failed with exit code 1 as required"

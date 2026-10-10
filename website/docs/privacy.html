@@ -13,19 +13,27 @@
   </header>
   <section class="section">
     <h2>Privacy model</h2>
-    <p class="section-lede">Braiwser is local-first. Projects, notes, journeys, and API keys stay on your machine by default.</p>
+    <p class="section-lede">Braiwser is local-first and has no hosted service. Projects, notes, journeys, and credentials are stored on your machine and are not uploaded by Braiwser.</p>
     <div class="icp">
       <article>
         <h3>No account required</h3>
-        <p>Core review works fully offline. Cloud sync and team features are opt-in.</p>
+        <p>Core review works fully offline. There is no Braiwser account, cloud sync or hosted collaboration: the sync and team settings only record data on this machine.</p>
       </article>
       <article>
         <h3>Analytics</h3>
-        <p>Anonymous product events are off until you enable them in Settings. Diagnostics bundles are user-triggered.</p>
+        <p>Product events are off until you enable them in Settings, and even then they are only written to a local file. Nothing is transmitted. Diagnostics bundles are files you choose to save and share.</p>
       </article>
       <article>
         <h3>AI calls</h3>
-        <p>Only leave the machine when you run an AI task with your own subscription or API key.</p>
+        <p>Content leaves your machine only when you run an AI task with a connected subscription or API key, and goes to that provider (Anthropic or OpenAI) under your account. With no provider connected, results are generated locally and nothing is sent.</p>
+      </article>
+      <article>
+        <h3>Updates</h3>
+        <p>Installed builds contact GitHub Releases only when you ask to check for updates. An update that is found is downloaded and installed when you quit.</p>
+      </article>
+      <article>
+        <h3>Export and erase</h3>
+        <p>The app can export, and erase, the data it keeps in its own storage: projects, review sessions, notes, journeys, comments, bookmarks, history, workspaces, analytics, the audit log, your profile and integration settings, the licence, and stored AI credentials. Erasing does not remove files you exported, handoff files written into your own project folders, site data kept by the embedded browser, sign-ins owned by the <code>claude</code> or <code>codex</code> CLIs, or anything a provider retained from an AI task.</p>
       </article>
     </div>
   </section>

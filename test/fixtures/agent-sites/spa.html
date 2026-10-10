@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>SPA</title></head>
+<body>
+<main>
+  <nav aria-label="Primary"><button id="to-settings" type="button">Go to settings</button></nav>
+  <h1 id="view">Home</h1>
+  <button id="home-only" type="button">Home only action</button>
+</main>
+<script>
+document.getElementById('to-settings').addEventListener('click', function () {
+  history.pushState({}, '', '/spa.html#/settings');
+  document.getElementById('view').textContent = 'Settings';
+});
+</script>
+</body></html>

@@ -2,6 +2,56 @@
 
 ## Unreleased
 
+### Audit remediation: AI, licensing, release, product truthfulness
+
+AI
+- First-run offline AI: with no credential at all, AI tasks answer with a labelled local
+  synthesis (`local: true`, `reason: 'no-credential'`) for every provider, including the
+  `claude-code` default. An expired, unreadable or rejected credential is now an error
+  instead of being hidden. The e2e flag no longer bypasses the credential decision; the
+  harness gets disconnected credential sources instead, so tests exercise the production
+  path. (AI-01)
+- Credential initialisation is single-flight and not cached on failure; an unrecognised,
+  unreadable or keyring-encrypted `machine.key` is reported and never overwritten, and a
+  saved key that cannot be decrypted is an error rather than "no key".
+- AI deadlines now cover the response body and error bodies (`ai/http.js`); tasks can be
+  cancelled through `ai.cancel(requestId)`; credential resolution runs under the same
+  deadline. (AI-02)
+- OpenAI chat requests use a per-model contract table (`max_completion_tokens` for the
+  o-series, gpt-5 and gpt-4.1/4o; `max_tokens` only for legacy models).
+
+Licensing and release
+- Licences are Ed25519-signed (`BRW1.` prefix kept) and verified against a public key
+  baked in at build time; the shared HMAC secret and its `BRAIWSER_LICENSE_SECRET`
+  override are gone, and HMAC-era keys are rejected. Gating comes from
+  `src/main/build-config.json` written by `scripts/gen-build-config.js`, not from the
+  runtime environment; a packaged build with no config fails closed. Pro add-on IPC
+  channels are refused in the main process in enforcing builds. Demo licences exist only
+  in dev/CI builds and are signed by an in-process ephemeral key. Source runs are labelled
+  as development builds (`license.status().build`). `scripts/gen-license-keypair.js` and
+  `scripts/issue-license.js` added; private keys are git-ignored. (REL-02)
+- `scripts/e2e.js` now parses the app's report and fails on a crash, hang, missing,
+  partial or `ok: false` report as well as a non-zero exit; supports `--app` for packaged
+  builds; scrubs credentials from the test environment; exit codes 0/1/2/3. (REL-03)
+- CI: `check` + `test:unit`; behavioural e2e on Linux, Windows and macOS; packaged e2e on
+  all three; an intentional renderer crash (`BRAIWSER_E2E_CRASH=1`, injected over CDP)
+  must fail the launcher for the dev tree and the packaged app. The release workflow
+  bakes the release config, fails without a licence public key and verifies the packed
+  `app.asar`.
+- Node 20+ is documented everywhere (the `ai-auth` dependency requires it).
+
+Product truthfulness
+- Sync, team, billing, integrations and analytics are labelled local-only/draft in their
+  return values, README, docs and website. Enterprise no longer reports SSO `ready: true`
+  or a SCIM endpoint (`not-implemented`), and configuring SSO is refused. Checkout creation
+  is `not-implemented` instead of returning a checkout-shaped link. Sync queue items are
+  `staged-local`, not "synced".
+- Data export/erase are driven by a data inventory (`billing.dataInventory`) and tested
+  against it: comments, bookmarks, history, workspaces, profile/agency/integration settings,
+  licence and credential files are now covered; the remaining out-of-scope items are
+  listed. Previously erase left projects, notes, comments and more.
+- Updater makes no network call until the user asks, and is skipped in source runs.
+
 UI polish pass on the aha-loop shell.
 
 - Left and right rails now have clear jobs: Workspace/Page on the left,

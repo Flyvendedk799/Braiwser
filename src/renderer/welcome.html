@@ -144,13 +144,28 @@
         document.documentElement.setAttribute('data-theme', theme);
         document.documentElement.style.colorScheme = theme;
       }
+      // Mirrors the address bar (lib/address.js): "localhost:3000" and
+      // a Windows path such as C:\site\index.html both look like "scheme:" but are not schemes.
+      function fileUrl(p) {
+        const segs = p.replace(/\\/g, '/').split('/').filter(Boolean);
+        const drive = /^[a-zA-Z]:$/.test(segs[0] || '') ? segs.shift() + '/' : '';
+        return 'file:///' + drive + segs.map(encodeURIComponent).join('/');
+      }
+      function resolve(raw) {
+        if (/^[a-zA-Z]:([\\/]|$)/.test(raw)) return fileUrl(raw); // Windows drive path
+        if (/^(\\\\|\/\/)[^\\/]/.test(raw)) return 'file:' + raw.replace(/\\/g, '/'); // UNC
+        if (raw.charAt(0) === '/') return fileUrl(raw); // POSIX absolute path
+        if (/^(about|data|blob|view-source|file):/i.test(raw) || /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(raw)) return raw;
+        const host = raw.split(/[/?#]/)[0].toLowerCase();
+        if (/^(localhost|\[[0-9a-f:]+\]|\d{1,3}(\.\d{1,3}){3})(:\d+)?$/.test(host) || /\.localhost(:\d+)?$/.test(host)) return 'http://' + raw;
+        if (/\s/.test(raw) || !/^[^\s/]+\.[^\s/.]{2,}(:\d+)?([/?#]|$)/.test(raw)) return 'https://www.google.com/search?q=' + encodeURIComponent(raw);
+        return 'https://' + raw;
+      }
       document.querySelector('form.go').addEventListener('submit', (e) => {
         e.preventDefault();
         const raw = document.getElementById('go-url').value.trim();
         if (!raw) return;
-        let url = raw;
-        if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url)) url = 'https://' + url;
-        location.href = url;
+        location.href = resolve(raw);
       });
     })();
   </script>

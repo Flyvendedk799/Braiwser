@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Canvas</title></head>
+<body>
+<main>
+  <h1>Chart</h1>
+  <canvas id="c" width="300" height="150" aria-label="Revenue chart"></canvas>
+  <button id="ok" type="button">Refresh chart</button>
+</main>
+<script>
+var ctx = document.getElementById('c').getContext('2d');
+ctx.fillStyle = '#c33'; ctx.fillRect(10, 10, 120, 80);
+</script>
+</body></html>

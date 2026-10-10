@@ -1,10 +1,10 @@
-// Local, offline synthesis used when no API key is configured. It produces a
+// Local, offline synthesis used when no AI credential is connected at all. It produces a
 // genuinely useful result from the annotations alone (no model call) so the AI
 // tab works fully offline. Output is clearly labelled as locally generated.
 const { toMarkdown } = require('../export/markdown');
 const { toPrompt } = require('../export/prompt');
 
-const NOTE = '> ⚙️ Generated locally (no API key). Add a key in Settings for AI-quality output.\n';
+const NOTE = '> Generated locally on this machine: no AI provider is connected, so no model was called. Connect one in Settings for AI-quality output.\n';
 
 function byTag(annotations) {
   const groups = {};
@@ -58,7 +58,7 @@ function synthesize(task, { session, annotations }) {
     case 'prompt': body = toPrompt(session, annotations); break;
     case 'summary': body = summary(session, annotations); break;
     case 'cluster': body = cluster(session, annotations); break;
-    case 'suggest-fix': body = 'Local mode cannot propose code fixes — add an API key in Settings to use suggest-fix.'; break;
+    case 'suggest-fix': body = 'Local mode cannot propose code fixes. Connect an AI provider in Settings to use suggest-fix.'; break;
     default: body = toMarkdown(session, annotations);
   }
   return NOTE + '\n' + body;

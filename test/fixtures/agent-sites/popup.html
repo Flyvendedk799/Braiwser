@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Popup opener</title></head>
+<body>
+<main>
+  <a id="blank-link" href="popup-target.html" target="_blank">Open in new tab</a>
+  <button id="open-btn" type="button" onclick="window.open('popup-target.html','_blank')">Open via script</button>
+  <button id="quick-btn" type="button" onclick="var w=window.open('popup-target.html','_blank'); setTimeout(function(){ w.close(); }, 50)">Open and close quickly</button>
+</main>
+</body></html>

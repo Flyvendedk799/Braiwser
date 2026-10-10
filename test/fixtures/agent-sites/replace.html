@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Replace</title></head>
+<body>
+<main>
+  <div id="host"><button id="target" type="button" onclick="document.getElementById('log').textContent='OLD CLICKED'">Save</button></div>
+  <button id="rerender" type="button" onclick="var h=document.getElementById('host');h.innerHTML='<button id=target type=button>Save</button>';h.firstChild.onclick=function(){document.getElementById('log').textContent='NEW CLICKED'}">Re-render</button>
+  <button id="rename" type="button" onclick="document.getElementById('target').textContent='Discard'">Rename</button>
+  <a id="nav" href="task.html">Go to task</a>
+  <div role="status" id="log">idle</div>
+</main>
+</body></html>

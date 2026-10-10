@@ -15,66 +15,197 @@
 
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const crypto = require('crypto');
+const { isE2E } = require('../../env');
 
 // One account row, because this is a single-user desktop app rather than a server
 // with tenants. The library takes an id so that the same store can serve many.
 const ACCOUNT_ID = 'local';
 
 let libPromise = null;
-let parts = null;
 
 function lib() {
   if (!libPromise) libPromise = import('@flyvendedk799/ai-auth');
   return libPromise;
 }
 
-// The secret the API keys are encrypted under.
+// ---- where credentials are looked for -----------------------------------------
+// Production reads the machine's own logins and environment. The e2e harness must
+// never spend (or even see) the developer's real credentials, but it must also
+// exercise the SAME decision code production runs - so instead of short-circuiting
+// the decision, it is handed credential sources that are all disconnected. Tests
+// inject their own through `configureSources`.
+const DISCONNECTED = {
+  env: {},
+  claudeFile: null,
+  codexFile: null,
+  readKeychain: async () => null,
+  readClaudeFile: async () => null,
+  readCodexFile: async () => null,
+};
+
+let sourceOverride = null;
+
+function sources() {
+  return sourceOverride || (isE2E() ? DISCONNECTED : {});
+}
+
+function configureSources(next) {
+  sourceOverride = next || null;
+  reset();
+}
+
+function claudeCredentialsPath(src) {
+  if (src.claudeFile !== undefined) return src.claudeFile;
+  const env = src.env || process.env;
+  return env.CLAUDE_CREDENTIALS_FILE || path.join(os.homedir(), '.claude', '.credentials.json');
+}
+
+function codexAuthPath(src) {
+  if (src.codexFile !== undefined) return src.codexFile;
+  const env = src.env || process.env;
+  return env.CODEX_AUTH_FILE || path.join(os.homedir(), '.codex', 'auth.json');
+}
+
+// The library reports a login file it cannot make sense of exactly like a missing
+// one. "Not signed in" is a state to answer locally; "the file is there but is not
+// readable JSON" is a fault the user should hear about instead of silently losing
+// their subscription. A valid JSON object without tokens is what a logged-out CLI
+// leaves behind, and counts as absent.
+function loginFileState(file) {
+  if (!file) return 'missing';
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) return 'missing';
+    return 'unreadable';
+  }
+  if (!raw.trim()) return 'logged-out';
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? 'logged-out' : 'corrupt';
+  } catch (_e) {
+    return 'corrupt';
+  }
+}
+
+function loginFileProblem(file, who, command) {
+  const state = loginFileState(file);
+  if (state === 'corrupt' || state === 'unreadable') {
+    return new Error(`The ${who} login file (${file}) is ${state === 'corrupt' ? 'not valid JSON' : 'not readable'}, so it was not treated as signed out. Fix or remove it, or run \`${command}\` and sign in again.`);
+  }
+  return null;
+}
+
+// ---- the secret API keys are encrypted under ------------------------------------
 //
 // It is generated once and kept beside them. On its own that is only worth so much
-// — a key file next to the box it opens — so where the OS offers real protection
+// - a key file next to the box it opens - so where the OS offers real protection
 // (Keychain, DPAPI, libsecret) we put the secret behind `safeStorage` and the file
 // holds ciphertext. Where it does not, the file is still better than the plaintext
 // `secrets.json` this replaced, and it is written 0600.
-function machineSecret(dir) {
-  const file = path.join(dir, 'machine.key');
-  let safeStorage = null;
-  try { ({ safeStorage } = require('electron')); } catch (_e) { /* not in Electron (tests) */ }
-  const usable = safeStorage && safeStorage.isEncryptionAvailable();
+//
+// Only a file that is genuinely absent means "first run". A file that exists but
+// cannot be read, decrypted or recognised is a fault: generating a fresh secret
+// over it would orphan every stored key and login, which then read as "not
+// configured" with no hint why.
+const SECRET_FORMAT = /^[A-Za-z0-9+/]{43}=$/; // 32 random bytes, base64
 
+class MachineKeyError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'MachineKeyError';
+  }
+}
+
+function electronSafeStorage() {
   try {
-    const raw = fs.readFileSync(file);
-    if (usable) {
-      // A file written before the OS keyring was available stays readable: fall
-      // back to treating it as plaintext rather than locking the user out of
-      // their own keys, then leave it alone.
-      try { return safeStorage.decryptString(raw); } catch (_e) { return raw.toString('utf8'); }
+    const { safeStorage } = require('electron');
+    return safeStorage && typeof safeStorage.isEncryptionAvailable === 'function' ? safeStorage : null;
+  } catch (_e) {
+    return null; // not in Electron (tests)
+  }
+}
+
+function machineSecret(dir, safeStorageOverride) {
+  const file = path.join(dir, 'machine.key');
+  const safeStorage = safeStorageOverride !== undefined ? safeStorageOverride : electronSafeStorage();
+  const usable = !!(safeStorage && safeStorage.isEncryptionAvailable());
+
+  let raw = null;
+  try {
+    raw = fs.readFileSync(file);
+  } catch (err) {
+    if (!err || err.code !== 'ENOENT') {
+      throw new MachineKeyError(`Cannot read the credential key file (${file}): ${err && err.message}. Stored AI keys and logins were left untouched.`);
     }
-    return raw.toString('utf8');
-  } catch (_e) { /* first run */ }
+  }
+
+  if (raw) {
+    if (usable) {
+      try { return safeStorage.decryptString(raw); } catch (_e) { /* maybe a pre-keyring plaintext file */ }
+    }
+    const text = raw.toString('utf8').trim();
+    if (SECRET_FORMAT.test(text)) return text; // a plaintext file written before the OS keyring was available
+    throw new MachineKeyError(`The credential key file (${file}) is not in a recognised format${usable ? '' : ', or was encrypted by an OS keyring that is not available now'}. It was not replaced, so stored AI keys and logins are untouched; remove the file to start over.`);
+  }
 
   const secret = crypto.randomBytes(32).toString('base64');
   try {
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(file, usable ? safeStorage.encryptString(secret) : secret, { mode: 0o600 });
-  } catch (_e) { /* a read-only home still gets a working session, just not a saved key */ }
+    // 'wx': never overwrite a key another process created in the meantime.
+    fs.writeFileSync(file, usable ? safeStorage.encryptString(secret) : secret, { mode: 0o600, flag: 'wx' });
+  } catch (err) {
+    if (err && err.code === 'EEXIST') return machineSecret(dir, safeStorageOverride);
+    /* a read-only home still gets a working session, just not a saved key */
+  }
   return secret;
 }
 
-// Everything stateful, built once against the store directory.
-async function ensure(dir) {
-  if (parts) return parts;
+// Everything stateful, built once against the store directory. The promise is
+// cached (single-flight): concurrent first callers - status and a task at start-up
+// - share one initialisation instead of racing to create the key file and store.
+// A failed initialisation is not cached, so fixing the fault and retrying works.
+let partsPromise = null;
+let partsDir = null;
+
+function reset() {
+  partsPromise = null;
+  partsDir = null;
+}
+
+function ensure(dir) {
+  if (partsPromise && partsDir === dir) return partsPromise;
+  partsDir = dir;
+  const attempt = build(dir);
+  partsPromise = attempt;
+  attempt.catch(() => { if (partsPromise === attempt) reset(); });
+  return attempt;
+}
+
+async function build(dir) {
   const m = await lib();
+  const src = sources();
   const store = new m.JsonFileCredentialStore({ path: path.join(dir, 'credentials.json') });
   const secret = machineSecret(dir);
-  parts = {
+  const cliOptions = {};
+  if (src.env) cliOptions.env = src.env;
+  if (src.readKeychain) cliOptions.readKeychain = src.readKeychain;
+  if (src.readClaudeFile) cliOptions.readFile = src.readClaudeFile;
+  return {
     m,
+    src,
     store,
-    keys: new m.ApiKeyStore({ store, secret }),
+    keys: new m.ApiKeyStore({ store, secret, ...(src.env ? { env: src.env } : {}) }),
     accounts: new m.ClaudeAccountStore({ store, secret }),
-    cli: new m.ClaudeCodeCredential(),
+    cli: new m.ClaudeCodeCredential(cliOptions),
+    codexOptions: {
+      ...(src.env ? { env: src.env } : {}),
+      ...(src.readCodexFile ? { readFile: src.readCodexFile } : {}),
+    },
   };
-  return parts;
 }
 
 // ---- one-time migration -------------------------------------------------------
@@ -100,7 +231,17 @@ async function migratePlaintextKeys(dir, secretsDoc) {
 // What the settings page shows. Every provider answers the same three questions:
 // is it usable, where did its credential come from, and what can we say about it.
 async function status(dir) {
-  const { m, keys, accounts, cli } = await ensure(dir);
+  let parts;
+  try {
+    parts = await ensure(dir);
+  } catch (err) {
+    // The credential store itself is unusable (for instance an unrecognised
+    // machine.key). Say so on every row rather than failing the settings page.
+    const detail = (err && err.message) || String(err);
+    const broken = { ready: false, via: null, plan: null, detail, error: true };
+    return { 'claude-code': broken, codex: broken, anthropic: { ...broken, hint: null }, openai: { ...broken, hint: null } };
+  }
+  const { m, keys, accounts, cli, codexOptions } = parts;
 
   const [cliStatus, account, anthropicKey, openaiKey] = await Promise.all([
     cli.status().catch(() => ({ connected: false })),
@@ -119,20 +260,20 @@ async function status(dir) {
   const claudeCode = cliStatus.connected
     ? { ready: true, via: 'cli', plan: cliStatus.subscriptionType, detail: `Signed in via the \`claude\` CLI (${cliStatus.source === 'keychain' ? 'Keychain' : 'credentials file'})` }
     : account.connected
-      ? { ready: true, via: 'browser', plan: account.subscriptionType || null, detail: 'Signed in through Braiwser' }
+      ? { ready: true, via: 'browser', plan: account.plan || null, detail: 'Signed in through Braiwser' }
       : { ready: false, via: null, plan: null, detail: 'Run `claude` and sign in, or connect a subscription here' };
 
   return {
     'claude-code': claudeCode,
-    codex: await codexStatus(m),
+    codex: await codexStatus(m, codexOptions),
     anthropic: { ready: anthropicKey.ready, via: anthropicKey.source, hint: anthropicHint, detail: sourceDetail(anthropicKey.source, 'ANTHROPIC_API_KEY') },
     openai: { ready: openaiKey.ready, via: openaiKey.source, hint: openaiHint, detail: sourceDetail(openaiKey.source, 'OPENAI_API_KEY') },
   };
 }
 
-async function codexStatus(m) {
+async function codexStatus(m, codexOptions) {
   try {
-    const identity = await m.readCodexLogin();
+    const identity = await m.readCodexLogin(codexOptions);
     if (!identity) return { ready: false, via: null, plan: null, detail: 'Run `codex` and sign in to use a ChatGPT subscription' };
     return {
       ready: !m.isCodexExpired(identity),
@@ -154,28 +295,52 @@ function sourceDetail(source, envName) {
 // ---- resolving a credential for a call ----------------------------------------
 // Returns what the provider client needs, in the shape it needs it. The callers
 // never see a token they did not ask to use.
+//
+// The three outcomes are deliberately different:
+//   - a credential            -> `{ kind, ... }`
+//   - genuinely no credential -> `null`: the caller answers locally and says so
+//   - a credential that is present but unusable (expired with no way to refresh,
+//     rejected, unreadable, undecryptable, corrupt login file) -> THROWS a
+//     meaningful error. Quietly falling back to local synthesis there would hide a
+//     fault the user can fix behind an answer that looks like it came from the model.
 async function credentialFor(dir, provider) {
-  const { m, keys, accounts, cli } = await ensure(dir);
+  const { m, src, store, keys, accounts, cli, codexOptions } = await ensure(dir);
 
   if (provider === 'claude-code') {
     // Prefer the CLI's own login. It is the freshest thing on the machine, and it
     // costs the user nothing to keep current.
-    const cliStatus = await cli.status().catch(() => ({ connected: false }));
+    const cliStatus = await cli.status();
     if (cliStatus.connected) return { kind: 'subscription', token: await cli.token() };
-    const account = await accounts.status(ACCOUNT_ID).catch(() => ({ connected: false }));
+
+    const account = await accounts.status(ACCOUNT_ID);
     if (account.connected) return { kind: 'subscription', token: await accounts.token(ACCOUNT_ID) };
-    throw new m.ClaudeCodeAuthError('No Claude subscription connected. Run `claude` and sign in, or connect one in Settings.', true);
+    if (await store.read(`claude:${ACCOUNT_ID}`)) {
+      throw new m.ClaudeCodeAuthError('The Claude sign-in saved in Braiwser could not be read. Disconnect it and connect again in Settings.', true);
+    }
+    const problem = loginFileProblem(claudeCredentialsPath(src), 'Claude Code', 'claude');
+    if (problem) throw problem;
+    return null;
   }
 
   if (provider === 'codex') {
-    const identity = await m.readCodexLogin();
-    if (!identity) throw new Error('No Codex login found on this machine. Run `codex` and sign in.');
+    const identity = await m.readCodexLogin(codexOptions);
+    if (!identity) {
+      const problem = loginFileProblem(codexAuthPath(src), 'Codex', 'codex');
+      if (problem) throw problem;
+      return null;
+    }
+    if (m.isCodexExpired(identity)) throw new Error('The Codex login on this machine has expired. Run `codex` and sign in again.');
     return { kind: 'codex', options: m.codexOptions(identity) };
   }
 
   const resolved = await keys.resolve(provider);
-  if (!resolved.ready || !resolved.key) return null; // caller falls back to a local answer
-  return { kind: 'key', key: resolved.key };
+  if (resolved.ready && resolved.key) return { kind: 'key', key: resolved.key };
+  if (await store.read(`key:${provider}`)) {
+    // A key was saved, but it will not open (the machine secret changed, or the row
+    // was damaged). That is not "no key".
+    throw new Error(`The saved ${provider === 'anthropic' ? 'Anthropic' : 'OpenAI'} API key could not be decrypted. Enter it again in Settings.`);
+  }
+  return null;
 }
 
 // ---- writing credentials ------------------------------------------------------
@@ -277,6 +442,8 @@ async function describeError(err, provider, model) {
   } catch (_e) { return null; }
 }
 
+const ensureForTests = (dir) => ensure(dir);
+
 module.exports = {
   ACCOUNT_ID,
   anthropicShape,
@@ -284,7 +451,13 @@ module.exports = {
   beginClaudeLogin,
   clearKey,
   completeClaudeLogin,
+  configureSources,
   credentialFor,
+  ensure: ensureForTests,
+  machineSecret,
+  MachineKeyError,
+  loginFileState,
+  reset,
   describeError,
   disconnectClaudeLogin,
   migratePlaintextKeys,

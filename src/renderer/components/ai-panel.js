@@ -1,6 +1,15 @@
 // AI tab: pick a task from config.aiTasks, Run it over the current session via
 // caos.ai.run, show a spinner, then render the result with Copy / Save actions.
 // On error (e.g. missing key) show a message with a link to Profile.
+//
+// In-flight calls carry a `requestId` (passed to actions.run in its `extra`
+// argument, which the app spreads into the ai.run payload) so they can be stopped:
+// while a call runs the Run button becomes Cancel and calls actions.cancel(requestId)
+// (optional; maps to caos.ai.cancel). Cancel ALWAYS settles the panel at once — a
+// late reply for a cancelled or superseded call is ignored.
+// Results: { ok:true, text } shows the text; { ok:true, local:true } is labelled
+// "Generated locally" (reason 'no-credential' = nothing is connected); { ok:false,
+// error } (expired/invalid credential, timeout, …) shows the error.
 import { h, icon, clear, toast, esc } from '../lib/dom.js';
 
 export function createAiPanel(config, actions) {
@@ -9,14 +18,16 @@ export function createAiPanel(config, actions) {
   let profileSettings = {};
   let profileProviders = {};
 
-  const select = h('select', { class: 'select' }, taskIds.map((id) =>
+  const select = h('select', { class: 'select', 'aria-label': 'AI task' }, taskIds.map((id) =>
     h('option', { value: id, text: prettyTask(id) })
   ));
   const desc = h('div', { class: 'ai-task-desc', text: config.aiTasks[taskIds[0]] || '' });
   select.addEventListener('change', () => { desc.textContent = config.aiTasks[select.value] || ''; });
 
-  const runBtn = h('button', { class: 'btn btn-primary btn-sm', html: icon('ai', 14) + '<span>Run</span>', on: { click: run } });
-  const providerBtn = h('button', { class: 'provider-status', title: 'Open Profile', on: { click: actions.openSettings } });
+  const runBtn = h('button', { class: 'btn btn-primary btn-sm', html: icon('ai', 14) + '<span>Run</span>', on: { click: () => (inFlight ? cancel() : run()) } });
+  let inFlight = null; // { id, token } for the call being waited on
+  let seq = 0;
+  const providerBtn = h('button', { class: 'provider-status', title: 'Open Profile', on: { click: (e) => actions.openSettings(e) } });
 
   const resultWrap = h('div', { class: 'ai-result-wrap' });
   const root = h('div', { class: 'tab-body', dataset: { tab: 'ai' } }, [
@@ -44,30 +55,72 @@ export function createAiPanel(config, actions) {
     resultWrap.appendChild(h('div', { class: 'ai-loading' }, [h('span', { class: 'spinner' }), h('span', { text: 'Thinking…' })]));
   }
 
+  function setBusy(on) {
+    runBtn.classList.toggle('btn-primary', !on);
+    runBtn.classList.toggle('btn-danger', on);
+    runBtn.querySelector('span').textContent = on ? 'Cancel' : 'Run';
+    runBtn.setAttribute('aria-label', on ? 'Cancel the AI request' : 'Run the AI task');
+    runBtn.setAttribute('aria-busy', on ? 'true' : 'false');
+  }
+
+  function newRequestId() {
+    seq += 1;
+    return 'ai-' + Date.now().toString(36) + '-' + seq;
+  }
+
+  // One path for Run and runExternal: guarded against late replies, always settles.
+  async function execute(taskId, sessionId, extra) {
+    if (inFlight) return;
+    const requestId = newRequestId();
+    const mine = { id: requestId, token: seq };
+    inFlight = mine;
+    setBusy(true);
+    loading();
+    try {
+      const res = await actions.run(taskId, sessionId, Object.assign({}, extra || {}, { requestId }));
+      if (inFlight !== mine) return; // cancelled while waiting: the panel already settled
+      if (!res || res.ok === false) {
+        showError((res && res.error) || 'The AI request failed.', isKeyError(res && res.error));
+      } else {
+        showResult(res.text || '', { local: !!res.local, reason: res.reason });
+      }
+    } catch (e) {
+      if (inFlight !== mine) return;
+      showError(String((e && e.message) || e), false);
+    } finally {
+      if (inFlight === mine) {
+        inFlight = null;
+        setBusy(false);
+      }
+    }
+  }
+
+  function cancel() {
+    const mine = inFlight;
+    if (!mine) return;
+    inFlight = null; // settle now; a late reply is dropped by the identity check
+    setBusy(false);
+    clear(resultWrap);
+    resultWrap.appendChild(h('div', { class: 'ai-cancelled', role: 'status', text: 'Cancelled.' }));
+    if (actions.cancel) {
+      try {
+        const out = actions.cancel(mine.id);
+        if (out && typeof out.catch === 'function') out.catch(() => { /* the call is already abandoned */ });
+      } catch (_e) { /* the call is already abandoned */ }
+    }
+  }
+
   async function run() {
     const sessionId = actions.currentSessionId();
     if (!sessionId) {
       showError('No active session yet. Capture at least one note first, then run an AI task.', false);
       return;
     }
-    runBtn.disabled = true;
-    loading();
-    try {
-      const res = await actions.run(select.value, sessionId);
-      if (!res || res.ok === false) {
-        showError((res && res.error) || 'The AI request failed.', isKeyError(res && res.error));
-      } else {
-        showResult(res.text || '', { local: !!res.local });
-      }
-    } catch (e) {
-      showError(String((e && e.message) || e), false);
-    } finally {
-      runBtn.disabled = false;
-    }
+    await execute(select.value, sessionId);
   }
 
   function isKeyError(msg) {
-    return /key|auth|credential|provider|401|unauthorized/i.test(String(msg || ''));
+    return /key|auth|credential|provider|401|403|unauthori[sz]ed|expired|sign[- ]?in|invalid|token/i.test(String(msg || ''));
   }
 
   function showError(message, keyHint) {
@@ -75,7 +128,7 @@ export function createAiPanel(config, actions) {
     const box = h('div', { class: 'ai-error' });
     box.innerHTML = renderInline(message);
     if (keyHint) {
-      const link = h('a', { text: 'Open Profile →', on: { click: actions.openSettings } });
+      const link = linkButton('Open Profile →', actions.openSettings);
       box.appendChild(h('div', { style: { marginTop: '8px' } }, [link]));
     }
     resultWrap.appendChild(box);
@@ -85,7 +138,7 @@ export function createAiPanel(config, actions) {
     lastText = text;
     clear(resultWrap);
     if (opts.local) {
-      resultWrap.appendChild(localNotice());
+      resultWrap.appendChild(localNotice(opts.reason));
     }
     const body = h('div', { class: 'ai-result' });
     body.innerHTML = renderMarkdownish(text);
@@ -115,17 +168,8 @@ export function createAiPanel(config, actions) {
   // optional extra payload (annotations/context). Renders into this panel.
   async function runExternal(taskId, extra) {
     if (taskIds.includes(taskId)) { select.value = taskId; desc.textContent = config.aiTasks[taskId] || ''; }
-    runBtn.disabled = true;
-    loading();
-    try {
-      const res = await actions.run(taskId, actions.currentSessionId(), extra || {});
-      if (!res || res.ok === false) showError((res && res.error) || 'The AI request failed.', isKeyError(res && res.error));
-      else showResult(res.text || '', { local: !!res.local });
-    } catch (e) {
-      showError(String((e && e.message) || e), false);
-    } finally {
-      runBtn.disabled = false;
-    }
+    if (inFlight) cancel(); // a newer request replaces the one still running
+    await execute(taskId, actions.currentSessionId(), extra);
   }
 
   idle();
@@ -143,18 +187,42 @@ export function createAiPanel(config, actions) {
     const provider = profileSettings.aiProvider || 'claude-code';
     const ready = !!(profileProviders[provider] && profileProviders[provider].ready);
     providerBtn.className = `provider-status ${ready ? 'ready' : 'needs-setup'}`;
-    providerBtn.innerHTML = `${icon(ready ? 'check' : 'settings', 13)}<span>${providerLabel(provider)}</span><span class="provider-status-dot">${readyWord(provider, ready)}</span>`;
+    // Built from nodes, not an HTML string: an unrecognised provider id falls
+    // back to being displayed verbatim, and that text must never be markup.
+    providerBtn.textContent = '';
+    providerBtn.insertAdjacentHTML('afterbegin', icon(ready ? 'check' : 'settings', 13));
+    providerBtn.appendChild(h('span', { class: 'provider-status-name', text: providerLabel(provider) }));
+    providerBtn.appendChild(h('span', { class: 'provider-status-dot', text: readyWord(provider, ready) }));
     providerBtn.title = `${providerLabel(provider)} — ${readyWord(provider, ready)} · open Profile`;
     providerBtn.setAttribute('aria-label', providerBtn.title);
   }
 
-  function localNotice() {
-    const link = h('a', { text: 'Open Profile', on: { click: actions.openSettings } });
-    return h('div', { class: 'ai-local-notice' }, [
-      h('span', { text: `${providerLabel(profileSettings.aiProvider || 'claude-code')} is not connected, so this result was generated locally.` }),
+  function localNotice(reason) {
+    const link = linkButton('Open Profile', actions.openSettings);
+    const provider = providerLabel(profileSettings.aiProvider || 'claude-code');
+    return h('div', { class: 'ai-local-notice', role: 'status' }, [
+      h('strong', { class: 'ai-local-badge', text: 'Generated locally' }),
+      h('span', { text: reason === 'no-credential'
+        ? ` — no credential is set, so no AI provider was contacted. Connect ${provider} to use a model.`
+        : ` — ${provider} is not connected, so this result was generated on this device.` }),
       link,
     ]);
   }
+}
+
+// A text link that does something: focusable, and operable with Enter / Space.
+function linkButton(text, onClick) {
+  return h('a', {
+    text,
+    role: 'button',
+    tabindex: '0',
+    on: {
+      click: (e) => { e.preventDefault(); onClick(e); },
+      keydown: (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(e); }
+      },
+    },
+  });
 }
 
 function prettyTask(id) {

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Tables and lists</title>
+<style>body{font:14px system-ui;margin:16px}table{border-collapse:collapse;margin-bottom:16px}th,td{border:1px solid #999;padding:2px 6px}</style></head>
+<body>
+<nav aria-label="Site"><ul><li><a href="#a">Alpha</a></li><li><a href="#b">Beta</a></li><li><a href="#c">Gamma</a></li></ul></nav>
+<main>
+<table>
+  <caption>Accounts</caption>
+  <thead><tr><th>User</th><th>Password</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>ada</td><td>CANARY-hunter2</td><td>first</td></tr>
+    <tr><td>grace</td><td>CANARY-swordfish</td><td><input type="password" value="CANARY-in-input" aria-label="Reset code"></td></tr>
+    <tr><td>alan</td><td></td><td>a long note that goes on and on and on and on and on and on and on and on and on and on and on and on and on and on and on and on</td></tr>
+  </tbody>
+</table>
+
+<table aria-label="Merged">
+  <tr><th>Region</th><th colspan="2">Totals</th></tr>
+  <tr><td>North</td><td>1</td><td>2</td></tr>
+</table>
+
+<div role="grid" aria-label="Grid">
+  <div role="row"><span role="columnheader">Key</span><span role="columnheader">Value</span></div>
+  <div role="row"><span role="gridcell">alpha</span><span role="gridcell">1</span></div>
+  <div role="row"><span role="gridcell">beta</span><span role="gridcell">2</span></div>
+</div>
+
+<ul id="plain"><li>apples</li><li>pears</li><li>plums</li></ul>
+<ol aria-label="Steps"><li>Open</li><li>Edit</li><li>Save</li></ol>
+<ul id="one"><li>lonely</li></ul>
+
+<table aria-label="Big" id="big"></table>
+<a href="#p1">Previous</a> <a href="#p3">Next</a>
+</main>
+<script>
+var big = document.getElementById('big');
+var head = '<tr>';
+for (var c = 0; c < 15; c++) head += '<th>C' + c + '</th>';
+big.innerHTML = head + '</tr>';
+for (var r = 0; r < 80; r++) {
+  var tr = document.createElement('tr');
+  for (var c2 = 0; c2 < 15; c2++) {
+    var td = document.createElement('td');
+    td.textContent = c2 === 1 && r === 0 ? new Array(300).join('long ') : 'r' + r + 'c' + c2;
+    tr.appendChild(td);
+  }
+  big.appendChild(tr);
+}
+</script>
+</body></html>

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Shadow</title></head>
+<body>
+<main>
+  <open-card id="open-host"></open-card>
+  <closed-card id="closed-host"></closed-card>
+  <div role="status" id="log">idle</div>
+</main>
+<script>
+class OpenCard extends HTMLElement {
+  constructor() {
+    super();
+    var root = this.attachShadow({ mode: 'open' });
+    root.innerHTML = '<button id="shadow-btn" type="button">Shadow action</button>';
+    root.getElementById('shadow-btn').addEventListener('click', function () { document.getElementById('log').textContent = 'shadow clicked'; });
+  }
+}
+class ClosedCard extends HTMLElement {
+  constructor() {
+    super();
+    var root = this.attachShadow({ mode: 'closed' });
+    root.innerHTML = '<button type="button">Closed action</button>';
+  }
+}
+customElements.define('open-card', OpenCard);
+customElements.define('closed-card', ClosedCard);
+</script>
+</body></html>

@@ -4,3 +4,7 @@ out/
 *.log
 .DS_Store
 exports/
+
+# Licence signing keys and build-time configuration are generated, never committed.
+.license-keys/
+src/main/build-config.json

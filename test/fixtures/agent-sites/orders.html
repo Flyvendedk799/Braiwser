@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Orders</title>
+<style>body{font:16px system-ui;margin:24px}table{border-collapse:collapse}th,td{border:1px solid #999;padding:4px 8px}nav a,nav button{margin-right:8px}</style></head>
+<body>
+<h1>Orders</h1>
+<!-- 3 pages x 4 orders, rendered from ?page=N. ?mode=stuck: Next never advances. ?mode=vanish: the last page has no Next control at all.
+     ?mode=nopager: no pager anywhere. Order 6 has an empty Total, order 7 has no Status text. -->
+<main id="root"></main>
+<script>
+var q = new URLSearchParams(location.search);
+var page = Math.min(3, Math.max(1, parseInt(q.get('page') || '1', 10) || 1));
+var mode = q.get('mode') || '';
+var PER = 4;
+var all = [];
+var names = ['Ada', 'Grace', 'Alan', 'Edsger', 'Barbara', 'Donald', 'Margaret', 'Ken', 'Linus', 'Radia', 'Tim', 'Hedy'];
+for (var i = 1; i <= 12; i++) {
+  all.push({ id: 'ORD-' + String(1000 + i), customer: names[i - 1], total: i === 6 ? '' : (i * 12.5).toFixed(2), status: i === 7 ? '' : (i % 3 === 0 ? 'Shipped' : 'Paid') });
+}
+function el(tag, attrs, text) {
+  var e = document.createElement(tag);
+  for (var k in (attrs || {})) e.setAttribute(k, attrs[k]);
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+function render() {
+  var root = document.getElementById('root');
+  var table = el('table', { 'aria-label': 'Orders' });
+  var thead = el('thead');
+  var hr = el('tr');
+  ['Order', 'Customer', 'Total', 'Status'].forEach(function (h) { hr.appendChild(el('th', { scope: 'col' }, h)); });
+  thead.appendChild(hr);
+  table.appendChild(thead);
+  var tbody = el('tbody');
+  all.slice((page - 1) * PER, page * PER).forEach(function (o) {
+    var tr = el('tr');
+    [o.id, o.customer, o.total, o.status].forEach(function (v) { tr.appendChild(el('td', {}, v)); });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  root.appendChild(table);
+  if (mode === 'nopager') return;
+  var nav = el('nav', { 'aria-label': 'Pagination' });
+  var href = function (p) { return 'orders.html?page=' + p + (mode ? '&mode=' + mode : ''); };
+  if (page > 1) nav.appendChild(el('a', { href: href(page - 1) }, 'Previous'));
+  else nav.appendChild(el('a', { href: '#', 'aria-disabled': 'true' }, 'Previous'));
+  if (page < 3) nav.appendChild(el('a', { href: mode === 'stuck' ? href(page) : href(page + 1) }, 'Next'));
+  else if (mode !== 'vanish') nav.appendChild(el('a', { href: '#', 'aria-disabled': 'true' }, 'Next'));
+  root.appendChild(nav);
+}
+render();
+</script>
+</body></html>

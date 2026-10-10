@@ -7,57 +7,74 @@
 // shape and different reply shape, so they are kept as two paths rather than one
 // path with a swapped base URL.
 
+const { postJson } = require('./http');
+
 const CHAT_URL = 'https://api.openai.com/v1/chat/completions';
 
-async function post(url, headers, body, label, timeoutMs) {
-  const controller = new AbortController();
-  const ms = Math.max(5000, Number(timeoutMs) || 120000);
-  const timer = setTimeout(() => controller.abort(), ms);
-  let res;
-  try {
-    res = await fetch(url, {
-      method: 'POST',
-      headers: { ...headers, 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-  } catch (err) {
-    if (err && err.name === 'AbortError') throw new Error(`${label} request timed out after ${Math.round(ms / 1000)}s`);
-    throw err;
-  } finally {
-    clearTimeout(timer);
-  }
+// Chat Completions request contract per model family. `max_tokens` is deprecated
+// and rejected by the o-series and newer models, which take
+// `max_completion_tokens` (a budget that also covers hidden reasoning tokens, so
+// reasoning models get a larger one). Legacy models predate that parameter. The
+// first matching row wins; the last row is the default for ids we do not know,
+// which follows the current documented API.
+//
+//   tokenParam    name of the output-limit field
+//   maxTokens     the limit sent
+//   systemInstructions  'system' = a system message; 'user' = the model rejects
+//                 system messages, so the instructions are prepended to the user turn
+const CHAT_CONTRACTS = [
+  { match: /^o1-(mini|preview)/, tokenParam: 'max_completion_tokens', maxTokens: 16384, systemInstructions: 'user' },
+  { match: /^(o\d|gpt-5)/, tokenParam: 'max_completion_tokens', maxTokens: 16384, systemInstructions: 'system' },
+  { match: /^gpt-(4\.1|4o|4\.5)/, tokenParam: 'max_completion_tokens', maxTokens: 4096, systemInstructions: 'system' },
+  { match: /^gpt-3\.5/, tokenParam: 'max_tokens', maxTokens: 4096, systemInstructions: 'system' },
+  { match: /^gpt-4(-|$)/, tokenParam: 'max_tokens', maxTokens: 4096, systemInstructions: 'system' },
+  { match: /./, tokenParam: 'max_completion_tokens', maxTokens: 4096, systemInstructions: 'system' },
+];
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    const err = new Error(`${label} API error ${res.status}: ${text}`);
-    err.status = res.status;
-    err.headers = res.headers;
-    throw err;
-  }
-  return res.json();
+function chatContractFor(model) {
+  const id = String(model || '').toLowerCase();
+  return CHAT_CONTRACTS.find((row) => row.match.test(id));
 }
 
-// { headers, baseUrl, model, system, user } -> Promise<string>
+function chatRequestBody({ model, system, user }) {
+  const contract = chatContractFor(model);
+  const sys = typeof system === 'string' ? system : '';
+  const messages = contract.systemInstructions === 'user'
+    ? [{ role: 'user', content: sys ? `${sys}\n\n${user}` : user }]
+    : [{ role: 'system', content: sys }, { role: 'user', content: user }];
+  return { model, messages, [contract.tokenParam]: contract.maxTokens };
+}
+
+// { headers, baseUrl, model, system, user, timeoutMs?, signal?, fetchImpl? } -> Promise<string>
 // baseUrl set = a Codex subscription; null = a metered OpenAI key.
-async function complete({ headers, baseUrl, model, system, user, timeoutMs }) {
+async function complete({ headers, baseUrl, model, system, user, timeoutMs, signal, fetchImpl }) {
+  const json = { 'content-type': 'application/json' };
   if (baseUrl) {
-    const data = await post(`${baseUrl}/responses`, headers, {
-      model,
-      instructions: typeof system === 'string' ? system : '',
-      input: user,
-    }, 'Codex', timeoutMs);
+    const data = await postJson({
+      url: `${baseUrl}/responses`,
+      headers: { ...headers, ...json },
+      body: {
+        model,
+        instructions: typeof system === 'string' ? system : '',
+        input: user,
+      },
+      label: 'Codex',
+      timeoutMs,
+      signal,
+      fetchImpl,
+    });
     return responsesText(data);
   }
 
-  const data = await post(CHAT_URL, headers, {
-    model,
-    messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: user },
-    ],
-    max_tokens: 4096,
-  }, 'OpenAI', timeoutMs);
+  const data = await postJson({
+    url: CHAT_URL,
+    headers: { ...headers, ...json },
+    body: chatRequestBody({ model, system, user }),
+    label: 'OpenAI',
+    timeoutMs,
+    signal,
+    fetchImpl,
+  });
 
   return (
     (data.choices &&
@@ -80,4 +97,4 @@ function responsesText(data) {
     .join('');
 }
 
-module.exports = { complete };
+module.exports = { complete, chatContractFor, chatRequestBody, CHAT_CONTRACTS };

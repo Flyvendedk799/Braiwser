@@ -81,6 +81,7 @@ const ICONS = {
   lock: 'M7 11V7a5 5 0 0 1 10 0v4M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z',
   unlock: 'M7 11V7a5 5 0 0 1 9.9-1M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z',
   star: 'M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z',
+  help: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01',
   warn: 'M12 9v4M12 17h.01M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z',
 };
 
@@ -125,29 +126,149 @@ export function toast(message, kind = 'info', ms = 2600) {
 
 // ---- Modal -----------------------------------------------------------------
 // modal({ title, body:Node, actions:[{label,kind,onClick}], onClose }) -> { close }
+//
+// Modals form a STACK. One document keydown listener serves the whole stack and
+// only the topmost modal sees Escape / Tab, so a nested dialog (an assertion
+// editor over a recording editor, a sign-in code over Settings) cancels only
+// itself and the unsaved parent underneath stays open and intact. close() is
+// idempotent, and focus goes back into the still-open parent on close.
 let modalSeq = 0;
+const modalStack = []; // entries: { id, backdrop, card, close, handleKey, lastFocus }
+let modalKeyBound = false;
+
+// A modal whose backdrop was removed from the document by someone else (the app
+// replacing document.body, a test resetting the page) can never be closed by the
+// user; keeping it on the stack would make it swallow Escape/Tab forever.
+function pruneModals() {
+  for (let i = modalStack.length - 1; i >= 0; i--) {
+    if (!modalStack[i].backdrop.isConnected) modalStack.splice(i, 1);
+  }
+  if (!modalStack.length) unbindModalKeys();
+  else {
+    const top = modalStack[modalStack.length - 1];
+    if (top.backdrop.hasAttribute('inert')) top.backdrop.removeAttribute('inert');
+  }
+}
+
+function onModalKey(e) {
+  pruneModals();
+  const top = modalStack[modalStack.length - 1];
+  if (top) top.handleKey(e);
+}
+
+function bindModalKeys() {
+  if (modalKeyBound) return;
+  document.addEventListener('keydown', onModalKey);
+  modalKeyBound = true;
+}
+
+function unbindModalKeys() {
+  if (!modalKeyBound || modalStack.length) return;
+  document.removeEventListener('keydown', onModalKey);
+  modalKeyBound = false;
+}
+
+// How many modals are open right now (tests + callers that must not stack a
+// second dialog over the first).
+export function modalDepth() {
+  pruneModals();
+  return modalStack.length;
+}
+
+const FOCUSABLE = 'a[href], area[href], button, input:not([type="hidden"]), select, textarea, summary, [tabindex], [contenteditable=""], [contenteditable="true"]';
+
+function isRendered(el, boundary) {
+  for (let n = el; n; n = n.parentElement) {
+    if (n.hidden || n.hasAttribute('hidden') || n.hasAttribute('inert')) return false;
+    if (n === boundary) break;
+  }
+  try {
+    const cs = window.getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden' || cs.visibility === 'collapse') return false;
+    for (let n = el.parentElement; n; n = n.parentElement) {
+      if (window.getComputedStyle(n).display === 'none') return false;
+      if (n === boundary) break;
+    }
+  } catch (_e) { /* no computed style: trust the attributes */ }
+  return true;
+}
+
+// Tabbable controls inside `root`: enabled, not tabindex=-1, and actually shown.
+export function focusableIn(root) {
+  if (!root) return [];
+  return Array.from(root.querySelectorAll(FOCUSABLE)).filter((el) => {
+    if (el.tabIndex < 0) return false;
+    try { if (el.matches(':disabled')) return false; } catch (_e) { /* old engine */ }
+    if (el.disabled) return false;
+    return isRendered(el, root);
+  });
+}
+
 export function modal({ title, body, actions = [], onClose, width = 460 } = {}) {
   const backdrop = h('div', { class: 'modal-backdrop' });
   const prevFocus = document.activeElement; // restore on close
   const titleId = 'caos-modal-title-' + (++modalSeq);
+  let closed = false;
+  const entry = { id: modalSeq, backdrop, card: null, close: null, handleKey: null, lastFocus: null };
+  const isTop = () => modalStack[modalStack.length - 1] === entry;
+
   const close = () => {
+    if (closed) return; // idempotent: Escape, backdrop, X and Done may all race
+    closed = true;
+    const wasTop = isTop();
+    const at = modalStack.indexOf(entry);
+    if (at >= 0) modalStack.splice(at, 1);
+    unbindModalKeys();
     backdrop.classList.remove('show');
     setTimeout(() => backdrop.remove(), 200);
-    if (onClose) onClose();
-    document.removeEventListener('keydown', onKey);
-    try { if (prevFocus && prevFocus.focus) prevFocus.focus(); } catch (_e) { /* ignore */ }
-  };
-  const focusables = () => card.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
-  const onKey = (e) => {
-    if (e.key === 'Escape') { close(); return; }
-    if (e.key === 'Tab') {
-      const f = focusables();
-      if (!f.length) return;
-      const first = f[0], last = f[f.length - 1];
-      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    // The modal underneath (if any) is interactive again.
+    const below = modalStack[modalStack.length - 1];
+    if (below) below.backdrop.removeAttribute('inert');
+    try { if (onClose) onClose(); } finally {
+      if (wasTop) restoreFocus(below);
     }
   };
+  entry.close = close;
+
+  // Focus goes back to whatever opened this modal — unless that control is gone,
+  // in which case the still-open parent gets it (never the page behind it).
+  function restoreFocus(below) {
+    const usable = prevFocus && prevFocus.focus && prevFocus.isConnected !== false && document.contains(prevFocus)
+      && !backdrop.contains(prevFocus) && (!below || below.card.contains(prevFocus));
+    try {
+      if (usable) { prevFocus.focus(); return; }
+      if (below) {
+        const target = below.lastFocus && below.card.contains(below.lastFocus) && document.contains(below.lastFocus)
+          ? below.lastFocus
+          : focusableIn(below.card)[0] || below.card;
+        target.focus();
+      }
+    } catch (_e) { /* ignore */ }
+  }
+
+  const focusables = () => focusableIn(card);
+  const onKey = (e) => {
+    if (e.key === 'Escape') {
+      // A popover menu (or any inner widget) that already used this Escape wins.
+      if (e.defaultPrevented) return;
+      e.preventDefault();
+      close();
+      return;
+    }
+    if (e.key === 'Tab') {
+      const f = focusables();
+      if (!f.length) { e.preventDefault(); card.focus(); return; }
+      const first = f[0], last = f[f.length - 1];
+      const active = document.activeElement;
+      if (!card.contains(active) || active === card) {
+        // Focus escaped (or sits on the card itself): pull it back in.
+        e.preventDefault();
+        (e.shiftKey ? last : first).focus();
+      } else if (e.shiftKey && active === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
+    }
+  };
+  entry.handleKey = onKey;
 
   const footer = h('div', { class: 'modal-footer' });
   const actionButtons = [];
@@ -174,6 +295,7 @@ export function modal({ title, body, actions = [], onClose, width = 460 } = {}) 
     role: 'dialog',
     'aria-modal': 'true',
     'aria-labelledby': titleId,
+    tabindex: '-1',
     style: { width: width + 'px' },
   }, [
     h('div', { class: 'modal-head' }, [
@@ -184,19 +306,52 @@ export function modal({ title, body, actions = [], onClose, width = 460 } = {}) 
     actions.length ? footer : null,
   ]);
 
+  entry.card = card;
   backdrop.appendChild(card);
   backdrop.addEventListener('mousedown', (e) => {
-    if (e.target === backdrop) close();
+    if (e.target === backdrop && isTop()) close();
   });
-  document.addEventListener('keydown', onKey);
+  card.addEventListener('focusin', (e) => { entry.lastFocus = e.target; });
+  // Whatever was open is now covered: keep it out of the tab order and the
+  // accessibility tree until this modal closes.
+  pruneModals();
+  const covered = modalStack[modalStack.length - 1];
+  if (covered) covered.backdrop.setAttribute('inert', '');
+  modalStack.push(entry);
+  bindModalKeys();
   document.body.appendChild(backdrop);
   requestAnimationFrame(() => {
+    if (closed) return;
     backdrop.classList.add('show');
     // Initial focus: a field if present, else the primary action.
-    const f = card.querySelector('input, textarea, select') || card.querySelector('.modal-footer button:last-child') || card.querySelector('button');
+    const usable = (el) => el && focusables().includes(el);
+    const field = Array.from(card.querySelectorAll('input, textarea, select')).find(usable);
+    const primary = Array.from(card.querySelectorAll('.modal-footer button:last-child, button')).find(usable);
+    const f = field || primary;
     if (f) try { f.focus(); } catch (_e) { /* ignore */ }
   });
-  return { close, card, actionButtons };
+  return { close, card, actionButtons, backdrop, isOpen: () => !closed };
+}
+
+// Wrap a UI callback so a throw — or a rejected promise — becomes a visible
+// error toast instead of a silent unhandled rejection.
+export function guarded(fn, label = 'Action') {
+  const report = (err) => {
+    const raw = (err && err.message) || String(err);
+    const msg = raw.replace(/^Error invoking remote method '[^']+':\s*/, '').replace(/^Error:\s*/, '');
+    try { console.error('[' + label + ']', err); } catch (_e) { /* ignore */ }
+    toast(label + ' failed: ' + msg, 'error', 5000);
+  };
+  return (...args) => {
+    try {
+      const out = fn(...args);
+      if (out && typeof out.then === 'function') return out.catch((err) => { report(err); });
+      return out;
+    } catch (err) {
+      report(err);
+      return undefined;
+    }
+  };
 }
 
 // Lightweight popover menu anchored under an element. items: [{label, onClick}].

@@ -1,6 +1,15 @@
 // Braiwser — anchor.js
 // Element identity & re-resolution utilities, shared by inspector/recorder/replay.
 // Runs inside the guest page's world. Pure DOM, no IPC. Defensive everywhere.
+//
+// Identity rules (CE-12):
+//   • An id is only used when it is unique in the element's tree. A duplicate id
+//     never short-circuits the structural walk, on the target or any ancestor.
+//   • Every selector cssPath() emits has been checked to resolve to exactly the
+//     element it was built for; if no selector can be proven, it returns ''.
+//   • resolve() never silently takes "the first of several" matches. Anything
+//     that is not an exact, unique selector hit is a *suggestion*
+//     (confidence:'suggested') and strict callers (replay, agents) ignore it.
 
 'use strict';
 
@@ -10,6 +19,50 @@ const OVERLAY_Z = 2147483640;
 // Test-friendly attributes preferred over brittle structural paths.
 const STABLE_ATTRS = ['data-testid', 'data-test', 'data-cy', 'data-qa', 'name', 'aria-label'];
 
+// The tree a selector is evaluated in: the document, or the shadow root the
+// element lives in.
+function rootFor(el) {
+  try {
+    const r = el.getRootNode && el.getRootNode();
+    if (r && typeof r.querySelectorAll === 'function') return r;
+  } catch (_e) {
+    /* ignore */
+  }
+  return document;
+}
+
+// True only if `selector` matches exactly one element in `el`'s tree and that
+// element is `el`.
+function resolvesUniquelyTo(selector, el) {
+  try {
+    const hits = rootFor(el).querySelectorAll(selector);
+    return hits.length === 1 && hits[0] === el;
+  } catch (_e) {
+    return false; // invalid selector
+  }
+}
+
+function typeIndex(node) {
+  const parent = node.parentElement;
+  if (!parent) return 0;
+  const sameTag = Array.prototype.filter.call(parent.children, (c) => c.nodeName === node.nodeName);
+  return sameTag.length > 1 ? sameTag.indexOf(node) + 1 : 0;
+}
+
+function childIndex(node) {
+  const parent = node.parentElement;
+  return parent ? Array.prototype.indexOf.call(parent.children, node) + 1 : 1;
+}
+
+function isUniqueId(node) {
+  if (!node.id) return false;
+  try {
+    return rootFor(node).querySelectorAll('#' + cssEscape(node.id)).length === 1;
+  } catch (_e) {
+    return false;
+  }
+}
+
 function cssPath(el) {
   try {
     if (!(el instanceof Element)) return '';
@@ -18,17 +71,27 @@ function cssPath(el) {
     // findings on <html>, say) still resolve and highlight.
     if (el === document.documentElement) return 'html';
     if (el === document.body) return 'body';
+    const connected = el.isConnected !== false;
+    // Accept a candidate only if it provably hits this element alone. A detached
+    // element cannot be verified against the page, so its best-effort path is
+    // returned as built.
+    const accept = (sel) => (connected ? resolvesUniquelyTo(sel, el) : true);
+
     // Best path: a stable, test-oriented attribute that uniquely identifies it.
     for (const attr of STABLE_ATTRS) {
       const val = el.getAttribute && el.getAttribute(attr);
       if (!val) continue;
       const cand = `${el.nodeName.toLowerCase()}[${attr}="${cssEscapeAttr(val)}"]`;
-      try { if (document.querySelectorAll(cand).length === 1) return cand; } catch (_e) { /* invalid */ }
+      if (accept(cand)) return cand;
     }
-    // Fast path: a stable id wins outright.
-    if (el.id && document.querySelectorAll('#' + cssEscape(el.id)).length === 1) {
-      return '#' + cssEscape(el.id);
+    // Fast path: a stable id wins — but only when it really is unique.
+    if (isUniqueId(el)) {
+      const cand = '#' + cssEscape(el.id);
+      if (accept(cand)) return cand;
     }
+
+    // Structural path, anchored at the nearest ancestor with a unique id. A
+    // duplicate id anywhere on the way is skipped and the walk continues.
     const parts = [];
     let node = el;
     while (
@@ -37,25 +100,32 @@ function cssPath(el) {
       node !== document.body &&
       node !== document.documentElement
     ) {
-      let sel = node.nodeName.toLowerCase();
-      if (node.id) {
+      if (node !== el && isUniqueId(node)) {
         parts.unshift('#' + cssEscape(node.id));
         break;
       }
-      const parent = node.parentElement;
-      if (parent) {
-        const sameTag = Array.prototype.filter.call(
-          parent.children,
-          (c) => c.nodeName.toLowerCase() === sel
-        );
-        if (sameTag.length > 1) {
-          sel += ':nth-of-type(' + (sameTag.indexOf(node) + 1) + ')';
-        }
-      }
+      let sel = node.nodeName.toLowerCase();
+      const idx = typeIndex(node);
+      if (idx) sel += ':nth-of-type(' + idx + ')';
       parts.unshift(sel);
       node = node.parentElement;
     }
-    return parts.join(' > ');
+    const path = parts.join(' > ');
+    if (path && accept(path)) return path;
+
+    // Last resort for oddities (namespaced nodes, odd markup): absolute
+    // :nth-child chain from <html>, which is unique by construction.
+    const abs = [];
+    node = el;
+    while (node && node.nodeType === 1 && node !== document.documentElement) {
+      abs.unshift(node.nodeName.toLowerCase() + ':nth-child(' + childIndex(node) + ')');
+      node = node.parentElement;
+    }
+    if (node === document.documentElement) {
+      const full = 'html > ' + abs.join(' > ');
+      if (accept(full)) return full;
+    }
+    return connected ? '' : path;
   } catch (_e) {
     return '';
   }
@@ -72,7 +142,7 @@ function cssEscape(s) {
 
 // Escape a value for use inside an [attr="..."] selector.
 function cssEscapeAttr(s) {
-  return String(s).replace(/(["\\])/g, '\\$1');
+  return String(s).replace(/(["\\])/g, '\\$1').replace(/\n/g, '\\a ');
 }
 
 // ---- describe an element into a portable target descriptor -----------------
@@ -138,55 +208,116 @@ function describe(el) {
 }
 
 // ---- re-resolve a stored target to a live Element --------------------------
-function resolve(target) {
-  if (!target) return null;
+function isOwn(el) {
+  try {
+    return !!(el && el.closest && el.closest('[data-caos], #__caos_root'));
+  } catch (_e) {
+    return false;
+  }
+}
 
-  // 1) Direct selector match.
+function normText(el) {
+  return ((el.innerText || el.textContent || '') + '').trim().replace(/\s+/g, ' ').slice(0, 120);
+}
+
+// Result: { el, confidence, via, candidates, ambiguous }
+//   confidence 'exact'     — the stored selector resolves to exactly one element
+//   confidence 'suggested' — a best guess (text / coordinate / disambiguated
+//                            selector); fine to *show*, never to act on unreviewed
+//   el === null            — nothing trustworthy; `ambiguous` says several fit
+function resolveDetailed(target) {
+  const none = { el: null, confidence: null, via: null, candidates: 0, ambiguous: false };
+  if (!target) return none;
+  const wantedTag = target.tag ? String(target.tag).toLowerCase() : '';
+  const wantedText = target.text ? String(target.text).trim().replace(/\s+/g, ' ') : '';
+  let ambiguous = false;
+  let candidates = 0;
+
+  // 1) The stored selector.
   try {
     if (target.selector) {
-      const found = document.querySelector(target.selector);
-      if (found) return found;
+      const hits = Array.prototype.filter.call(document.querySelectorAll(target.selector), (n) => !isOwn(n));
+      candidates = hits.length;
+      if (hits.length === 1) {
+        const only = hits[0];
+        // A selector can survive a rearrangement and now point at a different
+        // element; a tag mismatch means it is stale, not exact.
+        if (!wantedTag || only.nodeName.toLowerCase() === wantedTag) {
+          return { el: only, confidence: 'exact', via: 'selector', candidates: 1, ambiguous: false };
+        }
+      } else if (hits.length > 1) {
+        ambiguous = true;
+        // Narrow by stored text — but that is a guess, so it is only a suggestion.
+        if (wantedText) {
+          const same = hits.filter((n) => normText(n) === wantedText);
+          if (same.length === 1) {
+            return { el: same[0], confidence: 'suggested', via: 'selector+text', candidates: hits.length, ambiguous: true };
+          }
+        }
+      }
     }
   } catch (_e) {
     /* selector may be stale/invalid */
   }
 
-  // 2) Match by tag + text content.
+  // 2) Match by tag + text content. Only a single match counts; "first of
+  //    several" is exactly the silent mis-targeting this module must not do.
   try {
-    if (target.tag && target.text) {
-      const wanted = target.text.trim();
-      const candidates = document.getElementsByTagName(target.tag);
-      let best = null;
-      for (let i = 0; i < candidates.length; i++) {
-        const c = candidates[i];
-        const t = ((c.innerText || c.textContent || '') + '')
-          .trim()
-          .replace(/\s+/g, ' ')
-          .slice(0, 120);
-        if (t === wanted) return c;
-        if (!best && t && wanted && t.indexOf(wanted) !== -1) best = c;
+    if (wantedTag && wantedText && !ambiguous) {
+      const all = Array.prototype.filter.call(document.getElementsByTagName(wantedTag), (n) => !isOwn(n));
+      const exact = all.filter((c) => normText(c) === wantedText);
+      if (exact.length === 1) {
+        return { el: exact[0], confidence: 'suggested', via: 'text', candidates: 1, ambiguous: false };
       }
-      if (best) return best;
+      if (exact.length > 1) {
+        ambiguous = true;
+        candidates = exact.length;
+      } else {
+        const partial = all.filter((c) => {
+          const t = normText(c);
+          return t && t.indexOf(wantedText) !== -1;
+        });
+        if (partial.length === 1) {
+          return { el: partial[0], confidence: 'suggested', via: 'text', candidates: 1, ambiguous: false };
+        }
+        if (partial.length > 1) {
+          ambiguous = true;
+          candidates = partial.length;
+        }
+      }
     }
   } catch (_e) {
     /* ignore */
   }
 
-  // 3) Nearest element to the stored box center.
+  // 3) Nearest element to the stored box center. Only when nothing was
+  //    ambiguous: an ambiguous target must be re-picked, not coordinate-guessed.
   try {
-    if (target.box) {
+    if (target.box && !ambiguous) {
       const cx = target.box.x + target.box.w / 2;
       const cy = target.box.y + target.box.h / 2;
       const clampedX = Math.max(0, Math.min(window.innerWidth - 1, cx));
       const clampedY = Math.max(0, Math.min(window.innerHeight - 1, cy));
       const hit = document.elementFromPoint(clampedX, clampedY);
-      if (hit && !(hit.closest && hit.closest('[data-caos]'))) return hit;
+      if (hit && !isOwn(hit) && (!wantedTag || hit.nodeName.toLowerCase() === wantedTag)) {
+        return { el: hit, confidence: 'suggested', via: 'coordinate', candidates: 1, ambiguous: false };
+      }
     }
   } catch (_e) {
     /* ignore */
   }
 
-  return null;
+  return { ...none, candidates, ambiguous };
+}
+
+// Back-compatible: returns an Element or null. Default (display) callers get
+// suggestions too; `{ strict: true }` returns only an exact unique selector hit
+// — what replay and any agent action must use.
+function resolve(target, opts) {
+  const r = resolveDetailed(target);
+  if (!r.el) return null;
+  if (opts && opts.strict && r.confidence !== 'exact') return null;
+  return r.el;
 }
 
 // ---- transient highlight flash ---------------------------------------------
@@ -253,4 +384,4 @@ function hexToRgba(hex, alpha) {
   }
 }
 
-module.exports = { cssPath, describe, resolve, highlight };
+module.exports = { cssPath, describe, resolve, resolveDetailed, resolvesUniquelyTo, highlight };

@@ -2,7 +2,17 @@
 // for projects, sessions, annotations, recordings, settings, and secrets.
 //
 // Data model:
-//   Project    { id, name, path, kind:'local'|'url', createdAt, lastOpenedAt }
+//   Project    { id, name, path, entry?, kind:'local'|'url', imported?, createdAt, lastOpenedAt }
+//                path   — for kind:'local' ALWAYS a project DIRECTORY (an Open File
+//                         project stores the file's parent directory here); the
+//                         agent hand-off writes into and runs in this directory.
+//                entry  — absolute path of the page that was opened (the file for
+//                         Open File, the detected index.html for Open Folder), or
+//                         absent. Never used as a cwd.
+//                imported — true for projects created from a bundle: their path came
+//                         from someone else's machine, so it is NOT trusted for
+//                         writing files or running the agent command until the user
+//                         picks a local directory (projects.relocate).
 //   Session    { id, projectId, name, url, title, createdAt, updatedAt }
 //   Annotation { id, sessionId, kind:'element'|'region'|'edit', action, note,
 //                target, url, title, status, priority, createdAt, updatedAt,
@@ -15,7 +25,8 @@
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const { JsonCollection, JsonDocument } = require('./db');
+const { JsonCollection, JsonDocument, transact, cleanupStaleTmp } = require('./db');
+const { redactSteps, redactRecording, recordingHasSecrets } = require('../../shared/redact');
 const { migrateStore } = require('./schema');
 const { STORE_DIR } = require('../migrate');
 const { DEFAULT_SETTINGS, DEVICE_PRESETS, THEMES, PERSONAS } = require('../config');
@@ -93,6 +104,9 @@ function normalizeSettings(raw = {}) {
       ...DEFAULT_SETTINGS.integrations,
       ...(base.integrations && typeof base.integrations === 'object' ? base.integrations : {}),
     },
+    featureFlags: {
+      agentRuntime: !!(base.featureFlags && base.featureFlags.agentRuntime),
+    },
   };
 }
 
@@ -118,6 +132,12 @@ function sanitizeSettingsPatch(patch, current) {
     clean.profile = { ...(current.profile || {}) };
     if (Object.prototype.hasOwnProperty.call(patch.profile, 'displayName')) {
       clean.profile.displayName = cleanText(patch.profile.displayName, 80);
+    }
+  }
+  if (patch.featureFlags && typeof patch.featureFlags === 'object' && !Array.isArray(patch.featureFlags)) {
+    clean.featureFlags = { ...(current.featureFlags || {}) };
+    if (Object.prototype.hasOwnProperty.call(patch.featureFlags, 'agentRuntime')) {
+      clean.featureFlags.agentRuntime = !!patch.featureFlags.agentRuntime;
     }
   }
   if (typeof patch.aiProvider === 'string' && AI_PROVIDERS.includes(patch.aiProvider)) {
@@ -178,42 +198,115 @@ function sanitizeSettingsPatch(patch, current) {
   return clean;
 }
 
-function createRepositories(userDataDir) {
-  const dir = path.join(userDataDir, STORE_DIR);
-  fs.mkdirSync(dir, { recursive: true });
-  const schema = migrateStore(dir);
 
-  const projectsC = new JsonCollection(dir, 'projects');
-  const sessionsC = new JsonCollection(dir, 'sessions');
-  const annotationsC = new JsonCollection(dir, 'annotations');
-  const recordingsC = new JsonCollection(dir, 'recordings');
-  const historyC = new JsonCollection(dir, 'history');
-  const bookmarksC = new JsonCollection(dir, 'bookmarks');
-  const commentsC = new JsonCollection(dir, 'comments');
-  const workspacesC = new JsonCollection(dir, 'workspaces');
-  const analyticsC = new JsonCollection(dir, 'analytics');
-  const auditLogC = new JsonCollection(dir, 'audit-log');
-  const settingsD = new JsonDocument(dir, 'settings', DEFAULT_SETTINGS);
-  const secretsD = new JsonDocument(dir, 'secrets', {});
-  const licenseD = new JsonDocument(dir, 'license', { key: '', activatedAt: null, tier: 'free' });
-  const syncQueueC = new JsonCollection(dir, 'sync-queue');
+// Visibility is a privacy switch (client deliverables). Anything that is not
+// explicitly 'client' — including records written before the field existed —
+// is internal, so an unmarked note can never leak into a client pack.
+function normalizeVisibility(v) {
+  return v === 'client' ? 'client' : 'internal';
+}
+
+function withVisibility(a) {
+  if (!a || a.visibility === normalizeVisibility(a.visibility)) return a;
+  return { ...a, visibility: normalizeVisibility(a.visibility) };
+}
+
+// A 'local' project's `path` is always a directory. Open File used to store the
+// file itself there, which made the hand-off try to create `<file>/.braiwser`.
+// A file path is split into directory (path) + entry (the file itself).
+function normalizeLocation(fsx, { path: p, entry, kind }) {
+  const out = { path: p };
+  if (typeof entry === 'string' && entry) out.entry = entry;
+  if (kind === 'url' || typeof p !== 'string' || !p) return out;
+  try {
+    if (fsx.statSync(p).isFile()) {
+      out.path = path.dirname(p);
+      out.entry = out.entry || p;
+    }
+  } catch (_e) { /* missing path: keep as the user gave it */ }
+  return out;
+}
+
+function createRepositories(userDataDir, opts = {}) {
+  const fsx = opts.fs || fs;
+  const dir = path.join(userDataDir, STORE_DIR);
+  fsx.mkdirSync(dir, { recursive: true });
+  cleanupStaleTmp(dir, undefined, fsx);
+  const schema = migrateStore(dir, { fs: fsx });
+
+  const fo = { fs: fsx };
+  const projectsC = new JsonCollection(dir, 'projects', fo);
+  const sessionsC = new JsonCollection(dir, 'sessions', fo);
+  const annotationsC = new JsonCollection(dir, 'annotations', fo);
+  const recordingsC = new JsonCollection(dir, 'recordings', fo);
+  const historyC = new JsonCollection(dir, 'history', fo);
+  const bookmarksC = new JsonCollection(dir, 'bookmarks', fo);
+  const commentsC = new JsonCollection(dir, 'comments', fo);
+  const workspacesC = new JsonCollection(dir, 'workspaces', fo);
+  const analyticsC = new JsonCollection(dir, 'analytics', fo);
+  const auditLogC = new JsonCollection(dir, 'audit-log', fo);
+  const settingsD = new JsonDocument(dir, 'settings', DEFAULT_SETTINGS, fo);
+  const secretsD = new JsonDocument(dir, 'secrets', {}, fo);
+  const licenseD = new JsonDocument(dir, 'license', { key: '', activatedAt: null, tier: 'free' }, fo);
+  const syncQueueC = new JsonCollection(dir, 'sync-queue', fo);
+  const allStores = [
+    projectsC, sessionsC, annotationsC, recordingsC, historyC, bookmarksC, commentsC,
+    workspacesC, analyticsC, auditLogC, settingsD, secretsD, licenseD, syncQueueC,
+  ];
 
   const now = () => new Date().toISOString();
   const id = () => crypto.randomUUID();
 
+  const buildProject = ({ name, path: p, kind, entry, imported }) => {
+    const loc = normalizeLocation(fsx, { path: p, entry, kind });
+    const doc = { id: id(), name, path: loc.path, kind: kind || 'local', createdAt: now(), lastOpenedAt: now() };
+    if (loc.entry) doc.entry = loc.entry;
+    if (imported) doc.imported = true;
+    return doc;
+  };
+
   const projects = {
     list: () => projectsC.all().sort((a, b) => (b.lastOpenedAt || '').localeCompare(a.lastOpenedAt || '')),
     get: (i) => projectsC.get(i),
-    create: ({ name, path: p, kind }) =>
-      projectsC.insert({ id: id(), name, path: p, kind: kind || 'local', createdAt: now(), lastOpenedAt: now() }),
+    create: (p) => projectsC.insert(buildProject(p || {})),
     touch: (i) => projectsC.update(i, { lastOpenedAt: now() }),
-    update: (i, patch) => projectsC.update(i, patch),
-    remove: (i) => {
-      for (const s of sessionsC.find((s) => s.projectId === i)) annotationsC.removeWhere((a) => a.sessionId === s.id);
-      sessionsC.removeWhere((s) => s.projectId === i);
-      recordingsC.removeWhere((r) => r.projectId === i);
-      return projectsC.remove(i);
+    // `imported` can only be cleared by `relocate` (a fresh local selection).
+    update: (i, patch) => {
+      const { imported: _ignored, ...rest } = patch || {};
+      if (Object.prototype.hasOwnProperty.call(rest, 'path')) {
+        const cur = projectsC.get(i);
+        const loc = normalizeLocation(fsx, { path: rest.path, entry: rest.entry, kind: rest.kind || (cur && cur.kind) });
+        rest.path = loc.path;
+        if (loc.entry) rest.entry = loc.entry;
+      }
+      return projectsC.update(i, rest);
     },
+    // The user picked a local directory for an imported (or moved) project. This
+    // is the ONLY way a project stops being `imported`.
+    relocate: (i, { path: dirPath, entry } = {}) => {
+      let st;
+      try { st = fsx.statSync(dirPath); } catch (_e) { st = null; }
+      if (!st || !st.isDirectory()) throw new Error('Choose an existing folder for this project.');
+      const cur = projectsC.get(i);
+      if (!cur) return null;
+      const next = { ...cur, path: dirPath, kind: 'local', imported: false, relocatedAt: now() };
+      if (typeof entry === 'string' && entry) next.entry = entry; else delete next.entry;
+      projectsC.replaceDoc(i, next);
+      return projectsC.get(i);
+    },
+    remove: (i) => transact([projectsC, sessionsC, annotationsC, recordingsC, commentsC], (tx) => {
+      const sessionIds = new Set(tx(sessionsC).find((s) => s.projectId === i).map((s) => s.id));
+      const gone = new Set();
+      tx(annotationsC).removeWhere((a) => {
+        const hit = sessionIds.has(a.sessionId);
+        if (hit) gone.add(a.id);
+        return hit;
+      });
+      tx(commentsC).removeWhere((c) => sessionIds.has(c.sessionId) || gone.has(c.annotationId));
+      tx(sessionsC).removeWhere((s) => s.projectId === i);
+      tx(recordingsC).removeWhere((r) => r.projectId === i);
+      return tx(projectsC).remove(i);
+    }),
   };
 
   const sessions = {
@@ -226,87 +319,165 @@ function createRepositories(userDataDir) {
     create: ({ projectId, name, url, title }) =>
       sessionsC.insert({ id: id(), projectId: projectId || null, name: name || 'Review', url: url || '', title: title || '', createdAt: now(), updatedAt: now() }),
     update: (i, patch) => sessionsC.update(i, { ...patch, updatedAt: now() }),
-    remove: (i) => { annotationsC.removeWhere((a) => a.sessionId === i); return sessionsC.remove(i); },
+    remove: (i) => transact([sessionsC, annotationsC, commentsC], (tx) => {
+      const gone = new Set();
+      tx(annotationsC).removeWhere((a) => {
+        const hit = a.sessionId === i;
+        if (hit) gone.add(a.id);
+        return hit;
+      });
+      tx(commentsC).removeWhere((c) => c.sessionId === i || gone.has(c.annotationId));
+      return tx(sessionsC).remove(i);
+    }),
+  };
+
+  const buildAnnotation = (a, defaultOrder) => {
+    const doc = {
+      id: a.id || id(),
+      sessionId: a.sessionId,
+      kind: a.kind || 'element',
+      action: a.action || 'comment',
+      note: a.note || '',
+      target: a.target || {},
+      url: a.url || '',
+      title: a.title || '',
+      status: a.status || 'open',
+      priority: a.priority || 'normal',
+      visibility: normalizeVisibility(a.visibility),
+      sortOrder: Number.isFinite(a.sortOrder) ? a.sortOrder : defaultOrder,
+      createdAt: a.ts || now(),
+      updatedAt: now(),
+    };
+    if (a.edit) doc.edit = a.edit;
+    if (a.viewport && typeof a.viewport === 'object') doc.viewport = a.viewport;
+    return doc;
   };
 
   const annotations = {
-    bySession: (sessionId) => annotationsC.find((a) => a.sessionId === sessionId).sort((a, b) => {
+    bySession: (sessionId) => annotationsC.find((a) => a.sessionId === sessionId).map(withVisibility).sort((a, b) => {
       const ao = Number.isFinite(a.sortOrder) ? a.sortOrder : Number.MAX_SAFE_INTEGER;
       const bo = Number.isFinite(b.sortOrder) ? b.sortOrder : Number.MAX_SAFE_INTEGER;
       if (ao !== bo) return ao - bo;
       return (a.createdAt || '').localeCompare(b.createdAt || '');
     }),
-    bySessionUrl: (sessionId, url) => annotationsC.find((a) => a.sessionId === sessionId && a.url === url),
+    bySessionUrl: (sessionId, url) => annotationsC.find((a) => a.sessionId === sessionId && a.url === url).map(withVisibility),
     countsBySession: () => {
       const counts = {};
       for (const a of annotationsC.all()) counts[a.sessionId] = (counts[a.sessionId] || 0) + 1;
       return counts;
     },
-    get: (i) => annotationsC.get(i),
-    create: (a) => {
-      const existing = annotationsC.find((x) => x.sessionId === a.sessionId);
-      const doc = {
-        id: a.id || id(),
-        sessionId: a.sessionId,
-        kind: a.kind || 'element',
-        action: a.action || 'comment',
-        note: a.note || '',
-        target: a.target || {},
-        url: a.url || '',
-        title: a.title || '',
-        status: a.status || 'open',
-        priority: a.priority || 'normal',
-        visibility: a.visibility === 'client' ? 'client' : 'internal',
-        sortOrder: Number.isFinite(a.sortOrder) ? a.sortOrder : existing.length,
-        createdAt: a.ts || now(),
-        updatedAt: now(),
-      };
-      if (a.edit) doc.edit = a.edit;
-      if (a.viewport && typeof a.viewport === 'object') doc.viewport = a.viewport;
-      const saved = annotationsC.insert(doc);
-      if (a.sessionId) sessionsC.update(a.sessionId, { updatedAt: now() });
-      return saved;
+    get: (i) => withVisibility(annotationsC.get(i)),
+    // Annotation + the session's updatedAt bump commit together or not at all.
+    create: (a) => transact([annotationsC, sessionsC], (tx) => {
+      const existing = tx(annotationsC).find((x) => x.sessionId === a.sessionId);
+      const doc = buildAnnotation(a, existing.length);
+      tx(annotationsC).insert(doc);
+      if (a.sessionId) tx(sessionsC).update(a.sessionId, { updatedAt: now() });
+      return doc;
+    }),
+    update: (i, patch) => {
+      const p = { ...patch, updatedAt: now() };
+      if (Object.prototype.hasOwnProperty.call(p, 'visibility')) p.visibility = normalizeVisibility(p.visibility);
+      return annotationsC.update(i, p);
     },
-    update: (i, patch) => annotationsC.update(i, { ...patch, updatedAt: now() }),
     remove: (i) => annotationsC.remove(i),
+    // One write for the whole list, however long it is.
     reorder: (sessionId, orderedIds) => {
       if (!Array.isArray(orderedIds)) return annotations.bySession(sessionId);
+      const mine = new Set(annotationsC.find((a) => a.sessionId === sessionId).map((a) => a.id));
+      const stamp = now();
+      const patches = [];
       orderedIds.forEach((aid, index) => {
-        const row = annotationsC.get(aid);
-        if (row && row.sessionId === sessionId) annotationsC.update(aid, { sortOrder: index, updatedAt: now() });
+        if (mine.has(aid)) patches.push({ id: aid, patch: { sortOrder: index, updatedAt: stamp } });
       });
+      annotationsC.updateMany(patches);
       return annotations.bySession(sessionId);
     },
   };
 
   const recordings = {
+    // Second redaction boundary (CE-01): nothing leaves the repository with a
+    // plaintext secret in it, whatever an older build or an import wrote.
     list: (projectId) => {
       const all = recordingsC.all();
       const f = projectId ? all.filter((r) => r.projectId === projectId) : all;
-      return f.sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+      return f.map(redactRecording).sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
     },
-    get: (i) => recordingsC.get(i),
+    get: (i) => {
+      const r = recordingsC.get(i);
+      return r ? redactRecording(r) : r;
+    },
     create: ({ projectId, name, startUrl, steps }) =>
-      recordingsC.insert({ id: id(), projectId: projectId || null, name: name || 'Journey', startUrl: startUrl || '', steps: steps || [], createdAt: now(), updatedAt: now() }),
-    update: (i, patch) => recordingsC.update(i, { ...patch, updatedAt: now() }),
+      recordingsC.insert({ id: id(), projectId: projectId || null, name: name || 'Journey', startUrl: startUrl || '', steps: redactSteps(steps || []), createdAt: now(), updatedAt: now() }),
+    update: (i, patch) => {
+      const p = { ...patch, updatedAt: now() };
+      if (Object.prototype.hasOwnProperty.call(p, 'steps')) p.steps = redactSteps(p.steps);
+      return redactRecording(recordingsC.update(i, p));
+    },
     remove: (i) => recordingsC.remove(i),
   };
 
+  // Bulk import: a whole project tree lands in ONE write per file and either
+  // fully commits or fully rolls back (bundle import used to do hundreds of
+  // synchronous rewrites and could leave half a project behind).
+  //   project:     { name, path, kind, imported? }   (imported defaults to true)
+  //   sessions:    [{ sourceId, name, url, title }]
+  //   annotations: [{ sessionSourceId | sessionId, ...annotation fields }]
+  //   recordings:  [{ name, startUrl, steps }]
+  const bulk = {
+    importProject: ({ project, sessions: sess = [], annotations: anns = [], recordings: recs = [] }) =>
+      transact([projectsC, sessionsC, annotationsC, recordingsC], (tx) => {
+        const p = buildProject({ ...project, imported: !project || project.imported !== false });
+        tx(projectsC).insert(p);
+        const sessionIdMap = {};
+        const createdSessions = [];
+        for (const s of sess) {
+          const doc = { id: id(), projectId: p.id, name: s.name || 'Review', url: s.url || '', title: s.title || '', createdAt: now(), updatedAt: now() };
+          if (s.sourceId != null) sessionIdMap[s.sourceId] = doc.id;
+          createdSessions.push(doc);
+        }
+        tx(sessionsC).insertMany(createdSessions);
+        const orderCount = {};
+        const createdAnns = [];
+        for (const a of anns) {
+          const sid = sessionIdMap[a.sessionSourceId != null ? a.sessionSourceId : a.sessionId];
+          if (!sid) continue; // orphaned annotation — drop rather than guess
+          const n = orderCount[sid] || 0;
+          orderCount[sid] = n + 1;
+          createdAnns.push(buildAnnotation({ ...a, id: undefined, sessionId: sid }, n));
+        }
+        tx(annotationsC).insertMany(createdAnns);
+        const createdRecs = recs.map((r) => ({
+          id: id(), projectId: p.id, name: r.name || 'Journey', startUrl: r.startUrl || '',
+          steps: redactSteps(Array.isArray(r.steps) ? r.steps : []), createdAt: now(), updatedAt: now(),
+        }));
+        tx(recordingsC).insertMany(createdRecs);
+        return {
+          project: p,
+          sessionIdMap,
+          counts: { sessions: createdSessions.length, annotations: createdAnns.length, recordings: createdRecs.length },
+        };
+      }),
+  };
+
   const HISTORY_MAX = 1000;
+  const byVisited = (a, b) => (b.visitedAt || '').localeCompare(a.visitedAt || '');
   const history = {
-    list: (limit) => historyC.all().sort((a, b) => (b.visitedAt || '').localeCompare(a.visitedAt || '')).slice(0, limit || 100),
+    list: (limit) => historyC.all().sort(byVisited).slice(0, limit || 100),
     record: ({ url, title }) => {
       if (!url) return null;
-      const recent = historyC.all().sort((a, b) => (b.visitedAt || '').localeCompare(a.visitedAt || ''))[0];
-      if (recent && recent.url === url) return historyC.update(recent.id, { visitedAt: now(), title: title || recent.title });
-      const inserted = historyC.insert({ id: id(), url, title: title || '', visitedAt: now() });
-      // Bound growth: keep only the newest HISTORY_MAX entries.
-      const all = historyC.all();
-      if (all.length > HISTORY_MAX) {
-        const keep = new Set(all.sort((a, b) => (b.visitedAt || '').localeCompare(a.visitedAt || '')).slice(0, HISTORY_MAX).map((x) => x.id));
-        historyC.removeWhere((x) => !keep.has(x.id));
-      }
-      return inserted;
+      return transact([historyC], (tx) => {
+        const h = tx(historyC);
+        const recent = h.all().sort(byVisited)[0];
+        if (recent && recent.url === url) return h.update(recent.id, { visitedAt: now(), title: title || recent.title });
+        const inserted = h.insert({ id: id(), url, title: title || '', visitedAt: now() });
+        // Bound growth: keep only the newest HISTORY_MAX entries (same write).
+        if (h.list.length > HISTORY_MAX) {
+          const keep = new Set(h.all().sort(byVisited).slice(0, HISTORY_MAX).map((x) => x.id));
+          h.removeWhere((x) => !keep.has(x.id));
+        }
+        return inserted;
+      });
     },
     clear: () => { historyC.removeWhere(() => true); return true; },
   };
@@ -316,10 +487,12 @@ function createRepositories(userDataDir) {
     isBookmarked: (url) => bookmarksC.find((b) => b.url === url).length > 0,
     toggle: ({ url, title }) => {
       if (!url) return { bookmarked: false };
-      const existing = bookmarksC.find((b) => b.url === url);
-      if (existing.length) { existing.forEach((b) => bookmarksC.remove(b.id)); return { bookmarked: false }; }
-      bookmarksC.insert({ id: id(), url, title: title || '', createdAt: now() });
-      return { bookmarked: true };
+      return transact([bookmarksC], (tx) => {
+        const b = tx(bookmarksC);
+        if (b.removeWhere((x) => x.url === url)) return { bookmarked: false };
+        b.insert({ id: id(), url, title: title || '', createdAt: now() });
+        return { bookmarked: true };
+      });
     },
     remove: (i) => bookmarksC.remove(i),
   };
@@ -390,6 +563,61 @@ function createRepositories(userDataDir) {
     clear: () => { syncQueueC.removeWhere(() => true); return true; },
   };
 
+  // --- one-time / idempotent upgrades of data written by older builds --------
+  // Each step is skipped (and reported) when its file is in a recovery state;
+  // none of them can delete anything the user created.
+  const maintenance = { projectsNormalized: 0, annotationsNormalized: 0, recordingsScrubbed: 0, errors: [] };
+  const attempt = (label, fn) => {
+    try { fn(); } catch (err) { maintenance.errors.push({ step: label, message: (err && err.message) || String(err) }); }
+  };
+  attempt('projects', () => {
+    const patches = [];
+    for (const p of projectsC.all()) {
+      if (p.kind === 'url' || typeof p.path !== 'string' || !p.path) continue;
+      const loc = normalizeLocation(fsx, p);
+      if (loc.path !== p.path || (loc.entry && loc.entry !== p.entry)) patches.push({ id: p.id, patch: { path: loc.path, entry: loc.entry } });
+    }
+    if (patches.length) { projectsC.updateMany(patches); maintenance.projectsNormalized = patches.length; }
+  });
+  attempt('annotations', () => {
+    const patches = annotationsC.all()
+      .filter((a) => a.visibility !== normalizeVisibility(a.visibility))
+      .map((a) => ({
+        id: a.id,
+        patch: a.visibility == null || a.visibility === ''
+          ? { visibility: 'internal' }
+          : { visibility: 'internal', legacyVisibility: String(a.visibility).slice(0, 40) },
+      }));
+    if (patches.length) { annotationsC.updateMany(patches); maintenance.annotationsNormalized = patches.length; }
+  });
+  attempt('recordings', () => {
+    const all = recordingsC.all();
+    const scrubbed = all.map(redactRecording);
+    const n = scrubbed.filter((r, i) => r !== all[i]).length;
+    if (!n) return;
+    // No backup: the previous generation is exactly the file with secrets in it.
+    recordingsC.replaceAll(scrubbed, { backup: false });
+    maintenance.recordingsScrubbed = n;
+  });
+
+  // Storage health: which files (if any) are read-only because they could not be
+  // read or are damaged. Plain data, safe to send over IPC.
+  function health() {
+    const problems = allStores.map((s) => s.status()).filter((s) => !s.ok);
+    return {
+      ok: problems.length === 0 && maintenance.errors.length === 0,
+      problems,
+      maintenance: { ...maintenance, errors: maintenance.errors.slice() },
+      schema,
+    };
+  }
+
+  function recover(name, mode) {
+    const store = allStores.find((s) => s.name === name);
+    if (!store) throw new Error(`Unknown store file: ${name}`);
+    return store.recover(mode);
+  }
+
   return {
     dir,
     schema,
@@ -397,6 +625,7 @@ function createRepositories(userDataDir) {
     sessions,
     annotations,
     recordings,
+    bulk,
     history,
     bookmarks,
     settings,
@@ -407,7 +636,10 @@ function createRepositories(userDataDir) {
     analytics,
     auditLog,
     syncQueue,
+    health,
+    recover,
+    transact,
   };
 }
 
-module.exports = { createRepositories };
+module.exports = { createRepositories, normalizeVisibility };
