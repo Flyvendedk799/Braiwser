@@ -11,6 +11,9 @@ import { pathToFileURL } from 'node:url';
 import bridge from './bridge.js';
 import registryModule from './skill-registry.js';
 import { createOperations } from './operations.mjs';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
 
 const USAGE = `braiwser-agent <command> [flags]   (JSON on stdout)
 
@@ -22,9 +25,13 @@ const USAGE = `braiwser-agent <command> [flags]   (JSON on stdout)
   run       --session ID --page ID --request-key KEY --skill ID --skill-version X.Y.Z [--digest sha256:..] [--inputs JSON] [--max-duration-ms N]
   status    --run ID [--after N] [--max-events N]
   cancel    --run ID
-  handoff   --session ID --page ID --reason TEXT [--run ID]
+  handoff   --session ID --page ID --reason TEXT [--run ID] [--request-key KEY] [--reason-code needsHuman|userRequested|approval|privateInput|other]
+  pause     --run ID --request-key KEY --epoch N [--reason TEXT]
+  handoff-status --handoff ID [--after N] [--max-events N]
+  resume    --handoff ID --request-key KEY --epoch N [--run ID]
   close     --session ID
   skills    (list the pinned skill catalog; no broker needed)
+  doctor    (protocol, deployment and viewer readiness; no broker needed)
 
 Connection: BRAIWSER_BRIDGE_INFO=<connection file written by Braiwser>.`;
 
@@ -39,7 +46,8 @@ const FLAGS = {
   fields: { type: 'string' }, 'request-key': { type: 'string' }, skill: { type: 'string' },
   'skill-version': { type: 'string' }, digest: { type: 'string' }, inputs: { type: 'string' },
   'max-duration-ms': { type: 'string' }, after: { type: 'string' }, 'max-events': { type: 'string' },
-  reason: { type: 'string' }, help: { type: 'boolean' },
+  reason: { type: 'string' }, handoff: { type: 'string' }, 'reason-code': { type: 'string' },
+  help: { type: 'boolean' },
 };
 
 class Usage extends Error {}
@@ -71,7 +79,11 @@ const COMMANDS = {
     inputs: json(f, 'inputs') || {} })],
   status: (f) => ['browser_run_status', drop({ runId: f.run, afterSequence: num(f, 'after'), maxEvents: num(f, 'max-events') })],
   cancel: (f) => ['browser_run_cancel', drop({ runId: f.run })],
-  handoff: (f) => ['browser_handoff', drop({ sessionId: f.session, pageId: f.page, runId: f.run, reason: f.reason })],
+  handoff: (f) => ['browser_handoff', drop({ sessionId: f.session, pageId: f.page, runId: f.run, reason: f.reason,
+    requestKey: f['request-key'], reasonCode: f['reason-code'] })],
+  pause: (f) => ['browser_run_pause', drop({ runId: f.run, requestKey: f['request-key'], expectedControlEpoch: num(f, 'epoch'), reason: f.reason })],
+  'handoff-status': (f) => ['browser_handoff_status', drop({ handoffId: f.handoff, afterSequence: num(f, 'after'), maxEvents: num(f, 'max-events') })],
+  resume: (f) => ['browser_run_resume', drop({ runId: f.run, handoffId: f.handoff, requestKey: f['request-key'], expectedControlEpoch: num(f, 'epoch') })],
 };
 
 // io: { env, stdout(text), stderr(text), connect() -> facade }
@@ -97,6 +109,11 @@ export async function main(argv, io = {}) {
 
   if (command === 'skills') {
     out(`${JSON.stringify({ ok: true, value: { skills: registryModule.catalog() }, error: null })}\n`);
+    return 0;
+  }
+  if (command === 'doctor') {
+    const { doctorReport } = require('./doctor.js');
+    out(`${JSON.stringify({ ok: true, value: doctorReport({ env }), error: null })}\n`);
     return 0;
   }
 

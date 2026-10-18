@@ -46,6 +46,7 @@ const CHANNELS = Object.freeze({
   connectionRevoke: 'browser:connection-revoke',
   resourceRead: 'browser:resource-read',
   observe: 'browser:observe',
+  taskStart: 'browser:task-start',
 });
 const PUSH = Object.freeze({
   runEvent: 'browser:run-event',
@@ -241,6 +242,20 @@ function createBrowserIpc(deps = {}) {
       sessionId: v.id(q.sessionId, 'sessionId'),
       pageId: v.id(q.pageId, 'pageId'),
       maxNodes: q.maxNodes === undefined ? 100 : v.int(q.maxNodes, 'maxNodes', 1, 200),
+    });
+  };
+
+  H[CHANNELS.taskStart] = async (p) => {
+    const q = v.only(v.obj(p), ['goal', 'sessionId', 'pageId', 'requestKey']);
+    const goal = v.text(q.goal, 'goal', 4000).trim();
+    if (!goal) fail('goal is required');
+    const b = ui();
+    if (typeof b.startTask !== 'function') throw unsupported('The in-app agent runner is not configured.');
+    return b.startTask({
+      goal,
+      sessionId: v.id(q.sessionId, 'sessionId'),
+      pageId: v.id(q.pageId, 'pageId'),
+      requestKey: v.id(q.requestKey, 'requestKey'),
     });
   };
 

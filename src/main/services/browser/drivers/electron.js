@@ -8,11 +8,11 @@ const IDLE_RELEASE_MS = 750; // how long an idle page keeps its debugger lease
 // conservative; anything marked "needs native confirmation" below must be proven
 // by an Electron-native test before the flag is raised.
 //
-// Ownership model (audit "Embedded browser migration", Stage A):
-//   * The renderer keeps creating <webview> tabs; the MAIN process registers each
-//     attached guest (registerGuest from did-attach-webview) and hands out opaque
-//     pageIds. No raw webContents id, no CDP method and no arbitrary lookup is ever
-//     exposed to a caller.
+// Ownership model (audit "Embedded browser migration"):
+//   * Shell tabs are still <webview> elements. The main process registers each
+//     attached guest and hands out opaque pageIds.
+//   * A new embedded page, when createGuest is installed, is a WebContentsView
+//     owned by the main process. Without that factory, newPage stays unsupported.
 //   * One shared debugger broker (../debugger-broker.js) owns webContents.debugger.
 //     This driver only holds ref-counted LEASES: closing a lease never detaches an
 //     attachment another feature (screenshot capture) uses, and a lease that is

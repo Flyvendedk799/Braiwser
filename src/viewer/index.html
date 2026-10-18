@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+  <title>Braiwser viewer</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: #101114; color: #f4f4f5; }
+    header, main, form { padding: 16px; }
+    header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; border-bottom: 1px solid #2a2d34; }
+    button { min-height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid #3a3f4a; background: #1c1f26; color: inherit; }
+    button:disabled { opacity: 0.45; }
+    button:focus-visible, input:focus-visible { outline: 2px solid #8ab4ff; outline-offset: 2px; }
+    #status { font-weight: 650; }
+    #stage { position: relative; background: #000; min-height: 240px; }
+    #frame { max-width: 100%; display: block; }
+    #fresh { font-variant-numeric: tabular-nums; }
+    .warn { color: #f5c16c; }
+    label { display: block; margin: 8px 0; }
+    input { min-height: 36px; padding: 4px 8px; width: min(100%, 360px); }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>Braiwser</strong>
+    <span id="identity">No session</span>
+    <span id="status" role="status">Loading</span>
+    <span id="fresh"></span>
+  </header>
+  <main>
+    <form id="redeem" hidden>
+      <p>This link does not grant control. Enter the one-time code from the trusted Braiwser channel.</p>
+      <label>One-time code <input id="code" name="code" autocomplete="one-time-code" required /></label>
+      <button type="submit">Continue</button>
+      <p id="redeem-error" role="alert"></p>
+    </form>
+    <div id="controls" hidden>
+      <button type="button" id="take">Take control</button>
+      <button type="button" id="pause">Pause</button>
+      <button type="button" id="back">Return to agent</button>
+      <button type="button" id="stop">Stop task</button>
+      <button type="button" id="priv">Private input</button>
+      <p id="note"></p>
+    </div>
+    <div id="stage" tabindex="0" aria-label="Browser view">
+      <img id="frame" alt="Latest browser frame" />
+    </div>
+  </main>
+  <script src="/viewer.js"></script>
+</body>
+</html>

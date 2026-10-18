@@ -156,6 +156,35 @@ export const handoffSchema = z.strictObject({
   documentEpoch: nonneg,
   method: z.enum(['native', 'remote-view', 'checkpoint-relaunch', 'unsupported']),
   userAction: z.string().max(400),
+  handoffId: id.optional(),
+  state: z.enum(['pausing', 'paused', 'human', 'quarantined', 'closed', 'readyToResume']).optional(),
+  controlOwner: z.string().max(40).optional(),
+  controlEpoch: nonneg.optional(),
+  expiresAt: z.iso.datetime({ offset: true }).optional(),
+  viewerUrl: z.string().max(400).nullable().optional(),
+  nextSequence: nonneg.optional(),
+  resumeEligible: z.boolean().optional(),
+  blocker: z.string().max(80).nullable().optional(),
+  events: z.array(z.strictObject({
+    sequence: z.number().int(), kind: z.string().max(80), summary: z.string().max(300),
+  })).max(100).optional(),
+});
+
+export const pauseResultSchema = z.strictObject({
+  runId: id,
+  sessionId: id,
+  state: z.enum(['pausing', 'paused', 'quarantined']),
+  controlEpoch: nonneg,
+  affectedRunIds: z.array(id).max(50),
+});
+
+export const resumeResultSchema = z.strictObject({
+  handoffId: id,
+  runId: id.nullable(),
+  controlOwner: z.literal('agent'),
+  controlEpoch: nonneg,
+  requireFreshObservation: z.literal(true),
+  resumed: z.literal(true),
 });
 
 // ---- tool inputs -----------------------------------------------------------
@@ -214,7 +243,20 @@ export const inputs = {
     runId: id, afterSequence: nonneg.default(0), maxEvents: z.number().int().min(1).max(100).default(30),
   }),
   browser_run_cancel: z.strictObject({ runId: id }),
-  browser_handoff: z.strictObject({ ...page, runId: id.optional(), reason: z.string().min(1).max(300) }),
+  browser_handoff: z.strictObject({
+    ...page, runId: id.optional(), reason: z.string().min(1).max(300),
+    requestKey: id.optional(),
+    reasonCode: z.enum(['needsHuman', 'userRequested', 'approval', 'privateInput', 'other']).optional(),
+  }),
+  browser_run_pause: z.strictObject({
+    runId: id, requestKey: id, expectedControlEpoch: nonneg, reason: z.string().max(300).optional(),
+  }),
+  browser_handoff_status: z.strictObject({
+    handoffId: id, afterSequence: nonneg.default(0), maxEvents: z.number().int().min(1).max(100).default(30),
+  }),
+  browser_run_resume: z.strictObject({
+    runId: id.optional(), handoffId: id, expectedControlEpoch: nonneg, requestKey: id,
+  }),
 };
 
 // ---- run consistency -------------------------------------------------------

@@ -22,6 +22,7 @@ const { createLedger } = require('./ledger');
 const { createEvidenceStore } = require('./evidence');
 const { createRunStore, gradeRun, stateFor, runToDTO, runPlanLoop, decideTerminal, waitForEvent } = require('./run');
 const { createHandoff } = require('./human-handoff');
+const { createHandoffCoordinator } = require('./handoff-coordinator');
 const { BrowserSession } = require('./session');
 
 const DEFAULT_LIMITS = Object.freeze({
@@ -50,7 +51,7 @@ function createBroker(options = {}) {
   const emit = (name, payload) => { try { events.emit(name, payload); } catch { /* listener errors never break the broker */ } };
 
   // ---- disabled broker: every call is UNAVAILABLE, nothing touches disk -------------
-  const methodNames = ['openSession', 'closeSession', 'observe', 'act', 'startRun', 'getRun', 'cancelRun', 'retryRun', 'handoff', 'resume', 'approve', 'listApprovals', 'listRuns', 'getManifest', 'readResource'];
+  const methodNames = ['openSession', 'closeSession', 'observe', 'act', 'startRun', 'getRun', 'cancelRun', 'retryRun', 'handoff', 'resume', 'approve', 'listApprovals', 'listRuns', 'getManifest', 'readResource', 'requestHandoff', 'pauseRun', 'handoffStatus', 'resumeRun', 'startTask'];
   function bindFacade(broker, principal) {
     const out = {};
     for (const m of methodNames) out[m] = (input, extra) => broker[m](input, { ...(extra || {}), principal });
@@ -71,6 +72,11 @@ function createBroker(options = {}) {
   const evidence = createEvidenceStore({ dir: path.join(base, 'evidence'), fs, clock, ...(options.evidence || {}) });
   const runStore = createRunStore({ dir: path.join(base, 'runs'), fs, clock, ledgerLookup: (s, o) => ledger.get(s, o) });
   const handoffs = createHandoff({ policy, emit, clock, drainTimeoutMs: limits.drainTimeoutMs });
+  let viewerConfig = options.viewer && options.viewer.enabled ? { ...options.viewer } : null;
+  const handoffCoord = createHandoffCoordinator({
+    clock, dataDir, ttlMs: limits.humanWaitMs,
+    getViewer: () => viewerConfig,
+  });
 
   const sessions = new Map();
   const profilesInUse = new Map();
@@ -290,6 +296,7 @@ function createBroker(options = {}) {
   };
 
   async function observeCore(session, rec, { maxNodes = 200, focus, cursor, noSpend = false }, principal, runId) {
+    if (session.privateInput) throw dtoError('DENIED', 'PRIVATE_INPUT_ACTIVE: observations are suspended while private input is on', { detail: 'PRIVATE_INPUT_ACTIVE' });
     policy.assertActive(session.grant, principal);
     policy.assertClass(session.grant, 'observe');
     if (!noSpend) policy.spend(session.grant, 'observations');
@@ -514,6 +521,7 @@ function createBroker(options = {}) {
       evidence.markClosed(session.adhocRunId);
       sessions.delete(session.sessionId);
       for (const [pf, sid] of profilesInUse) if (sid === session.sessionId) profilesInUse.delete(pf);
+      try { handoffCoord.onSessionClosed(session.sessionId); } catch { /* ledger best effort */ }
       emit('session-closed', { sessionId: session.sessionId, ownerId: session.ownerId });
       return { closed: true };
     });
@@ -532,6 +540,94 @@ function createBroker(options = {}) {
       if (runId) { const r = ownedRun(runId, principal); if (r.sessionId !== session.sessionId) throw dtoError('DENIED', 'run does not belong to this session', { detail: 'RUN_SESSION' }); }
       return handoffs.handoff(session, { pageId: base.pageId, runId, reason: input.reason }, principal);
     });
+  }
+  async function requestHandoff(input, ctx) {
+    return guard(async () => {
+      const principal = principalOf(ctx);
+      if (!input || typeof input !== 'object') throw C.invalid('request must be an object');
+      const base = C.validateSessionPage({ sessionId: input.sessionId, pageId: input.pageId });
+      const session = ownedSession(base.sessionId, principal, { allowUi: true });
+      const runId = input.runId === undefined || input.runId === null ? null : (C.isClientId(input.runId) ? input.runId : (() => { throw C.invalid('runId'); })());
+      if (runId) { const r = ownedRun(runId, principal); if (r.sessionId !== session.sessionId) throw dtoError('DENIED', 'run does not belong to this session', { detail: 'RUN_SESSION' }); }
+      const requestKey = input.requestKey === undefined || input.requestKey === null ? null : (C.isClientId(input.requestKey) ? input.requestKey : (() => { throw C.invalid('requestKey'); })());
+      const out = await handoffCoord.withLock(session.sessionId, () => handoffCoord.requestHandoff(session, {
+        pageId: base.pageId, runId, requestKey, reasonCode: input.reasonCode || 'needsHuman', drainTimeoutMs: limits.drainTimeoutMs,
+      }, principal));
+      policy.revokeApprovals({ sessionId: session.sessionId });
+      emit('owner-changed', { sessionId: session.sessionId, owner: 'paused', handoffId: out.record.handoffId, fence: out.record.controlEpoch });
+      // The invitation code stays out of the tool result. Callers that are the
+      // trusted UI may read it once from the return value's side channel.
+      const value = out.record;
+      if (principal.kind === 'ui' && out.invitationCode) value.invitationCode = out.invitationCode;
+      return value;
+    });
+  }
+  async function pauseRun(input, ctx) {
+    return guard(async () => {
+      const principal = principalOf(ctx);
+      if (!input || !C.isClientId(input.runId)) throw C.invalid('runId');
+      const run = ownedRun(input.runId, principal);
+      const session = ownedSession(run.sessionId, principal, { allowUi: true });
+      if (input.expectedControlEpoch !== undefined && input.expectedControlEpoch !== session.lease.fence) {
+        throw C.brokerError('DENIED', 'STALE_CONTROL_EPOCH: control epoch does not match', { detail: 'STALE_CONTROL_EPOCH' });
+      }
+      const requestKey = input.requestKey === undefined ? null : (C.isClientId(input.requestKey) ? input.requestKey : (() => { throw C.invalid('requestKey'); })());
+      const digest = C.sha256({ runId: run.runId, requestKey, epoch: input.expectedControlEpoch || null });
+      const result = await handoffCoord.withLock(session.sessionId, async () => {
+        const paused = await handoffCoord.pause(session, { acknowledgeUncertain: principal.kind === 'ui', drainTimeoutMs: limits.drainTimeoutMs });
+        return paused;
+      });
+      session.invalidateAll();
+      policy.revokeApprovals({ sessionId: session.sessionId });
+      emit('owner-changed', { sessionId: session.sessionId, owner: result.owner, fence: result.fence, runId: run.runId });
+      return {
+        runId: run.runId, sessionId: session.sessionId, state: result.owner === 'quarantined' ? 'quarantined' : 'paused',
+        controlEpoch: result.fence, affectedRunIds: [...session.runs], requestKey, digest,
+      };
+    });
+  }
+  async function handoffStatus(input, ctx) {
+    return guard(async () => {
+      const principal = principalOf(ctx);
+      if (!input || !C.isClientId(input.handoffId)) throw C.invalid('handoffId');
+      const rec = handoffCoord.get(input.handoffId);
+      if (!rec) throw C.brokerError('DENIED', 'unknown or unauthorized handoff', { detail: 'UNKNOWN_HANDOFF' });
+      ownedSession(rec.sessionId, principal, { allowUi: true });
+      const afterSequence = input.afterSequence === undefined ? 0 : input.afterSequence;
+      const maxEvents = input.maxEvents === undefined ? 30 : input.maxEvents;
+      return handoffCoord.status(input.handoffId, { afterSequence, maxEvents });
+    });
+  }
+  async function resumeRun(input, ctx) {
+    return guard(async () => {
+      const principal = principalOf(ctx);
+      if (!input || typeof input !== 'object') throw C.invalid('request must be an object');
+      if (!C.isClientId(input.handoffId)) throw C.invalid('handoffId');
+      if (!C.isClientId(input.requestKey)) throw C.invalid('requestKey');
+      const rec = handoffCoord.get(input.handoffId);
+      if (!rec) throw C.brokerError('DENIED', 'RESUME_NOT_AUTHORIZED: unknown handoff', { detail: 'RESUME_NOT_AUTHORIZED' });
+      const session = ownedSession(rec.sessionId, principal, { allowUi: true });
+      const runId = input.runId === undefined || input.runId === null ? rec.runId : (C.isClientId(input.runId) ? input.runId : (() => { throw C.invalid('runId'); })());
+      if (runId) { const r = ownedRun(runId, principal); if (r.sessionId !== session.sessionId) throw dtoError('DENIED', 'run does not belong to this session', { detail: 'RUN_SESSION' }); }
+      const out = await handoffCoord.withLock(session.sessionId, () => handoffCoord.consumeResume(session, {
+        handoffId: input.handoffId, runId, expectedControlEpoch: input.expectedControlEpoch, requestKey: input.requestKey, principal,
+      }));
+      policy.revokeApprovals({ sessionId: session.sessionId });
+      emit('owner-changed', { sessionId: session.sessionId, owner: 'agent', fence: out.controlEpoch, requireFreshObservation: true, handoffId: input.handoffId });
+      return out;
+    });
+  }
+  async function startTask(input, ctx) {
+    return guard(async () => {
+      const principal = principalOf(ctx);
+      if (!options.taskRunner || typeof options.taskRunner.start !== 'function') {
+        throw dtoError('UNAVAILABLE', 'in-app agent runner is not configured', { detail: 'NO_TASK_RUNNER' });
+      }
+      return options.taskRunner.start(input, principal, ctx && ctx.signal);
+    });
+  }
+  function attachViewer(config) {
+    viewerConfig = config && config.enabled ? { enabled: true, baseUrl: config.baseUrl, deployment: config.deployment || 'local' } : null;
   }
   async function resume(input, ctx) {
     return guard(async () => {
@@ -932,10 +1028,11 @@ function createBroker(options = {}) {
   const broker = {
     enabled: true, events, limits,
     openSession, closeSession, observe, act, startRun, getRun, cancelRun, retryRun, handoff, resume, approve, listApprovals, listRuns, getManifest, readResource,
+    requestHandoff, pauseRun, handoffStatus, resumeRun, startTask, attachViewer,
     forPrincipal: (principal) => bindFacade(broker, C.validatePrincipal(principal)),
     close, stats: () => ({ enabled: true, sessions: sessions.size, runs: runStore.list().length, ledger: ledger.stats(), evidence: evidence.usage() }),
     // internals exposed for tests / the app shell only
-    _internals: { ledger, evidence, runStore, policy, sessions, runtimes },
+    _internals: { ledger, evidence, runStore, policy, sessions, runtimes, handoffs: handoffCoord },
   };
   return broker;
 }

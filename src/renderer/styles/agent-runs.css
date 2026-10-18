@@ -28,7 +28,12 @@
 .agent-approval .agent-banner, .agent-conn .agent-banner { margin: 0 0 10px; }
 
 /* ---- list ---- */
-.agent-runs-panel { padding-bottom: 12px; }
+.agent-task { padding: 10px 12px 4px; display: flex; flex-direction: column; gap: 8px; }
+.agent-task h3 { margin: 0; font-size: 13px; }
+.agent-task-goal { width: 100%; resize: vertical; min-height: 64px; }
+.agent-task-scope, .agent-task-status { margin: 0; color: var(--dim); font-size: 12px; }
+.agent-task-starters, .agent-task-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+
 .agent-list-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px 6px; flex-wrap: wrap; }
 .agent-filters { display: flex; gap: 4px; flex-wrap: wrap; flex: 1 1 auto; }
 .agent-chip {

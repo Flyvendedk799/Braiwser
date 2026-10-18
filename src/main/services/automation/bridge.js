@@ -20,8 +20,8 @@ const path = require('node:path');
 const PROTOCOL = 1;
 const MAX_FRAME = 2 * 1024 * 1024;
 const METHODS = Object.freeze(['openSession', 'closeSession', 'observe', 'act', 'startRun', 'getRun',
-  'cancelRun', 'handoff', 'listRuns', 'getManifest', 'readResource']);
-const READ_ONLY = new Set(['observe', 'getRun', 'listRuns', 'getManifest', 'readResource']);
+  'cancelRun', 'handoff', 'requestHandoff', 'pauseRun', 'handoffStatus', 'resumeRun', 'listRuns', 'getManifest', 'readResource']);
+const READ_ONLY = new Set(['observe', 'getRun', 'listRuns', 'getManifest', 'readResource', 'handoffStatus']);
 
 class BridgeError extends Error {
   constructor(code, message, extra = {}) {

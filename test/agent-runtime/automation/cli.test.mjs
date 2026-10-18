@@ -91,6 +91,21 @@ test('tool errors exit 2 with the typed error; usage errors exit 1 and never con
   await server.close();
 });
 
+test('doctor reports readiness without connecting to a broker', async () => {
+  let out = '';
+  const code = await main(['doctor'], {
+    env: { BRAIWSER_DEPLOYMENT: 'local' },
+    stdout: (t) => { out += t; },
+    stderr: () => {},
+    connect: () => { throw new Error('must not connect'); },
+  });
+  assert.equal(code, 0);
+  const json = JSON.parse(out);
+  assert.equal(json.ok, true);
+  assert.equal(json.value.protocol, 2);
+  assert.equal(json.value.deployment, 'local');
+});
+
 test('skills lists the pinned catalog without needing a broker', async () => {
   let out = '';
   const code = await main(['skills'], { stdout: (t) => { out += t; }, stderr: () => {}, connect: () => { throw new Error('must not connect'); } });

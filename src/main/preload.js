@@ -52,6 +52,11 @@ const api = {
     keepAwake: (webContentsId) => (webContentsId === null || isId(webContentsId) ? invoke('caos:throttle.hold', webContentsId) : rejectBad('keepAwake needs a webContents id or null')),
   },
 
+  // Move main-owned agent pages into a rectangle of the shell window.
+  guestView: {
+    place: (rect) => invoke('caos:guest-view.place', rect),
+  },
+
   // Menu accelerators dispatch command ids here; app.js owns the command table.
   onCommand: (cb) => {
     const listener = (_e, payload) => cb(payload || {});

@@ -18,6 +18,7 @@ export const CH = Object.freeze({
   connectionRevoke: 'browser:connection-revoke',
   resourceRead: 'browser:resource-read',
   observe: 'browser:observe',
+  taskStart: 'browser:task-start',
   // pushed main -> shell
   evRun: 'browser:run-event',
   evApproval: 'browser:approval-requested',

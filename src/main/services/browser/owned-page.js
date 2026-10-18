@@ -47,8 +47,11 @@ class SessionLease {
 
   register(page) {
     this.pages.set(page.pageId, page);
-    // A page that appears while a human holds the session is human-owned too.
-    if (this.owner !== 'agent' && page.owner === 'agent') page.owner = this.owner === 'human' ? 'human' : 'handoff-pending';
+    // A page that appears while the session is not agent-owned inherits that owner.
+    // `handoff-pending` stays the in-flight name; paused, human and quarantined are copied.
+    if (this.owner !== 'agent' && page.owner === 'agent') {
+      page.owner = this.owner === 'handoff-pending' ? 'handoff-pending' : this.owner;
+    }
   }
 
   unregister(pageId) { this.pages.delete(pageId); }
@@ -105,6 +108,94 @@ class SessionLease {
     this.fence += 1;
     this.handoffs.push({ at: Date.now(), fence: this.fence });
     return { owner: 'human', fence: this.fence, epochs, uncertain: pages.some((p) => p.uncertainAtHandoff) };
+  }
+
+  // Fence agent dispatch on every page and stop in `paused` (or `quarantined`).
+  // Does not grant human control. A hung driver is refused rather than paused
+  // while late agent input may still arrive.
+  async pause({ acknowledgeUncertain = false, drainTimeoutMs = 5000 } = {}) {
+    if (this.owner !== 'agent') throw fail('NOT_HANDOFF_READY');
+    this.owner = 'handoff-pending';
+    this.fence += 1;
+    const pages = [...this.pages.values()];
+    const wasAgent = new Set();
+    for (const p of pages) {
+      if (p.owner === 'agent') { wasAgent.add(p); p.owner = 'handoff-pending'; }
+      if (p.active) p.active.abort('HANDOFF_REQUESTED');
+    }
+    let drainTimer;
+    const drained = await Promise.race([
+      Promise.all(pages.map((p) => p.tail)).then(() => true),
+      new Promise((resolve) => { drainTimer = setTimeout(() => resolve(false), drainTimeoutMs); }),
+    ]);
+    clearTimeout(drainTimer);
+    const quarantined = pages.filter((p) => p.owner === 'quarantined');
+    const revert = (code) => {
+      for (const p of wasAgent) if (p.owner === 'handoff-pending') p.owner = 'agent';
+      this.owner = 'agent';
+      this.fence += 1;
+      throw fail(code);
+    };
+    if (!drained) revert('DRAIN_TIMEOUT');
+    if (quarantined.length && !acknowledgeUncertain) revert('RECONCILE_BEFORE_HANDOFF');
+    const stop = quarantined.length > 0;
+    const epochs = {};
+    for (const p of pages) {
+      if (p.owner === 'handoff-pending') p.owner = stop ? 'quarantined' : 'paused';
+      if (stop) p.uncertainAtHandoff = true;
+      p.documentEpoch += 1;
+      epochs[p.pageId] = p.documentEpoch;
+    }
+    this.owner = stop ? 'quarantined' : 'paused';
+    this.fence += 1;
+    return { owner: this.owner, fence: this.fence, epochs, uncertain: stop };
+  }
+
+  // Exclusive human control from `paused`. A human who already holds the session
+  // is CONTROL_BUSY. Quarantine cannot be acquired.
+  acquire() {
+    if (this.owner === 'human') throw fail('CONTROL_BUSY');
+    if (this.owner === 'quarantined') throw fail('RECONCILE_BEFORE_HANDOFF');
+    if (this.owner !== 'paused') throw fail('NOT_HANDOFF_READY');
+    this.fence += 1;
+    const epochs = {};
+    for (const p of this.pages.values()) {
+      if (p.owner === 'paused') p.owner = 'human';
+      p.documentEpoch += 1;
+      epochs[p.pageId] = p.documentEpoch;
+    }
+    this.owner = 'human';
+    this.fence += 1;
+    return { owner: 'human', fence: this.fence, epochs };
+  }
+
+  // Drop human input and stay paused. This never returns the session to the agent.
+  releaseToPaused() {
+    if (this.owner !== 'human') throw fail('NOT_HUMAN_OWNED');
+    this.fence += 1;
+    const epochs = {};
+    for (const p of this.pages.values()) {
+      if (p.owner === 'human') p.owner = 'paused';
+      p.documentEpoch += 1;
+      epochs[p.pageId] = p.documentEpoch;
+    }
+    this.owner = 'paused';
+    this.fence += 1;
+    return { owner: 'paused', fence: this.fence, epochs };
+  }
+
+  // Agent dispatch resumes only from `paused`, after a server-held grant was consumed.
+  resumeFromPaused() {
+    if (this.owner !== 'paused') throw fail(this.owner === 'human' ? 'NOT_PAUSED' : 'NOT_HUMAN_OWNED');
+    const epochs = {};
+    for (const p of this.pages.values()) {
+      if (p.owner === 'paused') p.owner = 'agent';
+      p.documentEpoch += 1;
+      epochs[p.pageId] = p.documentEpoch;
+    }
+    this.owner = 'agent';
+    this.fence += 1;
+    return { owner: 'agent', fence: this.fence, epochs, requireFreshObservation: true };
   }
 
   // Only a verified, authenticated local UI resume request may call this.

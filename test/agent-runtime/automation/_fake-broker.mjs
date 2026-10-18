@@ -173,6 +173,35 @@ export function createFakeBroker(options = {}) {
           const { p } = own(principal, args.sessionId, args.pageId);
           return { owner: 'human', documentEpoch: p.epoch, method: p.handoff };
         },
+        async requestHandoff(args, ctx) {
+          log('requestHandoff', args, ctx);
+          const { p } = own(principal, args.sessionId, args.pageId);
+          p.epoch += 1;
+          p.paused = true;
+          return {
+            owner: 'paused', controlOwner: 'paused', documentEpoch: p.epoch, method: p.handoff,
+            handoffId: 'ho_test_handoff', state: p.handoff === 'native' || p.handoff === 'remote-view' ? 'paused' : 'paused',
+            controlEpoch: 2, expiresAt: Date.parse('2026-10-18T12:30:00.000Z'), viewerUrl: null,
+            nextSequence: 1, resumeEligible: false, blocker: null,
+          };
+        },
+        async pauseRun(args, ctx) {
+          log('pauseRun', args, ctx);
+          return { runId: args.runId, sessionId: 'bs_paused', state: 'paused', controlEpoch: args.expectedControlEpoch, affectedRunIds: [args.runId] };
+        },
+        async handoffStatus(args, ctx) {
+          log('handoffStatus', args, ctx);
+          return {
+            handoffId: args.handoffId, sessionId: 'bs_1', pageId: 'pg_1', owner: 'paused', controlOwner: 'paused',
+            documentEpoch: 1, method: 'native', state: 'paused', controlEpoch: 2,
+            expiresAt: Date.parse('2026-10-18T12:30:00.000Z'), viewerUrl: null, nextSequence: 1,
+            resumeEligible: false, blocker: null, events: [],
+          };
+        },
+        async resumeRun() {
+          const error = err('DENIED', 'RESUME_NOT_AUTHORIZED: no grant');
+          throw error;
+        },
         async listRuns(_args, ctx) { log('listRuns', {}, ctx); return [...runs.values()].filter((r) => r.owner === principal.id).map((r) => ({ runId: r.runId })); },
         async getManifest({ runId }) { return { runId, ...ownRun(principal, runId) }; },
         async readResource(uri, ctx) {

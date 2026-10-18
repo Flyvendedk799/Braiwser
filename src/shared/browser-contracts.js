@@ -40,6 +40,7 @@ const canTransition = (from, to) => (RUN_TRANSITIONS[from] || []).includes(to);
 const ID_PREFIX = Object.freeze({
   session: 'bs', page: 'pg', run: 'run', operation: 'op', observation: 'ob', ref: 'r',
   approval: 'apr', artifact: 'art', cursor: 'cur', lease: 'ls', grant: 'gr',
+  handoff: 'ho', viewer: 'vw', task: 'tk',
 });
 function newId(kind) {
   const prefix = ID_PREFIX[kind];

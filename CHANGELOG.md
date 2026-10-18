@@ -20,6 +20,14 @@ AI
 - OpenAI chat requests use a per-model contract table (`max_completion_tokens` for the
   o-series, gpt-5 and gpt-4.1/4o; `max_tokens` only for legacy models).
 
+### Agent runtime: handoff v2, in-app runner, coding-agent surface
+
+- Session handoff can pause without giving the caller human control. Resume consumes a one-use grant held by the broker. A restarted broker closes the saved handoff because the live browser is gone.
+- The loopback viewer redeems a one-time code for an HttpOnly cookie. Writes also need a matching Origin and CSRF token. Private input suspends observations. A remote deployment refuses a loopback viewer URL.
+- MCP and the CLI expose `browser_run_pause`, `browser_handoff_status` and `browser_run_resume` beside the existing tools. The invitation code is not part of the tool result.
+- The in-app task runner calls the broker and cannot approve its own actions. Uncertain effects and approval waits stop the loop. An optional HTTP provider is used only when `BRAIWSER_AGENT_PROVIDER_URL` is set.
+- The embedded driver can open a page the main process owns (`WebContentsView`). The shell's own tabs stay `<webview>`. A main-owned page is kept at zero size until the shell reports a rectangle, and that rectangle is clamped to the window. Capability flags stay conservative until a native run confirms them.
+
 Licensing and release
 - Licences are Ed25519-signed (`BRW1.` prefix kept) and verified against a public key
   baked in at build time; the shared HMAC secret and its `BRAIWSER_LICENSE_SECRET`

@@ -71,6 +71,12 @@ function register({ repos, paths, getWindow }) {
   // Current effective system theme, for settings.theme === 'system'.
   on('caos:system-theme.get', () => (nativeTheme.shouldUseDarkColors ? 'dark' : 'light'));
 
+  // Position main-owned WebContentsView guests. No-op until the agent runtime
+  // attaches its guest host. The host clamps the rectangle to the window.
+  let guestViews = null;
+  register.attachGuestViews = (views) => { guestViews = views || null; };
+  on('caos:guest-view.place', (rect) => (guestViews ? guestViews.place(rect) : { placed: 0, bounds: null }));
+
   // --- filesystem ---
   on('caos:open-file', async () => {
     const r = await dialog.showOpenDialog(win(), {

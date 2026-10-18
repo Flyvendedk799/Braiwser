@@ -1,4 +1,4 @@
-// The eight tool operations, independent of transport. mcp.mjs registers them on
+// The tool operations, independent of transport. mcp.mjs registers them on
 // an MCP server; cli.mjs executes the very same functions. Both therefore share
 // one validation, projection, error-classification and response-budget path.
 //
@@ -11,6 +11,7 @@ import { toMcpReceipt } from './receipt.mjs';
 import {
   SCHEMA_VERSION, DEFAULT_RESPONSE_BUDGET, inputs, envelope, errorSchema,
   sessionSchema, observationSchema, receiptSchema, extractSchema, handoffSchema, runSchema,
+  pauseResultSchema, resumeResultSchema,
   verdictConsistent, isProvenPass, id as idSchema, tableSchema, listSchema, paginationSchema,
 } from './schemas.mjs';
 
@@ -302,12 +303,73 @@ export function createOperations(facade, options = {}) {
       description: 'Pause agent control and report how a person can take over this page.',
       input: inputs.browser_handoff, value: handoffSchema, readOnly: false, destructive: false, idempotent: true,
       async invoke(args, ctx) {
-        const raw = await facade.handoff(args, ctx);
+        const call = typeof facade.requestHandoff === 'function' ? facade.requestHandoff.bind(facade) : facade.handoff.bind(facade);
+        const raw = await call({ ...args, reasonCode: args.reasonCode || 'needsHuman' }, ctx);
         if (!raw || typeof raw !== 'object') throw publicError('INTERNAL', 'handoff returned nothing.', { effectUnknown: true });
         const method = ['native', 'remote-view', 'checkpoint-relaunch', 'unsupported'].includes(raw.method) ? raw.method : 'unsupported';
-        return handoffSchema.parse({
-          sessionId: args.sessionId, pageId: args.pageId, owner: cut(raw.owner, 40) || 'unknown',
+        const expiresAt = typeof raw.expiresAt === 'number' ? new Date(raw.expiresAt).toISOString() : raw.expiresAt;
+        const value = {
+          sessionId: args.sessionId, pageId: args.pageId,
+          owner: cut(raw.controlOwner || raw.owner, 40) || 'unknown',
           documentEpoch: raw.documentEpoch, method, userAction: HANDOFF_TEXT[method],
+        };
+        if (typeof raw.handoffId === 'string') value.handoffId = raw.handoffId;
+        if (typeof raw.state === 'string') value.state = raw.state;
+        if (typeof raw.controlOwner === 'string') value.controlOwner = cut(raw.controlOwner, 40);
+        if (Number.isInteger(raw.controlEpoch)) value.controlEpoch = raw.controlEpoch;
+        if (typeof expiresAt === 'string') value.expiresAt = expiresAt;
+        if (raw.viewerUrl === null || typeof raw.viewerUrl === 'string') value.viewerUrl = raw.viewerUrl ?? null;
+        if (Number.isInteger(raw.nextSequence)) value.nextSequence = raw.nextSequence;
+        if (typeof raw.resumeEligible === 'boolean') value.resumeEligible = raw.resumeEligible;
+        if (raw.blocker === null || typeof raw.blocker === 'string') value.blocker = raw.blocker ?? null;
+        return handoffSchema.parse(value);
+      },
+    },
+    {
+      name: 'browser_run_pause', title: 'Pause run',
+      description: 'Fence agent input for the run’s session. A pause result is not proof that in-flight work has settled.',
+      input: inputs.browser_run_pause, value: pauseResultSchema, readOnly: false, destructive: false, idempotent: true,
+      async invoke(args, ctx) {
+        const raw = await facade.pauseRun(args, ctx);
+        return pauseResultSchema.parse({
+          runId: raw.runId, sessionId: raw.sessionId, state: raw.state, controlEpoch: raw.controlEpoch,
+          affectedRunIds: Array.isArray(raw.affectedRunIds) ? raw.affectedRunIds.slice(0, 50) : [],
+        });
+      },
+    },
+    {
+      name: 'browser_handoff_status', title: 'Handoff status',
+      description: 'Read the authoritative handoff state. This never resumes the run.',
+      input: inputs.browser_handoff_status, value: handoffSchema, readOnly: true, destructive: false, idempotent: true,
+      async invoke(args, ctx) {
+        const raw = await facade.handoffStatus(args, ctx);
+        if (!raw || typeof raw !== 'object') throw publicError('INTERNAL', 'handoff status returned nothing.');
+        const method = ['native', 'remote-view', 'checkpoint-relaunch', 'unsupported'].includes(raw.method) ? raw.method : 'unsupported';
+        const expiresAt = typeof raw.expiresAt === 'number' ? new Date(raw.expiresAt).toISOString() : raw.expiresAt;
+        return handoffSchema.parse({
+          sessionId: raw.sessionId, pageId: raw.pageId,
+          owner: cut(raw.controlOwner || raw.owner, 40) || 'unknown',
+          documentEpoch: Number.isInteger(raw.documentEpoch) ? raw.documentEpoch : 0,
+          method, userAction: HANDOFF_TEXT[method],
+          handoffId: raw.handoffId, state: raw.state, controlOwner: raw.controlOwner,
+          controlEpoch: raw.controlEpoch, expiresAt, viewerUrl: raw.viewerUrl ?? null,
+          nextSequence: raw.nextSequence, resumeEligible: raw.resumeEligible === true,
+          blocker: raw.blocker ?? null,
+          events: (Array.isArray(raw.events) ? raw.events : []).slice(0, args.maxEvents).map((e) => ({
+            sequence: e.sequence, kind: cut(e.kind, 80), summary: cut(e.summary, 300),
+          })),
+        });
+      },
+    },
+    {
+      name: 'browser_run_resume', title: 'Resume run',
+      description: 'Continue the same run after a person authorized return-to-agent. The broker consumes that grant; this tool cannot mint one.',
+      input: inputs.browser_run_resume, value: resumeResultSchema, readOnly: false, destructive: false, idempotent: true,
+      async invoke(args, ctx) {
+        const raw = await facade.resumeRun(args, ctx);
+        return resumeResultSchema.parse({
+          handoffId: raw.handoffId, runId: raw.runId ?? null, controlOwner: 'agent', controlEpoch: raw.controlEpoch,
+          requireFreshObservation: true, resumed: true,
         });
       },
     },

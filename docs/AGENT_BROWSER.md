@@ -39,11 +39,9 @@ with a random token. There is no network listener.
 What a client may do is decided by the **scope the app gave that client** (allowed origins, tool classes,
 expiry, budgets). A session request can ask for less than that scope, never more.
 
-> Not wired yet: starting the bridge from the Electron main process and issuing connection files from the UI
-> is a main-process integration step (`startBridge` in `src/main/services/automation/bridge-server.js`). The
-> module is complete and tested; until the app calls it, no connection file is produced.
+> The bridge starts with the agent runtime (`BRAIWSER_AGENT_RUNTIME=1`) from the Electron main process, except during the e2e harness. The connection file is written beside the broker store. A supervised headless process can also own the broker without Electron (`src/main/services/automation/server.mjs`).
 
-## Connect Claude Code or Cursor (MCP over stdio)
+## Connect Claude Code or Codex (MCP over stdio)
 
 Claude Code:
 
@@ -68,7 +66,7 @@ Cursor (`.cursor/mcp.json`) or any client that takes a JSON server list:
 `npm run mcp` runs the same entrypoint from the repo. stdout carries only protocol messages; diagnostics go to
 stderr. Set `BRAIWSER_MCP_DEBUG=1` for tool-name/result-code logging (never arguments or page text).
 
-## The eight tools
+## The tools
 
 | Tool | Does | Mutates |
 |---|---|---|
@@ -79,11 +77,17 @@ stderr. Set `BRAIWSER_MCP_DEBUG=1` for tool-name/result-code logging (never argu
 | `browser_run` | Starts (or recovers by `requestKey`) a pinned workflow run | yes |
 | `browser_run_status` | State, counters, bounded events after a sequence | no |
 | `browser_run_cancel` | Requests cancellation. Already-dispatched effects stay; this is not rollback | yes |
-| `browser_handoff` | Pauses agent control and reports how a person can take over | yes |
+| `browser_handoff` | Pauses the session and records a handoff. It does not give the caller human control | yes |
+| `browser_run_pause` | Fences agent dispatch on a run and leaves the session paused | yes |
+| `browser_handoff_status` | Reads handoff state. It has no side effect and does not resume the agent | no |
+| `browser_run_resume` | Returns the session to the agent only when the broker holds a one-use grant | yes |
 
 Every result is `{ ok, value, error }`. Errors are one of `STALE_REF`, `AMBIGUOUS_TARGET`, `DENIED`, `TIMEOUT`,
 `CANCELLED`, `UNSUPPORTED`, `UNAVAILABLE`, `INTERNAL`, each with `dispatched`, `effectUnknown` and a `retry`
 hint. A mutation that fails for an unclassified reason is reported as **uncertain**, never as safe to retry.
+Handoff protocol failures (`CONTROL_BUSY`, `RESUME_NOT_AUTHORIZED`, `VIEWER_UNREACHABLE`, and the other v2 codes)
+are carried in the message prefix; the public code stays inside the closed list above. `browser_handoff` never
+includes a reusable invitation secret. The standalone viewer exchanges that secret once for an HttpOnly cookie.
 
 There is no tool for arbitrary JavaScript, CSS selectors, file paths, cookies or shell commands, and unknown
 keys or action kinds are rejected before they reach the broker. `fill` into password, one-time-code and payment
@@ -107,9 +111,13 @@ braiwser-agent act --session bs_.. --page pg_.. --observation ob_.. --epoch 3 --
 braiwser-agent run --session bs_.. --page pg_.. --request-key rk1 --skill verify-journey --skill-version 1.0.0 --inputs '{"recordingId":"rec_1"}'
 braiwser-agent status --run run_.. --max-events 20
 braiwser-agent cancel --run run_..
-braiwser-agent handoff --session bs_.. --page pg_.. --reason "needs a person"
+braiwser-agent handoff --session bs_.. --page pg_.. --reason "needs a person" --request-key rk1
+braiwser-agent pause --run run_.. --request-key rk2 --epoch 4
+braiwser-agent handoff-status --handoff ho_..
+braiwser-agent resume --handoff ho_.. --request-key rk3 --epoch 4
 braiwser-agent close --session bs_..
 braiwser-agent skills
+braiwser-agent doctor
 ```
 
 It prints one JSON envelope on stdout and exits `0` (ok), `1` (usage error), `2` (tool or broker error). Same
@@ -182,7 +190,7 @@ Driver capabilities as reported by the drivers in this repository:
 | Select | yes | **unsupported** |
 | Screenshots | yes | no |
 | Request-level destination check | yes (initial requests; redirect hops are not re-checked) | navigation only |
-| Human takeover | visible: yes; headless: **unsupported** | native, needs native confirmation |
+| Human takeover | visible: native in the desktop shell; headless: remote-view only while the supervised loopback viewer is attached. The Playwright driver itself still reports `humanHandoff: unsupported` | native, needs native confirmation |
 | Live headless/visible switch | no | no |
 
 What the MCP/CLI surface adds on top (verified against the real broker unless noted):
@@ -197,9 +205,7 @@ What the MCP/CLI surface adds on top (verified against the real broker unless no
 
 ## Honest limits
 
-- Not wired into the app UI yet (see "Not wired yet"); no connection-management screen.
-- Packaged builds keep sources inside `app.asar`, which plain Node cannot execute; run the sidecar and CLI from a
-  checkout or an unpacked copy (an `asarUnpack` entry for the automation folder is not configured yet).
+- The desktop shell starts the bridge and the loopback viewer when the agent runtime is on. Connection management for scopes still lives in the Agent Runs drawer. Packaged builds keep sources inside `app.asar`, which plain Node cannot execute; run the sidecar and CLI from a checkout or an unpacked copy.
 - No tool lists the pages of a session, so a popup/new tab cannot be switched to; popup and second-tab tasks stay
   `unsupported`.
 - `setViewport` (240..4096) exists on the Playwright driver only. It is a state change: refs and observations die

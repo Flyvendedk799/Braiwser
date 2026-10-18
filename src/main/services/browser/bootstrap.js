@@ -23,20 +23,41 @@ function startAgentRuntime({ repos, userDataDir, getWindow, enabled, isE2E = fal
   const { createDrivers } = require('./drivers');
   const { getSharedBroker } = require('./debugger-broker');
   const { createBrokerSkills } = require('../automation/skill-registry');
+  const { createGuestViews } = require('./guest-views');
+  const guestViews = createGuestViews({ getWindow });
 
-  const drivers = createDrivers({ electron: { debuggerBroker: getSharedBroker() } });
+  const drivers = createDrivers({
+    electron: {
+      debuggerBroker: getSharedBroker(),
+      createGuest: () => guestViews.create(),
+    },
+  });
   const skills = createBrokerSkills({
     // Owner-scoped, synchronous lookup: only recordings the store knows, already
     // redacted by the repository's second boundary.
     loadRecording: (recordingId) => (repos && repos.recordings ? repos.recordings.get(recordingId) || null : null),
   });
-  const broker = createBroker({
+  const brokerOptions = {
     featureFlag: true,
     dataDir: userDataDir,
     drivers: { playwright: drivers.playwright, 'electron-embedded': drivers['electron-embedded'] },
     skills,
     appVersion: process.versions.electron || 'dev',
-  });
+    taskRunner: null,
+  };
+  const broker = createBroker(brokerOptions);
+  if (process.env.BRAIWSER_AGENT_PROVIDER_URL) {
+    const { createTaskRunner } = require('../agent/runtime');
+    const { createHttpProvider } = require('../agent/providers/http');
+    brokerOptions.taskRunner = createTaskRunner({
+      broker,
+      provider: createHttpProvider({
+        endpoint: process.env.BRAIWSER_AGENT_PROVIDER_URL,
+        apiKey: process.env.BRAIWSER_AGENT_PROVIDER_KEY || '',
+        model: process.env.BRAIWSER_AGENT_MODEL || 'default',
+      }),
+    });
+  }
 
   const unwatchers = [];
   const attachHost = (host) => {
@@ -51,8 +72,16 @@ function startAgentRuntime({ repos, userDataDir, getWindow, enabled, isE2E = fal
   };
 
   let bridge = null;
+  let gateway = null;
   const ready = (async () => {
     if (isE2E) return;
+    try {
+      const { createViewerGateway } = require('./viewer-gateway');
+      gateway = createViewerGateway({ broker, host: '127.0.0.1', port: 0 });
+      await gateway.listen();
+    } catch (err) {
+      log('[agent-runtime] viewer unavailable: ' + ((err && err.message) || err));
+    }
     try {
       const { startBridge } = require('../automation/bridge-server');
       // The default client file grants NO scopes: an external agent can connect
@@ -70,11 +99,14 @@ function startAgentRuntime({ repos, userDataDir, getWindow, enabled, isE2E = fal
   return {
     broker,
     enabled: true,
+    guestViews,
     attachHost,
     get bridge() { return bridge; },
     ready,
     close: async () => {
       for (const off of unwatchers.splice(0)) { try { off(); } catch (_e) { /* destroyed */ } }
+      try { guestViews.closeAll(); } catch (_e) { /* ignore */ }
+      try { if (gateway) await gateway.close(); } catch (_e) { /* ignore */ }
       try { if (bridge) await bridge.close(); } catch (_e) { /* ignore */ }
       try { await broker.close(); } catch (_e) { /* ignore */ }
     },

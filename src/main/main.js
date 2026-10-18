@@ -175,6 +175,7 @@ app.whenReady().then(() => {
       log: (m) => console.log(m),
     });
     registerIpc.agentBroker = agentRuntime.broker;
+    if (typeof registerIpc.attachGuestViews === 'function') registerIpc.attachGuestViews(agentRuntime.guestViews);
     app.on('before-quit', () => { agentRuntime.close().catch(() => {}); });
   } catch (err) {
     console.log('[agent-runtime] unavailable: ' + ((err && err.message) || err));

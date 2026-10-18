@@ -21,6 +21,7 @@ import { h } from '../lib/dom.js';
 import { createAgentBridge, CH } from '../lib/agent-bridge.js';
 import { createAgentRunsController } from './agent-runs.js';
 import { createAgentRunsPanel, runTitle } from '../components/agent-runs-panel.js';
+import { createAgentTaskPanel } from '../components/agent-task-panel.js';
 import { createOwnerStrip } from '../components/agent-owner-strip.js';
 import { openApprovalModal } from '../components/agent-approval-modal.js';
 import { openConnectionsDrawer } from '../components/agent-connections-drawer.js';
@@ -75,6 +76,23 @@ export function mountAgentRuns(ctx = {}) {
     // ---- review-panel tab ---------------------------------------------------
     const panel = createAgentRunsPanel({ controller, actions });
     handle.panel = panel;
+    const taskPanel = createAgentTaskPanel({
+      bridge,
+      getScope: () => {
+        const extra = ctx.getTaskScope ? ctx.getTaskScope() : {};
+        const owner = controller.ownerList().find((o) => o && o.sessionId && o.pageId) || {};
+        return {
+          sessionId: extra.sessionId || owner.sessionId,
+          pageId: extra.pageId || owner.pageId,
+          requestKey: extra.requestKey || `task_${Date.now()}`,
+          provider: extra.provider || 'in-app',
+          origin: extra.origin || owner.origin,
+          profile: extra.profile || owner.profile,
+        };
+      },
+      onStatus: (result) => { if (result && result.status) toast(`Task ${result.status}`); },
+    });
+    handle.taskPanel = taskPanel;
     const tabs = doc.querySelector('.panel .tabs');
     const panelEl = doc.querySelector('aside.panel') || doc.querySelector('.panel');
     let tabBtn = null;
@@ -85,6 +103,7 @@ export function mountAgentRuns(ctx = {}) {
         'data-testid': 'agent-tab',
       }, [h('span', { text: 'Runs' }), pillEl]);
       tabs.appendChild(tabBtn);
+      panel.root.insertBefore(taskPanel.root, panel.root.firstChild);
       const footer = panelEl.querySelector('.panel-footer');
       panelEl.insertBefore(panel.root, footer || null);
       const activate = () => {

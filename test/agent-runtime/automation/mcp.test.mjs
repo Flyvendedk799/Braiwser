@@ -23,12 +23,12 @@ const startRun = (h, page, extra = {}) => h.ok('browser_run', {
   ...page && { sessionId: page.sessionId, pageId: page.pageId }, requestKey: 'rk1', skillId: 'verify-journey', skillVersion: '1.0.0',
   inputs: { recordingId: 'rec_1' }, ...extra });
 
-test('registers exactly the eight tools with strict inputs, typed outputs and honest annotations', async () => {
+test('registers the broker tools with strict inputs, typed outputs and honest annotations', async () => {
   const { h } = await setup();
   const { tools } = await h.client.listTools();
   assert.deepEqual(tools.map((t) => t.name).sort(), [
-    'browser_act', 'browser_extract', 'browser_handoff', 'browser_observe', 'browser_run',
-    'browser_run_cancel', 'browser_run_status', 'browser_session_open'].sort());
+    'browser_act', 'browser_extract', 'browser_handoff', 'browser_handoff_status', 'browser_observe', 'browser_run',
+    'browser_run_cancel', 'browser_run_pause', 'browser_run_resume', 'browser_run_status', 'browser_session_open'].sort());
   for (const t of tools) {
     assert.equal(t.inputSchema.additionalProperties, false, `${t.name} input must reject unknown keys`);
     assert.ok(t.outputSchema, `${t.name} has an output schema`);
@@ -351,7 +351,7 @@ test('handoff reports the supported method with fixed user guidance', async () =
     const r = await h.ok('browser_handoff', { ...page, reason: 'captcha' });
     assert.equal(r.method, method);
     assert.match(r.userAction, expect);
-    assert.equal(r.owner, 'human');
+    assert.equal(r.owner, 'paused');
     await h.close();
   }
   // An unrecognised method from a broker clamps to unsupported rather than inventing capability.
@@ -450,7 +450,7 @@ test('resources: capabilities and catalog are readable; manifest redacts sensiti
   const run = await startRun(h, page);
   const caps = JSON.parse((await h.client.readResource({ uri: 'braiwser://capabilities' })).contents[0].text);
   assert.equal(caps.schemaVersion, 1);
-  assert.equal(caps.tools.length, 8);
+  assert.equal(caps.tools.length, 11);
   assert.ok(caps.skills.some((s) => s.id === 'verify-journey' && /^sha256:/.test(s.digest)));
   assert.ok(caps.guarantees.length >= 3);
   const catalog = JSON.parse((await h.client.readResource({ uri: 'braiwser://skills/catalog' })).contents[0].text);
