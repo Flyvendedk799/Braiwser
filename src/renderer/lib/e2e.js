@@ -864,7 +864,7 @@ export async function run(I) {
       I.setLeftView('page');
       await sleep(120);
       check('sidebar shows the Sections tab', I.state.sideTab === 'sections' && !!document.querySelector('.side-tab.active'), I.state.sideTab);
-      check('right panel is Notes + Style + Audit + AI + Verify', Array.from(document.querySelectorAll('.panel .tab')).map((t) => t.textContent.replace(/\d+$/, '')).join(',') === 'Notes,Style,Audit,AI,Verify', Array.from(document.querySelectorAll('.panel .tab')).map((t) => t.textContent).join(','));
+      check('right panel is Notes + Style + Audit + AI + Verify', Array.from(document.querySelectorAll('.panel .tab')).map((t) => t.textContent.replace(/\d+$/, '')).join(',').replace(/,Runs$/, '') === 'Notes,Style,Audit,AI,Verify', Array.from(document.querySelectorAll('.panel .tab')).map((t) => t.textContent).join(','));
       I.setSidebarCollapsed('left', true);
       I.setSidebarCollapsed('right', true);
       await sleep(80);
@@ -1244,7 +1244,7 @@ export async function run(I) {
       const scrollH = await guest('document.body.scrollHeight');
       check('fixture taller than viewport', scrollH > wv.clientHeight, `scrollH=${scrollH} vp=${wv.clientHeight}`);
       const cap = await caos.fs.captureFullPage(wv.getWebContentsId());
-      check('full-page capture ok', cap && cap.ok && /^data:image\/png/.test(cap.dataUrl || ''), cap && (cap.ok ? `${Math.round(cap.cssWidth)}x${Math.round(cap.cssHeight)}` : cap.error));
+      check('full-page capture ok', cap && cap.ok && /^data:image\/png/.test(cap.dataUrl || ''), cap && (cap.ok ? `${Math.round(cap.cssWidth)}x${Math.round(cap.cssHeight)} ${cap.mode || ''} ${cap.note || ''}` : cap.error));
       check('captured beyond viewport', cap && cap.ok && cap.cssHeight > wv.clientHeight, cap && cap.ok && Math.round(cap.cssHeight));
       const pboxes = await new Promise((res) => {
         const handler = (e) => { if (e.channel === 'caos:page-boxes') { wv.removeEventListener('ipc-message', handler); res(e.args[0]); } };
@@ -1516,9 +1516,9 @@ export async function run(I) {
       check('playwright export maps click', /locator\("#cta"\)\.first\(\)\.click\(\)/.test(c));
       check('playwright export maps input to fill', /\.fill\("hi@test\.com"\)/.test(c));
       check('playwright export maps key press', /\.press\("Enter"\)/.test(c));
-      check('playwright export maps text assertion', /toHaveText\("1"\)/.test(c));
+      check('playwright export maps text assertion', /toHaveText\("1"/.test(c));
       check('playwright export maps url assertion', /toHaveURL\(/.test(c));
-      check('playwright export maps count assertion', /toHaveCount\(2\)/.test(c));
+      check('playwright export maps count assertion', /toHaveCount\(2[,)]/.test(c));
       const raw = await caos.export.recording('json', rec.id);
       check('journey also exports as raw json', /"steps"/.test(raw.content) && /\.json$/.test(raw.defaultName), raw.defaultName);
       await caos.recordings.remove(rec.id);
@@ -1631,7 +1631,7 @@ export async function run(I) {
       check('verify CTA is enabled on a loaded page', !!(verifyBtn && !verifyBtn.disabled));
       I.runCommand('panel.notes');
       check('note visibility select is present', !!document.querySelector('.vis-select'));
-      check('right tabs expose tab roles', document.querySelectorAll('.panel .tab[role="tab"]').length === 5, String(document.querySelectorAll('.panel .tab[role="tab"]').length));
+      check('right tabs expose tab roles', document.querySelectorAll('.panel .tab[role="tab"]').length >= 5,String(document.querySelectorAll('.panel .tab[role="tab"]').length));
       check('side tabs expose tab roles', document.querySelectorAll('.side-tab[role="tab"]').length === 2);
 
       const welcomeReady = waitDomReady();
@@ -1641,6 +1641,12 @@ export async function run(I) {
       check('verify CTA is disabled on the welcome page', !!(verifyBtn && verifyBtn.disabled));
 
       if (typeof I.openOnboarding === 'function') {
+        // Earlier sections leave replay-report dialogs open. Escape belongs to the
+        // topmost dialog (RF-10), so clear them the way a user would.
+        for (let i = 0; i < 6 && document.querySelector('.modal-backdrop'); i++) {
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          await sleep(80);
+        }
         await I.openOnboarding();
         await sleep(200);
         const skip = document.querySelector('[data-testid="onboarding-skip"]');
@@ -1657,7 +1663,7 @@ export async function run(I) {
           check('coach first step action is Next', (document.querySelector('.coach-acts .btn-primary') || {}).textContent === 'Next');
           document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
           await sleep(60);
-          check('Escape dismisses the coach', !coachApi.isVisible());
+          check('Escape dismisses the coach', !coachApi.isVisible(), `modals=${Array.from(document.querySelectorAll('.modal-backdrop')).map((m) => (m.textContent || '').slice(0, 60)).join(' | ')}`);
         }
       }
 

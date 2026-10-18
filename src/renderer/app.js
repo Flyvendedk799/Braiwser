@@ -18,6 +18,26 @@ import { personaCopy, chromeForPersona, isWelcomeUrl, isPlaygroundUrl } from './
 import { createCoachmarks } from './components/coachmarks.js';
 import { createVerifyPanel } from './components/verify-panel.js';
 import { openHandoffModal } from './components/handoff-modal.js';
+import { resolveAddress, localTarget, matchesLocalTarget } from './lib/address.js';
+import { mergeFilteredOrder } from './lib/note-order.js';
+import { createOperationContexts, createGeneration } from './controllers/operation-context.js';
+import { createReplayDriver } from './controllers/replay-driver.js';
+import { runReplay } from './controllers/replay-engine.js';
+import { describeReplay, buildReplayReport, auditOutcome } from './controllers/run-report.js';
+import * as recCtl from './controllers/recording-controller.js';
+import { createAuditRunner, sameAuditedPage } from './controllers/audit-controller.js';
+import { describeStorageHealth, describeRecovery } from './controllers/storage-health.js';
+import { describeStructureResult, describeDroppedHistory } from './controllers/guest-feedback.js';
+import { handoffWhere } from './controllers/handoff-ui.js';
+import { reportContextFromSource, currentContextFromTab } from './controllers/audit-ui.js';
+import { createVerifyRunner } from './controllers/verify-controller.js';
+import { createSessionController } from './controllers/session-controller.js';
+import { captureScreenshot } from './controllers/screenshot-capture.js';
+import { requestFromGuest } from './controllers/guest-request.js';
+import { createTabDerived, resetForNewDocument, dropStaleAudit } from './controllers/tab-state.js';
+import { runBulk, describeBulk, toPanelResult } from './controllers/bulk.js';
+import { createAwakeHolder } from './controllers/keep-awake.js';
+import { mountAgentRuns } from './controllers/agent-runs-mount.js';
 
 const caos = window.braiwser || window.caos;
 
@@ -29,6 +49,7 @@ const state = {
   currentProject: null,
   sessions: [],
   currentSession: null,
+  sessionEpoch: 0, // bumped whenever the current session/project changes (see operation-context)
   annotations: [],
   recordings: [],
   selectedRecording: null,
@@ -39,13 +60,14 @@ const state = {
   currentTitle: '',
   activeTab: 'notes',
   sideTab: 'sections', // left sidebar: 'sections' | 'layers'
-  editStacks: { undo: 0, redo: 0 }, // page-edit history, reported by the guest
-  styleTarget: null, // selector the Style panel is showing
+  editStacks: { undo: 0, redo: 0 }, // page-edit history of the ACTIVE tab (mirror of tab.derived)
+  styleTarget: null, // selector the Style panel is showing (mirror of the active tab's)
   leftView: 'workspace', // workspace navigation | live page structure
   leftCollapsed: false,
   rightCollapsed: false,
   sessionCounts: {},
   // Browser tabs (each is its own <webview>); `wv` aliases the active one.
+  // Each tab: { id, wv, url, title, docGen, derived, ... } — see controllers/tab-state.js.
   tabs: [],
   activeTabId: null,
   bookmarked: false,
@@ -53,7 +75,7 @@ const state = {
   bookmarks: [],
   systemTheme: 'dark',
   auditing: false,
-  lastAudit: null,
+  lastAudit: null, // the ACTIVE tab's audit report (mirror of tab.derived.audit.report)
   agentPresets: [],
   nextActionArmed: false,
 };
@@ -67,12 +89,43 @@ let stageOverlay, overlayLabel, overlayFill, overlayCancelBtn;
 let coachmarks = null;
 let footerPrimaryBtn = null;
 let footerHint = null;
-let auditWaiter = null;
-const replayWaiters = new Map(); // index -> {resolve}
-let pendingDomReady = null;
 let tabSeq = 0;
 
 const activeTab = () => state.tabs.find((t) => t.id === state.activeTabId) || null;
+const tabById = (id) => state.tabs.find((t) => t.id === id) || null;
+
+// ---- operation contexts (see controllers/*) -------------------------------------
+// Replay, record, audit, verify, screenshot, restore and note capture each
+// capture {tab, webview, document generation, session} when they START and
+// consult it after every await instead of the mutable globals above.
+const ops = createOperationContexts({
+  getTab: tabById,
+  getActiveTabId: () => state.activeTabId,
+  getSession: () => state.currentSession,
+  getSessionEpoch: () => state.sessionEpoch,
+});
+const projectGen = createGeneration();
+let replayRun = null; // { ctx, ac:AbortController } while a replay is in flight
+// A replay / recording / audit may run in a hidden tab; hold that guest unthrottled meanwhile.
+const awake = createAwakeHolder(caos.power);
+
+// Send to ONE specific tab's guest, tolerating a gone/not-ready view.
+function sendToTab(tab, channel, ...args) {
+  if (!tab || !tab.wv) return;
+  try { tab.wv.send(channel, ...args); } catch (_e) { /* webview not ready or gone */ }
+}
+
+const sessions = createSessionController({
+  api: caos,
+  state,
+  ui: {
+    setNotes: (list) => { if (notesPanel) notesPanel.setAnnotations(list); },
+    sessionChanged: () => { renderSidebar(); syncStatus(); },
+    bumpCount: (id, delta) => bumpSessionCount(id, delta),
+    refreshSessions: () => refreshSessions(),
+    toast: (m, k) => toast(m, k),
+  },
+});
 
 // ============================================================ BOOT
 async function boot() {
@@ -100,6 +153,7 @@ async function boot() {
   await refreshRecordings();
   await refreshHistory();
   await refreshBookmarks();
+  checkStorageHealth(); // fire and forget: never blocks the app from opening
   // Restore previously-open tabs (skipped under e2e for a deterministic boot).
   const saved = !caos.e2e && Array.isArray(state.settings.openTabs) ? state.settings.openTabs : null;
   if (saved && saved.length) {
@@ -110,6 +164,20 @@ async function boot() {
     createTab(state.config.welcomeUrl);
   }
   applyDevice();
+
+  // Agent runs: renders nothing unless the agentRuntime flag is on (see controllers/agent-runs-mount.js).
+  try {
+    mountAgentRuns({
+      caos, toast,
+      getCurrentSession: () => state.currentSession,
+      refreshNotes: async () => {
+        const s = state.currentSession;
+        if (!s) return;
+        const list = await caos.annotations.bySession(s.id);
+        if (sessions.isCurrent(s.id)) { state.annotations = list; notesPanel.setAnnotations(list); }
+      },
+    });
+  } catch (e) { console.warn('[agent-runs] not mounted: ' + ((e && e.message) || e)); }
 
   if (!caos.e2e && !state.settings.onboardingComplete) {
     setTimeout(openOnboarding, 250);
@@ -133,6 +201,84 @@ async function boot() {
       .then((m) => m.run(internals))
       .catch((e) => caos.e2eDone({ ok: false, fatal: String((e && e.stack) || e) }));
   }
+}
+
+// ============================================================ STORAGE HEALTH
+// A data file that is damaged or unreadable is held read-only (never overwritten)
+// by the main process, so edits to it would not be saved. Say so up front and
+// let the user choose how to continue. Dismissable, not hidden: it re-checks on
+// the next launch.
+let healthModal = null;
+async function checkStorageHealth() {
+  let health;
+  try { health = await caos.store.status(); } catch (e) { console.warn('[store] status failed: ' + ((e && e.message) || e)); return; }
+  const view = describeStorageHealth(health);
+  if (!view.damaged) {
+    if (view.maintenanceErrors.length) console.warn('[store] maintenance: ' + view.maintenanceErrors.join('; '));
+    return;
+  }
+  openStorageHealthModal(view);
+}
+
+function openStorageHealthModal(view) {
+  if (healthModal) { try { healthModal.close(); } catch (_e) { /* ignore */ } healthModal = null; }
+  const body = h('div', { class: 'storage-health' }, [
+    h('p', { text: 'Some of your saved data could not be loaded safely. Braiwser has not changed those files, and edits to them are not being saved until you choose how to continue.' }),
+    ...view.items.map((it) => {
+      const row = h('div', { class: 'storage-health-item', style: { margin: '10px 0', padding: '10px', border: '1px solid var(--border, #444)', borderRadius: '8px' } }, [
+        h('div', { style: { fontWeight: '600' }, text: it.file + ' ' + it.title }),
+        it.error ? h('div', { class: 'field-hint', text: it.error }) : null,
+        h('div', { class: 'field-hint', text: it.advice }),
+      ]);
+      const btns = h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' } });
+      const run = async (mode, confirmText) => {
+        if (confirmText && !(await confirmDialog({ title: 'Start with an empty file?', message: confirmText, confirmLabel: 'Start fresh', danger: true }))) return;
+        let outcome;
+        try { outcome = describeRecovery(it, mode, await caos.store.recover(it.name, mode)); }
+        catch (e) { outcome = { ok: false, text: 'Recovery failed: ' + ((e && e.message) || e) }; }
+        toast(outcome.text, outcome.ok ? 'success' : 'error', 6000);
+        await reloadAfterRecovery();
+        const left = describeStorageHealth(await caos.store.status().catch(() => null));
+        if (left.damaged) openStorageHealthModal(left); else if (healthModal) { healthModal.close(); healthModal = null; }
+      };
+      if (it.canRestoreBackup) btns.appendChild(h('button', { class: 'btn btn-sm btn-primary', text: 'Restore from backup', on: { click: () => run('backup') } }));
+      if (it.canStartFresh) {
+        btns.appendChild(h('button', {
+          class: 'btn btn-sm btn-danger',
+          text: 'Start fresh',
+          title: 'The damaged file is renamed and kept, not deleted',
+          on: { click: () => run('empty', `This replaces ${it.file} with an empty file. The damaged copy is renamed and kept next to it, so it can still be recovered by hand.`) },
+        }));
+      }
+      if (btns.childNodes.length) row.appendChild(btns);
+      return row;
+    }),
+    view.maintenanceErrors.length ? h('div', { class: 'field-hint', text: 'Also: ' + view.maintenanceErrors.join('; ') }) : null,
+  ]);
+  healthModal = modal({
+    title: 'Saved data needs attention',
+    width: 520,
+    body,
+    actions: [{ label: 'Dismiss for now', kind: 'ghost' }],
+    onClose: () => { healthModal = null; },
+  });
+}
+
+async function reloadAfterRecovery() {
+  try {
+    const next = await caos.settings.get();
+    if (next) state.settings = next;
+    await refreshProjects();
+    await refreshSessions();
+    await refreshRecordings();
+    await refreshHistory();
+    await refreshBookmarks();
+    const s = state.currentSession;
+    if (s) {
+      const list = await caos.annotations.bySession(s.id);
+      if (sessions.isCurrent(s.id)) { state.annotations = list; notesPanel.setAnnotations(list); refreshPins(); }
+    }
+  } catch (e) { console.warn('[store] reload failed: ' + ((e && e.message) || e)); }
 }
 
 // ============================================================ SHELL
@@ -223,16 +369,26 @@ function buildShell() {
     onCount: (total) => { setTabCount('notes', total); syncStatus(); },
     getPersona: () => (state.settings && state.settings.persona) || 'agent',
     startChecklist: (id) => applyChecklist(id),
-    reorder: async (orderedIds) => {
-      if (!state.currentSession) return;
-      state.annotations = await caos.annotations.reorder(state.currentSession.id, orderedIds);
+    reorder: async (orderedIds, _opts) => {
+      // The panel now sends the FULL ordered id list even while filtered. Still
+      // run it through mergeFilteredOrder: it is a no-op for a full list and
+      // guarantees storage never receives a partial, unknown or duplicated id
+      // (e.g. when a note was added/removed since the panel last rendered).
+      // A rejection makes the panel undo its optimistic move.
+      const session = state.currentSession;
+      if (!session) return;
+      const full = mergeFilteredOrder(state.annotations.map((a) => a.id), orderedIds);
+      const list = await caos.annotations.reorder(session.id, full);
+      if (!sessions.isCurrent(session.id)) return; // user moved to another session meanwhile
+      state.annotations = list;
       notesPanel.setAnnotations(state.annotations);
+      refreshPins(); // page badges must follow the new numbering
     },
   });
 
   auditPanel = createAuditPanel(state.config, {
     run: () => runAudit(),
-    locate: (f) => locateTarget(f.target),
+    locate: (f) => locateTarget(f.target, { audit: true }),
     copySelector: (f) => copyText(f.selector, 'Selector copied'),
     addOne: (f) => promoteFindings([f]),
     addAll: (list) => promoteFindings(list),
@@ -251,6 +407,8 @@ function buildShell() {
   aiPanel = createAiPanel(state.config, {
     currentSessionId: () => state.currentSession && state.currentSession.id,
     run: (task, sessionId, extra) => caos.ai.run({ task, sessionId, provider: state.settings.aiProvider, ...(extra || {}) }),
+    // requestId is minted by the panel and travels in `extra` into ai.run.
+    cancel: (requestId) => caos.ai.cancel(requestId),
     save: saveAiResult,
     openSettings: openSettings,
   });
@@ -508,10 +666,13 @@ const COMMANDS = {
 function runCommand(command, arg) {
   const fn = COMMANDS[command];
   if (!fn) return false;
+  const fail = (e) => toast('That action failed: ' + (e && e.message ? e.message : e), 'error');
   try {
-    fn(arg);
+    const out = fn(arg);
+    // Most commands are async; a rejected promise must surface, not vanish.
+    if (out && typeof out.then === 'function') out.then(undefined, fail);
   } catch (e) {
-    toast('That action failed: ' + (e && e.message ? e.message : e), 'error');
+    fail(e);
   }
   return true;
 }
@@ -634,7 +795,7 @@ function createTab(url) {
   // require() for its sibling engines; contextIsolation keeps the page out.
   el.setAttribute('preload', state.config.inspectorPath);
   el.setAttribute('webpreferences', 'contextIsolation=yes,sandbox=no,nodeIntegration=no');
-  const tab = { id: 'tab' + ++tabSeq, wv: el, url: url || '', title: '' };
+  const tab = { id: 'tab' + ++tabSeq, wv: el, url: url || '', title: '', docGen: 0, documentId: '', derived: createTabDerived(), closed: false };
   state.tabs.push(tab);
   webviewHost.appendChild(el);
   const d = currentDevice();
@@ -646,19 +807,49 @@ function createTab(url) {
   return tab;
 }
 
-function setActiveTab(id) {
-  const tab = state.tabs.find((t) => t.id === id);
-  if (!tab) return;
-  // Replay stays bound to the tab that started it (ipc acks ignore other tabs).
-  // Switching away is allowed so you can keep working; the toast makes that clear.
-  if (state.replaying && tab.id !== state.activeTabId) {
-    toast('Replay continues on the other tab', 'info', 2200);
+// Repaint every panel that describes ONE guest document from that tab's own
+// record, so a selection/structure/audit from another tab never lingers.
+function paintDerived(tab) {
+  const d = tab.derived;
+  state.styleTarget = d.styleTarget;
+  state.editStacks = d.editStacks;
+  if (stylePanel) { stylePanel.setStyle(d.styleInfo); stylePanel.setTextEditing(d.textEditing); }
+  if (layersPanel) layersPanel.setLayout(d.layout);
+  if (sectionsPanel) sectionsPanel.setTree(d.tree);
+  state.lastAudit = d.audit ? d.audit.report : null;
+  if (auditPanel) {
+    auditPanel.setReport(d.audit ? d.audit.report : null, d.audit ? reportContextFromSource(d.audit.source) : null);
+    if (d.audit && d.audit.promoted.size) auditPanel.markPromoted([...d.audit.promoted]);
+    syncAuditContext();
   }
+}
+
+// Tell the Audit panel which page the user is looking at now, so a report from
+// another page/tab is flagged stale rather than offered for promotion.
+function syncAuditContext() {
+  if (!auditPanel || !auditPanel.setCurrentContext) return;
+  const t = activeTab();
+  auditPanel.setCurrentContext(currentContextFromTab(t, t ? viewportFor(t.wv) : null));
+}
+
+function setActiveTab(id) {
+  const tab = tabById(id);
+  if (!tab) return;
+  const prev = activeTab();
+  const switching = !prev || prev.id !== tab.id;
+  // Replay and recording stay bound to the tab that started them (their
+  // contexts capture the guest element), so switching away is safe; say so.
+  if (switching && state.replaying) toast('Replay keeps running on its own tab', 'info', 2200);
+  if (switching && state.recordingBuffer && state.recordingBuffer.ownerTabId !== tab.id) {
+    toast('Recording stays on its original tab — switch back to keep capturing', 'info', 2800);
+  }
+  if (switching && prev) sendToTab(prev, 'caos:set-mode', 'off'); // only the front tab holds a tool
   state.activeTabId = id;
   wv = tab.wv; // global alias used throughout
   state.tabs.forEach((t) => t.wv.classList.toggle('active', t.id === id));
   state.currentUrl = tab.url;
   state.currentTitle = tab.title;
+  if (switching) paintDerived(tab);
   toolbar.setAddress(tab.url);
   syncToolbar();
   updateBookmarkState();
@@ -673,7 +864,12 @@ function closeTab(id) {
   if (state.replaying) { toast('Finish or cancel replay before closing tabs', 'warn'); return; }
   const idx = state.tabs.findIndex((t) => t.id === id);
   if (idx === -1) return;
+  // The recording's owner tab is going away: finish the recording first so the
+  // steps are saved/discarded deliberately instead of silently dying.
+  if (state.recordingBuffer && state.recordingBuffer.ownerTabId === id) stopRecording();
+  audits.abandon(id, 'The tab was closed');
   const [tab] = state.tabs.splice(idx, 1);
+  tab.closed = true;
   try { tab.wv.remove(); } catch (_e) { /* ignore */ }
   if (state.activeTabId === id) {
     const next = state.tabs[idx] || state.tabs[idx - 1];
@@ -711,15 +907,34 @@ function persistOpenTabs() {
   }, 500);
 }
 
+// A new document replaced the old one in `tab`: the guest's selection, layers,
+// structure and edit history are gone, and a pending audit/restore for the old
+// document must not land on the new one.
+function onNewDocument(tab) {
+  tab.docGen += 1;
+  tab.documentId = ''; // the new document announces its id with caos:ready
+  resetForNewDocument(tab.derived);
+  audits.abandon(tab.id, 'The page navigated during the audit');
+  if (state.activeTabId !== tab.id) return;
+  state.styleTarget = null;
+  state.editStacks = tab.derived.editStacks;
+  if (stylePanel) { stylePanel.setStyle(null); stylePanel.setTextEditing(false); }
+  if (layersPanel) layersPanel.setLayout(null);
+  if (sectionsPanel) sectionsPanel.setTree(null);
+  syncToolbar();
+}
+
 function setupTabWebview(tab) {
   const el = tab.wv;
   const isActive = () => state.activeTabId === tab.id;
 
   el.addEventListener('dom-ready', () => {
-    el.send('caos:set-mode', isActive() ? state.mode : 'off');
+    sendToTab(tab, 'caos:set-mode', isActive() ? state.mode : 'off');
+    // The recorder lives in the document's preload: every new document starts
+    // with an inactive recorder, so an owned tab is re-armed here (idempotent).
+    recCtl.onDomReady(state.recordingBuffer, tab, sendToTab);
     if (isActive()) {
-      if (pendingDomReady) { const r = pendingDomReady; pendingDomReady = null; r(); }
-      maybeRestoreAnnotations();
+      maybeRestoreAnnotations(tab);
       requestTree();
     }
   });
@@ -745,7 +960,7 @@ function setupTabWebview(tab) {
   el.addEventListener('did-start-loading', () => { tab.loading = true; renderTabs(); if (isActive()) syncToolbar(); });
   el.addEventListener('did-stop-loading', () => { tab.loading = false; renderTabs(); if (isActive()) syncToolbar(); });
 
-  el.addEventListener('did-navigate', (e) => onNavigated(tab, e.url));
+  el.addEventListener('did-navigate', (e) => { onNewDocument(tab); onNavigated(tab, e.url); });
   el.addEventListener('did-navigate-in-page', (e) => onNavigated(tab, e.url));
   el.addEventListener('page-title-updated', (e) => {
     tab.title = e.title;
@@ -755,62 +970,62 @@ function setupTabWebview(tab) {
 
   el.addEventListener('ipc-message', (e) => {
     const payload = e.args && e.args[0];
+    const d = tab.derived;
     switch (e.channel) {
       case 'caos:ready':
-        if (payload) { tab.title = payload.title || tab.title; if (isActive()) state.currentTitle = tab.title; }
+        if (payload) {
+          tab.title = payload.title || tab.title;
+          if (payload.documentId) tab.documentId = payload.documentId; // identity of the document now shown
+          if (isActive()) state.currentTitle = tab.title;
+        }
         if (isActive()) requestTree();
         break;
       case 'caos:annotation':
-        if (isActive()) onAnnotation(payload);
+        if (isActive()) onAnnotation(payload, tab);
         break;
       case 'caos:edit-undo':
         // The guest reverted a rearrange edit — retract its captured note.
         if (isActive() && payload && payload.id) retractAnnotation(payload.id);
         break;
       case 'caos:escape':
-        setMode('off');
+        if (isActive()) setMode('off');
         break;
       case 'caos:rec-step':
-        if (isActive() && state.recordingBuffer) {
-          const steps = state.recordingBuffer.steps;
-          // Coalesced typing: replace the previous input on the same field so
-          // replay shows one typed value instead of flickering every keystroke.
-          if (payload && payload.replaceLast && payload.type === 'input' && steps.length) {
-            const prev = steps[steps.length - 1];
-            if (prev && prev.type === 'input' && prev.selector === payload.selector) {
-              steps[steps.length - 1] = payload;
-              break;
-            }
-          }
-          if (payload) delete payload.replaceLast;
-          steps.push(payload);
-        }
+        // Only the recording's owner tab may add steps.
+        if (recCtl.accepts(state.recordingBuffer, tab)) recCtl.pushGuestStep(state.recordingBuffer, payload);
         break;
-      case 'caos:replay-ack': {
-        if (!isActive()) break; // only the tab replay runs on may answer
-        const w = replayWaiters.get(payload.index);
-        if (w) { replayWaiters.delete(payload.index); w.resolve(payload); }
+      case 'caos:recording-status':
+        // Guest reports whether its recorder is active; re-arm a fresh document.
+        recCtl.onStatus(state.recordingBuffer, tab, payload, sendToTab);
         break;
-      }
+      case 'caos:replay-ack':
+        // Acknowledgements are consumed by the replay driver bound to THIS element.
+        break;
       case 'caos:style-picked':
+        d.styleInfo = payload || null;
+        d.styleTarget = (payload && payload.selector) || null;
         if (isActive()) {
-          state.styleTarget = payload && payload.selector;
+          state.styleTarget = d.styleTarget;
           stylePanel.setStyle(payload);
+          notifyCoach('element-selected');
         }
         break;
       case 'caos:element-collected':
-        if (isActive() && elementCapture) {
-          const done = elementCapture;
-          elementCapture = null;
-          done(payload);
-        }
+        // Request/reply handled by captureElement() on this element.
         break;
       case 'caos:text-editing':
-        if (isActive()) stylePanel.setTextEditing(payload && payload.editing);
+        d.textEditing = !!(payload && payload.editing);
+        if (isActive()) stylePanel.setTextEditing(d.textEditing);
         break;
       case 'caos:edit-stacks':
+        d.editStacks = payload || { undo: 0, redo: 0 };
+        {
+          const lost = describeDroppedHistory(payload, d.droppedEdits);
+          d.droppedEdits = lost.dropped;
+          if (lost.toast && isActive()) toast(lost.toast.text, lost.toast.tone, 4500);
+        }
         if (isActive()) {
-          state.editStacks = payload || { undo: 0, redo: 0 };
+          state.editStacks = d.editStacks;
           syncToolbar();
         }
         break;
@@ -823,15 +1038,19 @@ function setupTabWebview(tab) {
         if (isActive() && payload && payload.mode && payload.mode !== state.mode) {
           state.mode = payload.mode;
           syncToolbar();
+          notifyCoach('inspect-mode', state.mode === 'inspect');
           if (payload.mode === 'edit') switchTab('style');
         }
         break;
       case 'caos:dom-tree':
+        d.tree = payload || null;
         if (isActive()) sectionsPanel.setTree(payload);
         break;
       case 'caos:layout-picked':
+        d.layout = payload || null;
         if (!isActive()) break;
         layersPanel.setLayout(payload);
+        notifyCoach('element-selected');
         // The left rail is contextual: selecting something on the page brings
         // its structure forward, while project/session navigation stays in
         // Workspace.
@@ -843,18 +1062,44 @@ function setupTabWebview(tab) {
           if (chain.length) sectionsPanel.setActive(chain);
         }
         break;
+      case 'caos:structure-result':
+        // Reorder / move replies: a rejected edit is said so, an applied one refreshes the tree.
+        if (isActive() && payload) {
+          const fb = describeStructureResult(payload);
+          if (fb.toast) toast(fb.toast.text, fb.toast.tone, 4500);
+          if (fb.refresh) requestTree(true);
+        }
+        break;
       case 'caos:assert-pick':
         if (isActive()) onAssertPick(payload);
         break;
       case 'caos:audit-result':
-        if (isActive()) onAuditResult(payload);
+        // Consumed only by the audit run that started on this tab; anything else is dropped.
+        audits.deliver(tab.id, payload);
         break;
     }
   });
 }
 
+// The coach advances on what the user does (Inspect on, element picked, note
+// saved, shipped); it never blocks the page. notify() is the current API,
+// advance() the back-compat alias.
+function notifyCoach(event, detail) {
+  if (!coachmarks) return;
+  const fn = coachmarks.notify || coachmarks.advance;
+  if (fn) fn(event, detail);
+}
+
 function onNavigated(tab, url) {
   tab.url = url;
+  const isFront = state.activeTabId === tab.id;
+  // Audit findings describe a specific page: when the tab now shows another
+  // one, drop them (promotion/locate/verify must not use stale evidence).
+  if (dropStaleAudit(tab.derived, { tabId: tab.id, url }) && isFront) {
+    state.lastAudit = null;
+    auditPanel.setReport(null);
+  }
+  if (isFront) syncAuditContext();
   if (isWelcomeUrl(url)) {
     const hash = String(url).split('#')[1] || '';
     if (hash === 'open-folder') { openFolder(); return; }
@@ -868,7 +1113,10 @@ function onNavigated(tab, url) {
   }
   renderTabs();
   persistOpenTabs();
-  if (state.activeTabId !== tab.id) return;
+  // Record navigations that happen while recording (clicks/links etc.) — on the
+  // recording's owner tab, wherever the user is looking.
+  recCtl.pushNavigation(state.recordingBuffer, tab, url);
+  if (!isFront) return;
 
   if (!state.replaying) {
     toolbar.setAddress(url);
@@ -876,14 +1124,6 @@ function onNavigated(tab, url) {
   }
   state.currentUrl = url;
   syncToolbar();
-  // Record navigations that happen while recording (clicks/links etc.).
-  if (state.recordingBuffer) {
-    const steps = state.recordingBuffer.steps;
-    const last = steps[steps.length - 1];
-    if (!last || last.type !== 'navigate' || last.url !== url) {
-      steps.push({ type: 'navigate', url, ts: Date.now() });
-    }
-  }
 }
 
 function navigateTo(url) {
@@ -892,7 +1132,9 @@ function navigateTo(url) {
   state.currentUrl = url;
   if (tab) tab.url = url;
   toolbar.setAddress(url);
-  if (state.recordingBuffer) state.recordingBuffer.steps.push({ type: 'navigate', url, ts: Date.now() });
+  if (state.recordingBuffer && tab && recCtl.accepts(state.recordingBuffer, tab)) {
+    state.recordingBuffer.steps.push({ type: 'navigate', url, ts: Date.now() });
+  }
   wv.src = url;
   syncToolbar();
 }
@@ -924,17 +1166,6 @@ async function toggleBookmark() {
   await refreshBookmarks();
   syncToolbar();
   toast(state.bookmarked ? 'Bookmarked' : 'Bookmark removed');
-}
-
-// Convert address-bar text into a navigable URL.
-function resolveAddress(value) {
-  const v = (value || '').trim();
-  if (!v) return '';
-  if (/^[a-z]+:\/\//i.test(v) || v.startsWith('about:') || v.startsWith('data:')) return v;
-  if (v.startsWith('/')) return 'file://' + v;
-  // bare domain: has a dot, no spaces, looks like a host
-  if (/^[^\s]+\.[^\s]{2,}([/?#].*)?$/.test(v) && !/\s/.test(v)) return 'https://' + v;
-  return 'https://www.google.com/search?q=' + encodeURIComponent(v);
 }
 
 function syncToolbar() {
@@ -1057,57 +1288,82 @@ function setMode(mode) {
     sendWv('caos:request-style', {});
   }
   syncToolbar();
+  // Lets the first-run coach point at the page once Inspect is actually on.
+  notifyCoach('inspect-mode', state.mode === 'inspect');
 }
 
 // ============================================================ ANNOTATIONS
-async function onAnnotation(raw) {
-  const saved = await captureAnnotation(raw);
+async function onAnnotation(raw, tab) {
+  // Capture the tab BEFORE any await: the note belongs to the page it was made on.
+  const ctx = ops.capture('note', { tabId: tab && tab.id });
+  const saved = await captureAnnotation(raw, { ctx });
   if (saved) toast(`Note captured — ${saved.action}`, 'success');
 }
 
-// Persist one annotation into the active session, stamping it with the page and
-// the viewport it was captured at. Shared by in-page capture and audit promotion.
-async function captureAnnotation(raw) {
-  if (!raw) return null;
-  const session = await ensureSession();
+// The viewport a note/audit was made at, measured on the given guest element.
+function viewportFor(webview) {
   const d = currentDevice();
+  return { id: d.id, label: d.label, w: d.w || (webview ? webview.clientWidth : 0), h: d.h || (webview ? webview.clientHeight : 0) };
+}
+
+// Persist one annotation into a session, stamping it with the page and the
+// viewport it was captured at. Shared by in-page capture and audit promotion.
+//   opts.ctx     operation context captured when the note was made (url/title/tab)
+//   opts.session the session to save into (promotion captures it once per batch)
+// The saved note is recorded against the session it was created for; the
+// visible list/pins are only touched if that session is still on screen.
+async function captureAnnotation(raw, opts = {}) {
+  if (!raw) return null;
+  const ctx = opts.ctx || ops.capture('note');
+  let session = opts.session;
+  if (!session) {
+    try { session = await ensureSession(); } catch (e) {
+      toast('Could not start a session: ' + (e && e.message ? e.message : e), 'error');
+      return null;
+    }
+  }
   const annotation = {
     ...raw,
     sessionId: session.id,
-    url: raw.url || state.currentUrl,
-    title: raw.title || state.currentTitle,
+    url: raw.url || ctx.url,
+    title: raw.title || ctx.title,
     visibility: raw.visibility || chromeForPersona((state.settings && state.settings.persona) || 'agent').defaultVisibility,
-    viewport: raw.viewport || { id: d.id, label: d.label, w: d.w || (wv ? wv.clientWidth : 0), h: d.h || (wv ? wv.clientHeight : 0) },
+    viewport: raw.viewport || viewportFor(ctx.wv),
   };
-  let saved;
+  let result;
   try {
-    saved = await caos.annotations.create(annotation);
+    result = await sessions.addNote(session, annotation);
   } catch (e) {
     toast('Could not save that note: ' + (e && e.message ? e.message : e), 'error');
     return null;
   }
-  state.annotations.push(saved);
-  notesPanel.setAnnotations(state.annotations);
-  bumpSessionCount(session.id, 1);
-  refreshPins();
-  if (state.annotations.length === 1) armNextAction();
-  if (coachmarks && coachmarks.isVisible()) coachmarks.advance('note-saved');
-  return saved;
+  if (result.displayed) {
+    refreshPins(tabById(ctx.tabId) || undefined);
+    if (state.annotations.length === 1) armNextAction();
+  }
+  notifyCoach('note-saved');
+  return result.saved;
 }
 
 // ---- bulk triage -----------------------------------------------------------
+// Failures are counted (not announced as successes) and kept visible with a retry.
+// Partial failures are reported to the Notes panel (which keeps the failed notes
+// selected and shows its own "N of M failed - Retry" bar); we only count what worked.
 async function bulkUpdateAnnotations(list, patch) {
   if (!list || !list.length) return;
-  for (const a of list) {
-    try {
-      const updated = await caos.annotations.update(a.id, patch);
-      const i = state.annotations.findIndex((x) => x.id === a.id);
-      if (i >= 0) state.annotations[i] = updated || { ...a, ...patch };
-    } catch (_e) { /* keep going — one failure must not strand the rest */ }
+  const sid = state.currentSession && state.currentSession.id;
+  const res = await runBulk(list, async (a) => (await caos.annotations.update(a.id, patch)) || { ...a, ...patch });
+  if (sessions.isCurrent(sid)) {
+    for (const { item, result } of res.ok) {
+      const i = state.annotations.findIndex((x) => x.id === item.id);
+      if (i >= 0) state.annotations[i] = result;
+    }
+    notesPanel.setAnnotations(state.annotations);
+    refreshPins();
   }
-  notesPanel.setAnnotations(state.annotations);
-  refreshPins();
-  toast(`Updated ${list.length} note${list.length === 1 ? '' : 's'}`, 'success');
+  const msg = describeBulk('Updated', 'note', res);
+  if (!res.failed.length) toast(msg.text, msg.tone);
+  return toPanelResult(res);
 }
 
 async function bulkRemoveAnnotations(list) {
@@ -1118,40 +1374,48 @@ async function bulkRemoveAnnotations(list) {
     confirmLabel: 'Delete',
   });
   if (!ok) return;
-  for (const a of list) {
-    try {
-      await caos.annotations.remove(a.id);
-      state.annotations = state.annotations.filter((x) => x.id !== a.id);
-      if (state.currentSession) bumpSessionCount(state.currentSession.id, -1);
-    } catch (_e) { /* ignore */ }
+  return bulkRemoveAnnotationsNoConfirm(list);
+}
+
+async function bulkRemoveAnnotationsNoConfirm(list) {
+  const sid = state.currentSession && state.currentSession.id;
+  const res = await runBulk(list, (a) => caos.annotations.remove(a.id));
+  const gone = new Set(res.ok.map((r) => r.item.id));
+  if (sid && gone.size) bumpSessionCount(sid, -gone.size);
+  if (sessions.isCurrent(sid)) {
+    state.annotations = state.annotations.filter((x) => !gone.has(x.id));
+    notesPanel.setAnnotations(state.annotations);
+    refreshPins();
   }
-  notesPanel.setAnnotations(state.annotations);
-  refreshPins();
-  toast(`Deleted ${list.length} note${list.length === 1 ? '' : 's'}`);
+  const msg = describeBulk('Deleted', 'note', res);
+  if (!res.failed.length) toast(msg.text, msg.tone);
+  return toPanelResult(res);
 }
 
 // ---- single-element export ---------------------------------------------------
 // Ask the guest for everything the selected element needs to stand on its own,
-// then let the main process fetch its assets and package it.
-let elementCapture = null;
-
-function captureElement(selector) {
-  return new Promise((resolve) => {
-    let settled = false;
-    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
-    elementCapture = done;
-    sendWv('caos:collect-element', { selector: selector || '' });
-    setTimeout(() => { elementCapture = null; done(null); }, 8000);
+// then let the main process fetch its assets and package it. The request is
+// bound to the guest element it was made on (a tab switch cannot misroute it).
+function captureElement(selector, ctx) {
+  const c = ctx || ops.capture('element');
+  return requestFromGuest(c.wv, {
+    channel: 'caos:collect-element',
+    payload: { selector: selector || '' },
+    replyChannel: 'caos:element-collected',
+    timeoutMs: 8000,
+    fallback: null,
   });
 }
 
 async function exportSelectedElement() {
-  const selector = state.styleTarget;
+  const ctx = ops.capture('element');
+  const tab = tabById(ctx.tabId);
+  const selector = tab ? tab.derived.styleTarget : state.styleTarget;
   if (!selector) { toast('Select an element first', 'warn'); return null; }
   const busy = toast('Capturing element…', 'info', 10000);
   let bundle;
   try {
-    const payload = await captureElement(selector);
+    const payload = await captureElement(selector, ctx);
     if (!payload) { busy(); toast('Could not capture that element', 'error'); return null; }
     bundle = await caos.export.buildElement(payload, 'auto');
   } catch (err) {
@@ -1165,8 +1429,13 @@ async function exportSelectedElement() {
   const kb = Math.max(1, Math.round((bundle.meta.bytes || 0) / 1024));
   const extra = bundle.meta.assets ? ` · ${bundle.meta.assets} asset${bundle.meta.assets === 1 ? '' : 's'}` : '';
   toast(`Exported ${bundle.kind === 'zip' ? 'zip' : 'file'} — ${kb} KB${extra}`, 'success', 4000);
-  if (bundle.warnings && bundle.warnings.length) {
-    toast(bundle.warnings[0] + (bundle.warnings.length > 1 ? ` (+${bundle.warnings.length - 1} more)` : ''), 'warn', 5000);
+  // Say honestly when the capture was cut short or lossy.
+  if (bundle.meta && bundle.meta.truncated) {
+    toast('The element was too large to capture completely' + (bundle.meta.truncatedReason ? ' — ' + bundle.meta.truncatedReason : '') + '. The export is partial.', 'warn', 6000);
+  }
+  const warnings = Array.from(new Set([...(bundle.warnings || []), ...((bundle.meta && bundle.meta.warnings) || [])]));
+  if (warnings.length) {
+    toast(warnings[0] + (warnings.length > 1 ? ` (+${warnings.length - 1} more)` : ''), 'warn', 5000);
   }
   return saved;
 }
@@ -1178,8 +1447,13 @@ async function patchAnnotation(id, patch) {
   await updateAnnotation(a, patch);
 }
 
+// The session an annotation belongs to (falls back to the one on screen).
+const sessionOf = (a) => (a && a.sessionId) || (state.currentSession && state.currentSession.id) || null;
+
 async function updateAnnotation(a, patch) {
+  const sid = sessionOf(a);
   const updated = await caos.annotations.update(a.id, patch);
+  if (!sessions.isCurrent(sid)) return; // saved durably; that session is no longer on screen
   const i = state.annotations.findIndex((x) => x.id === a.id);
   if (i >= 0) state.annotations[i] = updated || { ...a, ...patch };
   notesPanel.setAnnotations(state.annotations);
@@ -1189,11 +1463,14 @@ async function updateAnnotation(a, patch) {
 async function removeAnnotation(a) {
   const ok = await confirmDialog({ title: 'Delete note', message: `Delete this ${a.action} note? This cannot be undone.`, confirmLabel: 'Delete' });
   if (!ok) return;
+  const sid = sessionOf(a);
   await caos.annotations.remove(a.id);
-  state.annotations = state.annotations.filter((x) => x.id !== a.id);
-  notesPanel.setAnnotations(state.annotations);
-  if (state.currentSession) bumpSessionCount(state.currentSession.id, -1);
-  refreshPins();
+  if (sid) bumpSessionCount(sid, -1);
+  if (sessions.isCurrent(sid)) {
+    state.annotations = state.annotations.filter((x) => x.id !== a.id);
+    notesPanel.setAnnotations(state.annotations);
+    refreshPins();
+  }
   toast('Note deleted');
 }
 
@@ -1202,104 +1479,106 @@ async function removeAnnotation(a) {
 async function retractAnnotation(id) {
   const a = state.annotations.find((x) => x.id === id);
   if (!a) return;
+  const sid = sessionOf(a);
   await caos.annotations.remove(id);
-  state.annotations = state.annotations.filter((x) => x.id !== id);
-  notesPanel.setAnnotations(state.annotations);
-  if (state.currentSession) bumpSessionCount(state.currentSession.id, -1);
-  refreshPins();
+  if (sid) bumpSessionCount(sid, -1);
+  if (sessions.isCurrent(sid)) {
+    state.annotations = state.annotations.filter((x) => x.id !== id);
+    notesPanel.setAnnotations(state.annotations);
+    refreshPins();
+  }
   toast('Edit undone — note removed');
 }
 
-function maybeRestoreAnnotations() {
-  if (!state.settings.restoreAnnotationsOnLoad || !state.currentSession) return;
-  const url = state.currentUrl || (wv && safe(() => wv.getURL()));
+// Re-send this page's pins to its guest. The fetch is bound to the session and
+// tab it started for: if either changed (or the tab navigated) by the time the
+// notes arrive, nothing is sent.
+function maybeRestoreAnnotations(tab = activeTab()) {
+  if (!state.settings.restoreAnnotationsOnLoad || !state.currentSession || !tab) return;
+  const url = tab.url || safe(() => tab.wv.getURL());
   if (!url) return;
-  caos.annotations.bySessionUrl(state.currentSession.id, url).then((list) => {
-    // Number each pin by its position in the full session list so badges match
-    // the Notes panel '#'. Fall back to draw-order (null) if not yet in state.
-    const arr = (Array.isArray(list) ? list : []).map((a) => {
-      const i = state.annotations.findIndex((x) => x.id === a.id);
-      return { ...a, pinNum: i >= 0 ? i + 1 : null };
-    });
-    if (wv) sendWv('caos:restore-annotations', arr);
+  const ctx = ops.capture('restore', { tabId: tab.id });
+  sessions.restorePins({
+    session: state.currentSession,
+    url,
+    stillValid: () => ops.isCurrent(ctx, { doc: true }) && tab.url === url,
+    deliver: (arr) => sendToTab(tab, 'caos:restore-annotations', arr),
   });
+}
+
+// Wait for a tab's navigation with an explicit outcome (ready | failed |
+// timeout | cancelled), bound to the tab captured in ctx.
+function navigateTabAndWait(ctx, url, timeoutMs) {
+  const tab = tabById(ctx.tabId);
+  return createReplayDriver({ ctx, getUrl: () => (tab && tab.url) || '' }).navigate(url, { timeoutMs: timeoutMs || 8000 });
 }
 
 // Locate an annotation's element — navigating to its page first if the active
 // tab is showing a different URL — then highlight it and report if not found.
 async function locateAnnotation(a) {
   if (!a || !a.target) return;
-  if (a.url && a.url !== state.currentUrl) {
-    await navigateAndWait(a.url);
+  const ctx = ops.capture('locate');
+  if (!ctx.wv) return;
+  if (a.url && a.url !== ctx.url) {
+    const nav = await navigateTabAndWait(ctx, a.url);
+    if (nav.outcome !== 'ready') { toast('Could not open that note’s page', 'warn'); return; }
     await sleep(150);
   }
-  const ok = await highlightAndAck(a.target);
+  if (ops.staleReason(ctx)) return; // the tab went away while navigating
+  const ok = await highlightAndAck(ctx.wv, a.target);
   if (!ok) toast('Could not locate that element on the page', 'warn');
 }
 
 // Highlight an arbitrary target descriptor (used by audit findings, which are
-// not annotations but carry the same anchor shape).
-async function locateTarget(target) {
+// not annotations but carry the same anchor shape). Audit findings are only
+// located on the page they were found on.
+async function locateTarget(target, { audit = false } = {}) {
   if (!target) { toast('This finding has no element to locate', 'warn'); return; }
-  const ok = await highlightAndAck(target);
+  const ctx = ops.capture('locate');
+  if (!ctx.wv) return;
+  if (audit) {
+    const tab = tabById(ctx.tabId);
+    const a = tab && tab.derived.audit;
+    if (!a || !sameAuditedPage(a.source, { tabId: ctx.tabId, url: ctx.url })) {
+      toast('These findings belong to a different page — run the audit again', 'warn');
+      return;
+    }
+  }
+  const ok = await highlightAndAck(ctx.wv, target);
   if (!ok) toast('Could not locate that element on the page', 'warn');
 }
 
-function highlightAndAck(target) {
-  return new Promise((resolve) => {
-    let settled = false;
-    const done = (v) => { if (!settled) { settled = true; wv.removeEventListener('ipc-message', h); resolve(v); } };
-    const h = (e) => { if (e.channel === 'caos:highlight-ack') done(!!(e.args[0] && e.args[0].ok)); };
-    if (wv) wv.addEventListener('ipc-message', h);
-    sendWv('caos:highlight-target', target);
-    setTimeout(() => done(false), 1500);
+async function highlightAndAck(webview, target) {
+  const reply = await requestFromGuest(webview, {
+    channel: 'caos:highlight-target',
+    payload: target,
+    replyChannel: 'caos:highlight-ack',
+    timeoutMs: 1500,
+    fallback: null,
   });
+  return !!(reply && reply.ok);
 }
 
 // Re-send the full current set so pin badge numbers match the Notes list '#'.
-function refreshPins() {
-  if (!state.currentSession || !state.settings.restoreAnnotationsOnLoad) return;
-  const url = state.currentUrl;
+function refreshPins(tab = activeTab()) {
+  if (!state.currentSession || !state.settings.restoreAnnotationsOnLoad || !tab) return;
+  const url = tab.url;
   const list = state.annotations
     .filter((a) => a.url === url)
     .map((a) => ({ ...a, pinNum: state.annotations.indexOf(a) + 1 }));
-  if (wv) sendWv('caos:restore-annotations', list);
+  sendToTab(tab, 'caos:restore-annotations', list);
 }
 
 // ============================================================ SESSIONS
-let _sessionInFlight = null;
-async function ensureSession() {
-  if (state.currentSession) return state.currentSession;
-  // Concurrent annotations (e.g. rapid captures) must share ONE create, not
-  // each spawn a duplicate "Quick notes" session.
-  if (_sessionInFlight) return _sessionInFlight;
-  _sessionInFlight = (async () => {
-    const session = await caos.sessions.create({
-      projectId: state.currentProject ? state.currentProject.id : null,
-      name: 'Quick notes',
-      url: state.currentUrl,
-      title: state.currentTitle,
-    });
-    state.currentSession = session;
-    state.annotations = [];
-    await refreshSessions();
-    toast('Started a “Quick notes” session');
-    return session;
-  })();
-  try {
-    return await _sessionInFlight;
-  } finally {
-    _sessionInFlight = null;
-  }
+// State transitions live in controllers/session-controller.js: every async
+// step is guarded by the session it was dispatched for.
+function ensureSession() {
+  return sessions.ensure();
 }
 
 function syncSessionTitle() {
   // Keep the active session's title fresh as the page reports titles.
-  if (state.currentSession && state.currentTitle && !state.currentSession.title) {
-    caos.sessions.update(state.currentSession.id, { title: state.currentTitle, url: state.currentUrl }).then((s) => {
-      if (s) state.currentSession = s;
-    });
-  }
+  sessions.syncTitle().catch(() => { /* best effort */ });
 }
 
 async function createSession() {
@@ -1316,14 +1595,17 @@ async function createSession() {
 }
 
 async function openSession(session) {
-  state.currentSession = session;
-  state.annotations = await caos.annotations.bySession(session.id);
-  notesPanel.setAnnotations(state.annotations);
-  renderSidebar();
+  // The session is shown immediately with an empty list; its notes replace that
+  // only if it is still the session the user asked for when they arrive.
+  const loading = sessions.open(session);
   switchTab('notes');
-  if (verifyPanel && Array.isArray(session.verifyRuns) && session.verifyRuns.length) {
-    verifyPanel.setRun(session.verifyRuns[session.verifyRuns.length - 1]);
+  // Verify belongs to the session: show its latest run, or clear the previous one.
+  if (verifyPanel) {
+    const runs = Array.isArray(session.verifyRuns) ? session.verifyRuns : [];
+    verifyPanel.setRun(runs.length ? runs[runs.length - 1] : null);
   }
+  const applied = await loading;
+  if (!applied) return;
   if (session.url && session.url !== state.currentUrl) {
     navigateTo(session.url);
   } else {
@@ -1335,7 +1617,7 @@ async function renameSession(session) {
   const name = await promptDialog({ title: 'Rename session', label: 'Session name', value: session.name });
   if (!name) return;
   const updated = await caos.sessions.update(session.id, { name });
-  if (state.currentSession && state.currentSession.id === session.id) state.currentSession = updated;
+  if (updated && sessions.isCurrent(session.id)) state.currentSession = updated;
   await refreshSessions();
 }
 
@@ -1343,10 +1625,9 @@ async function deleteSession(session) {
   const ok = await confirmDialog({ title: 'Delete session', message: `Delete “${session.name}” and all its notes?`, confirmLabel: 'Delete' });
   if (!ok) return;
   await caos.sessions.remove(session.id);
-  if (state.currentSession && state.currentSession.id === session.id) {
-    state.currentSession = null;
-    state.annotations = [];
-    notesPanel.setAnnotations([]);
+  if (sessions.isCurrent(session.id)) {
+    sessions.close();
+    if (verifyPanel) verifyPanel.setRun(null);
     sendWv('caos:clear-overlays');
   }
   await refreshSessions();
@@ -1354,9 +1635,14 @@ async function deleteSession(session) {
 }
 
 async function refreshSessions() {
-  state.sessions = await caos.sessions.list(state.currentProject ? state.currentProject.id : undefined);
+  const projectId = state.currentProject ? state.currentProject.id : undefined;
+  const list = await caos.sessions.list(projectId);
   // Badge counts in ONE pass (was N+1 bySession round-trips).
-  state.sessionCounts = await caos.annotations.countsBySession();
+  const counts = await caos.annotations.countsBySession();
+  // A project switch during the reads makes these lists belong to another project.
+  if ((state.currentProject ? state.currentProject.id : undefined) !== projectId) return;
+  state.sessions = list;
+  state.sessionCounts = counts;
   renderSidebar();
 }
 
@@ -1380,13 +1666,16 @@ async function createProject() {
 }
 
 async function openProject(project) {
+  const token = projectGen.begin(); // the latest requested project wins
   await caos.projects.touch(project.id);
-  state.currentProject = (await caos.projects.get(project.id)) || project;
-  state.currentSession = null;
-  state.annotations = [];
-  notesPanel.setAnnotations([]);
+  const loaded = (await caos.projects.get(project.id)) || project;
+  if (!projectGen.valid(token)) return;
+  state.currentProject = loaded;
+  sessions.close();
+  if (verifyPanel) verifyPanel.setRun(null);
   await refreshSessions();
   await refreshRecordings();
+  if (!projectGen.valid(token)) return;
   renderSidebar();
   toast(`Opened “${state.currentProject.name}”`);
 }
@@ -1404,10 +1693,10 @@ async function deleteProject(project) {
   if (!ok) return;
   await caos.projects.remove(project.id);
   if (state.currentProject && state.currentProject.id === project.id) {
+    projectGen.invalidate();
     state.currentProject = null;
-    state.currentSession = null;
-    state.annotations = [];
-    notesPanel.setAnnotations([]);
+    sessions.close();
+    if (verifyPanel) verifyPanel.setRun(null);
   }
   await refreshProjects();
   await refreshSessions();
@@ -1419,31 +1708,28 @@ async function deleteProject(project) {
 async function openFile() {
   const res = await caos.fs.openFile();
   if (!res) return;
-  await openLocalTarget(res, 'local');
+  await openLocalTarget(res, 'file');
 }
 
 async function openFolder() {
   const res = await caos.fs.openDirectory();
   if (!res) return;
-  await openLocalTarget(res, 'local');
+  await openLocalTarget(res, 'folder');
 }
 
 // Open a local file/dir result: create-or-find a matching project, then navigate.
+// A project's `path` is always its DIRECTORY (hand-off writes and runs there);
+// the page that was opened is kept separately as `entry` (MB-01).
 async function openLocalTarget(res, kind) {
   navigateTo(res.url);
-  const name = basename(res.path);
-  let project = state.projects.find((p) => p.path === res.path);
+  const target = localTarget(kind, res);
+  if (!target) return;
+  let project = state.projects.find((p) => matchesLocalTarget(p, target));
   if (!project) {
-    project = await caos.projects.create({ name, path: res.path, kind });
+    project = await caos.projects.create({ name: target.name, path: target.path, entry: target.entry, kind: 'local' });
     await refreshProjects();
   }
   await openProject(project);
-}
-
-function basename(p) {
-  if (!p) return 'Project';
-  const parts = String(p).replace(/[\\/]+$/, '').split(/[\\/]/);
-  return parts[parts.length - 1] || p;
 }
 
 // ============================================================ RECORDING
@@ -1455,10 +1741,16 @@ async function toggleRecord() {
   }
 }
 
+// A recording belongs to the tab it started on (controllers/recording-controller.js):
+// the owner is re-armed on every new document, and stopping stops every guest
+// that was armed — not just whichever tab is in front.
 function startRecording() {
-  if (state.replaying) return;
-  state.recordingBuffer = { startUrl: state.currentUrl, steps: [{ type: 'navigate', url: state.currentUrl, ts: Date.now() }] };
-  sendWv('caos:start-recording');
+  if (state.replaying || state.recordingBuffer) return;
+  const tab = activeTab();
+  if (!tab) return;
+  state.recordingBuffer = recCtl.createRecordingBuffer({ startUrl: state.currentUrl, ownerTabId: tab.id });
+  recCtl.arm(state.recordingBuffer, tab, sendToTab);
+  state.recordingBuffer.releaseAwake = awake.acquire(() => tab.wv.getWebContentsId());
   syncToolbar();
   showOverlay(true);
   overlayLabel.innerHTML = '<span class="rec-dot"></span> Recording…';
@@ -1468,8 +1760,13 @@ function startRecording() {
 }
 
 async function stopRecording() {
-  sendWv('caos:stop-recording');
   const buffer = state.recordingBuffer;
+  if (buffer) {
+    recCtl.stopAll(buffer, state.tabs, sendToTab);
+    if (buffer.releaseAwake) buffer.releaseAwake();
+  } else {
+    sendWv('caos:stop-recording');
+  }
   state.recordingBuffer = null;
   syncToolbar();
   showOverlay(false);
@@ -1502,7 +1799,10 @@ async function stopRecording() {
 }
 
 async function refreshRecordings() {
-  state.recordings = await caos.recordings.list(state.currentProject ? state.currentProject.id : undefined);
+  const projectId = state.currentProject ? state.currentProject.id : undefined;
+  const list = await caos.recordings.list(projectId);
+  if ((state.currentProject ? state.currentProject.id : undefined) !== projectId) return; // project changed during the read
+  state.recordings = list;
   if (state.selectedRecording && !state.recordings.find((r) => r.id === state.selectedRecording.id)) {
     state.selectedRecording = null;
   }
@@ -1604,13 +1904,15 @@ async function exportRecordingVideo(rec) {
   const fmt = pickVideoFormat();
   if (!fmt) { toast('This build cannot record video', 'error'); return null; }
   selectRecording(rec);
+  const ctx = ops.capture('video'); // film THIS tab even if the user switches away
+  if (!ctx.wv) { toast('Open a page first', 'warn'); return null; }
 
   let stream = null;
   let recorder = null;
   let track = null;
   const chunks = [];
   try {
-    await caos.export.videoSource(wv.getWebContentsId());
+    await caos.export.videoSource(ctx.wv.getWebContentsId());
     stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: false });
     track = stream.getVideoTracks()[0] || null;
     recorder = new MediaRecorder(stream, { mimeType: fmt.mime, videoBitsPerSecond: 6_000_000 });
@@ -1626,7 +1928,7 @@ async function exportRecordingVideo(rec) {
   const startedAt = Date.now();
   toast('Filming the replay…', 'info', 2000);
   try {
-    await replaySelected({ forVideo: true });
+    await replayRecording(rec, { forVideo: true, ctx });
   } finally {
     await new Promise((r) => setTimeout(r, 600)); // let the last frames land
     // Flush the tail, then wait for the muxer to finalise — for MP4 this is when
@@ -1676,104 +1978,93 @@ function blobToBase64(blob) {
   });
 }
 
-function parseStepTs(step) {
-  if (!step || !step.ts) return NaN;
-  if (typeof step.ts === 'number') return step.ts;
-  const ms = Date.parse(step.ts);
-  return Number.isFinite(ms) ? ms : NaN;
-}
-
-// Inter-step pause. Prefer the real gaps captured at record time so the film
-// matches what the reviewer did; fall back to settings.replayDelayMs.
-// `fast` (e2e / delay < 100) keeps the fixed short pause so the suite stays snappy.
-function pauseAfterStep(prev, next, { baseDelay, forVideo, fast }) {
-  if (fast) return Math.max(0, baseDelay);
-  const floor = forVideo ? Math.max(baseDelay, 900) : Math.max(baseDelay, 450);
-  const ceiling = forVideo ? 3500 : 2500;
-  const a = parseStepTs(prev);
-  const b = parseStepTs(next);
-  if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) return floor;
-  return Math.max(floor, Math.min(ceiling, b - a));
-}
-
-async function replaySelected(opts = {}) {
+// Replay is bound to the tab (and guest element) that was in front when it
+// started: navigation, steps, URL assertions and acknowledgements all go through
+// that context, so switching or creating tabs mid-run cannot redirect it.
+// The outcome is a verdict (passed | failed | cancelled | timedOut | skipped |
+// unknown) over the PLANNED steps — see controllers/replay-engine.js.
+function replaySelected(opts = {}) {
   const rec = state.selectedRecording;
+  if (!rec) return Promise.resolve(undefined);
+  return replayRecording(rec, opts);
+}
+
+async function replayRecording(rec, opts = {}) {
   if (!rec || state.replaying || state.recordingBuffer) return;
   const full = (await caos.recordings.get(rec.id)) || rec;
   const steps = full.steps || [];
   if (!steps.length) { toast('Recording has no steps', 'warn'); return; }
+  if (state.replaying || state.recordingBuffer) return; // another run started while we were reading
+
+  const ctx = opts.ctx || ops.capture('replay');
+  const tab = tabById(ctx.tabId);
+  if (!tab || ops.staleReason(ctx)) { toast('That tab is gone — open a page and try again', 'warn'); return; }
 
   const forVideo = !!opts.forVideo;
   const baseDelay = state.settings.replayDelayMs ?? 600;
   // E2E deliberately drops the delay to tens of ms — keep that path instant.
   const fast = !forVideo && baseDelay < 100;
 
+  const ac = new AbortController();
+  replayRun = { ctx, ac };
   state.replaying = true;
   syncToolbar();
   showOverlay(true);
   overlayFill.parentElement.style.display = '';
   overlayCancelBtn.textContent = 'Cancel';
   overlayCancelBtn.onclick = cancelReplay;
-  sendWv('caos:replay-cursor', { show: true });
 
-  const results = [];
+  const driver = createReplayDriver({ ctx, getUrl: () => tab.url });
+  const releaseAwake = awake.acquire(() => ctx.wv.getWebContentsId());
+  driver.setCursor(true);
+  let report;
   try {
-    for (let i = 0; i < steps.length; i++) {
-      if (!state.replaying) break;
-      overlayLabel.textContent = `Replaying ${i + 1}/${steps.length}`;
-      overlayFill.style.width = Math.round(((i + 1) / steps.length) * 100) + '%';
-      const step = steps[i];
-      let res;
-      if (step.type === 'navigate') {
-        await navigateAndWait(step.url);
-        res = { ok: true };
-      } else if (step.type === 'assert' && step.kind === 'url') {
-        // URL assertions are evaluated host-side against the live location.
-        const ok = compareStr(step.op || 'contains', state.currentUrl || '', step.expected);
-        res = { ok, actual: state.currentUrl || '', error: ok ? '' : `url "${(state.currentUrl || '').slice(0, 48)}" ${step.op || 'contains'} "${step.expected}" failed` };
-      } else {
-        res = await replayStep(step, i, { fast, forVideo });
-      }
-      const label = step.type === 'assert' ? `assert:${step.kind}` : step.type;
-      results.push({ i, type: label, selector: step.selector || step.url || step.expected || '', ok: !!res.ok, error: res.error || '', actual: res.actual });
-      if (!state.replaying) break;
-      const next = steps[i + 1];
-      if (next) await sleep(pauseAfterStep(step, next, { baseDelay, forVideo, fast }));
-      else if (forVideo) await sleep(Math.max(baseDelay, 700));
-    }
+    report = await runReplay({
+      steps, driver, signal: ac.signal, baseDelay, forVideo, fast,
+      onProgress: ({ i, total }) => {
+        overlayLabel.textContent = `Replaying ${i + 1}/${total}`;
+        overlayFill.style.width = Math.round(((i + 1) / total) * 100) + '%';
+      },
+      extra: { recordingId: rec.id, runId: ctx.runId, tabId: ctx.tabId },
+    });
   } catch (e) {
     toast('Replay error: ' + (e && e.message ? e.message : e), 'error');
+    report = buildReplayReport({ steps, results: [], terminal: 'unknown', extra: { recordingId: rec.id, runId: ctx.runId, tabId: ctx.tabId } });
   } finally {
-    sendWv('caos:replay-cursor', { show: false });
+    driver.setCursor(false);
     finishReplay();
+    releaseAwake(); // cancel, error and timeout all end here
   }
 
-  // Build a pass/fail report — replay doubles as a smoke test.
-  const passed = results.filter((r) => r.ok).length;
-  const report = { at: new Date().toISOString(), total: results.length, passed, failed: results.length - passed, steps: results };
-  await caos.recordings.update(rec.id, { lastRun: report });
-  await refreshRecordings();
-  if (report.failed === 0) {
-    toast(`Replay passed — ${passed}/${results.length} steps`, 'success');
-  } else {
-    toast(`Replay: ${report.failed} step(s) failed`, 'error', 4000);
-    showReplayReport(rec, report);
+  // The report doubles as a smoke test: persist it with its honest status
+  // (a cancelled or half-run journey is recorded as such, never as passed).
+  try {
+    await caos.recordings.update(rec.id, { lastRun: report });
+    await refreshRecordings();
+  } catch (e) {
+    toast('Could not save the replay result: ' + (e && e.message ? e.message : e), 'error');
   }
+  const summary = describeReplay(report);
+  toast(summary.text, summary.tone, summary.tone === 'error' ? 4000 : undefined);
+  if (report.status !== 'passed' && report.status !== 'cancelled') showReplayReport(rec, report);
   return report;
 }
 
 function showReplayReport(rec, report) {
+  const colors = { passed: '#3ddc97', failed: '#ff6b6b', timedOut: '#ff6b6b', cancelled: '#ffb454', skipped: '#9aa2b1', unknown: '#ffb454' };
   const rows = report.steps
     .map((s) => {
+      const st = s.status || (s.ok ? 'passed' : 'failed');
       const detail = s.error ? esc(s.error) : s.actual != null && s.actual !== '' ? 'got: ' + esc(String(s.actual)) : esc(s.selector);
-      return `<tr><td>${s.i + 1}</td><td class="mono">${esc(s.type)}</td><td style="color:${s.ok ? '#3ddc97' : '#ff6b6b'}">${s.ok ? 'pass' : 'fail'}</td><td class="mono">${detail}</td></tr>`;
+      return `<tr><td>${s.i + 1}</td><td class="mono">${esc(s.type)}</td><td style="color:${colors[st] || '#ff6b6b'}">${esc(st === 'passed' ? 'pass' : st === 'failed' ? 'fail' : st)}</td><td class="mono">${detail}</td></tr>`;
     })
     .join('');
+  const headline = `${report.passed}/${report.total} steps passed` + (report.status === 'passed' ? '.' : ` — result: ${esc(report.status)}.`);
   modal({
     title: `Replay report — ${rec.name}`,
     width: 580,
     body: h('div', {
-      html: `<p style="color:var(--dim);margin:0 0 10px">${report.passed}/${report.total} steps passed.</p>
+      html: `<p style="color:var(--dim);margin:0 0 10px">${headline}</p>
         <table class="report-table"><thead><tr><th>#</th><th>type</th><th>result</th><th>detail</th></tr></thead><tbody>${rows}</tbody></table>`,
     }),
     actions: [{ label: 'Close', kind: 'primary' }],
@@ -1894,39 +2185,19 @@ async function editRecording(rec) {
   });
 }
 
-function navigateAndWait(url) {
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = () => { if (!done) { done = true; pendingDomReady = null; resolve(); } };
-    pendingDomReady = finish;
-    state.currentUrl = url;
-    wv.src = url;
-    setTimeout(finish, 8000); // safety timeout
-  });
-}
-
-function replayStep(step, index, opts = {}) {
-  return new Promise((resolve) => {
-    let settled = false;
-    const done = (res) => { if (!settled) { settled = true; replayWaiters.delete(index); resolve(res || { ok: false, error: 'timeout' }); } };
-    replayWaiters.set(index, { resolve: (p) => done(p) });
-    sendWv('caos:replay-step', { step, index, opts: { fast: !!opts.fast, forVideo: !!opts.forVideo } });
-    // Typing + cursor travel can exceed the old 5s budget on long fields.
-    const timeoutMs = opts.fast ? 5000 : 20000;
-    setTimeout(() => done({ ok: false, error: 'no response (timeout)' }), timeoutMs);
-  });
-}
-
+// Cancel settles every pending waiter at once (the replay's AbortSignal is shared
+// with the driver) and ends the run with terminal status 'cancelled'; the
+// not-yet-run steps are reported as skipped, never as passed.
 function cancelReplay() {
   if (!state.replaying) return;
-  state.replaying = false;
+  if (replayRun) replayRun.ac.abort();
+  else state.replaying = false;
   toast('Replay cancelled');
 }
 
 function finishReplay() {
   state.replaying = false;
-  replayWaiters.clear();
-  pendingDomReady = null;
+  replayRun = null;
   showOverlay(false);
   overlayFill.style.width = '0%';
   syncToolbar();
@@ -1938,51 +2209,63 @@ function showOverlay(show) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// String comparison shared with the replay engine's assert ops.
-function compareStr(op, actual, expected) {
-  const a = String(actual == null ? '' : actual);
-  const e = String(expected == null ? '' : expected);
-  if (op === 'equals') return a === e;
-  if (op === 'matches') { try { return new RegExp(e).test(a); } catch (_err) { return false; } }
-  return a.toLowerCase().includes(e.toLowerCase());
-}
-
 // ============================================================ PAGE AUDIT
 // The audit runs inside the guest page (src/webview/audit.js) so it sees the
 // real, computed, post-JavaScript DOM. Findings are not annotations until the
 // user promotes them — an audit is a suggestion, a note is a decision.
-const AUDIT_TIMEOUT_MS = 15000;
-let auditTimer = null;
+//
+// A run is bound to the tab/document it started on (controllers/audit-controller.js);
+// its report is stored on THAT tab with the identity of the audited page, and a
+// failure/timeout/skip is an explicit outcome — never a clean zero report.
+const audits = createAuditRunner({
+  send: (ctx) => ctx.wv.send('caos:run-audit', { runId: ctx.runId }),
+  staleReason: (ctx) => ops.staleReason(ctx, { doc: true }),
+  getViewport: (ctx) => viewportFor(ctx.wv),
+});
+
+// Run an audit for ctx. Resolves { outcome, report, source } (see run-report.auditOutcome).
+async function runAuditFor(ctx) {
+  const skipped = (reason) => ({ outcome: auditOutcome(null, { skipped: true, reason }), report: null, source: null });
+  const tab = tabById(ctx.tabId);
+  if (!tab || ops.staleReason(ctx)) return { outcome: auditOutcome(null, { cancelled: true, reason: 'The tab is gone' }), report: null, source: null };
+  if (state.auditing) return skipped('An audit is already running');
+  if (/welcome\.html$/.test(ctx.url || '') || isWelcomeUrl(ctx.url)) { toast('Open a real page to audit', 'warn'); return skipped('No page to audit'); }
+  const front = () => state.activeTabId === ctx.tabId;
+  state.auditing = true;
+  if (front()) { switchTab('audit'); auditPanel.setRunning(true); }
+  syncToolbar();
+  let res;
+  const releaseAwake = awake.acquire(() => ctx.wv.getWebContentsId());
+  try {
+    res = await audits.run(ctx);
+  } finally {
+    state.auditing = false;
+    releaseAwake();
+  }
+  const report = res.report;
+  if (report && !res.stale) {
+    tab.derived.audit = { report, outcome: res.outcome, source: res.source, promoted: new Set() };
+    if (front()) {
+      state.lastAudit = report;
+      auditPanel.setReport(report, reportContextFromSource(res.source));
+      syncAuditContext();
+      if (report.error) toast(report.error, 'warn', 4000);
+      else if (!report.total) toast('Audit passed — no issues found', 'success');
+      else toast(`Audit found ${report.total} issue${report.total === 1 ? '' : 's'}`, report.counts && report.counts.critical ? 'error' : 'warn');
+    }
+  } else if (front()) {
+    // Abandoned (page changed / tab closed): show what this tab really has.
+    auditPanel.setReport(tab.derived.audit ? tab.derived.audit.report : null, tab.derived.audit ? reportContextFromSource(tab.derived.audit.source) : null);
+    syncAuditContext();
+  }
+  syncToolbar();
+  return res;
+}
 
 function runAudit() {
   if (!wv) { toast('Open a page first', 'warn'); return Promise.resolve(null); }
   if (state.auditing) return Promise.resolve(null);
-  if (/welcome\.html$/.test(state.currentUrl || '') || isWelcomeUrl(state.currentUrl)) { toast('Open a real page to audit', 'warn'); return Promise.resolve(null); }
-  state.auditing = true;
-  switchTab('audit');
-  auditPanel.setRunning(true);
-  syncToolbar();
-  sendWv('caos:run-audit');
-  clearTimeout(auditTimer);
-  return new Promise((resolve) => {
-    auditWaiter = resolve;
-    auditTimer = setTimeout(() => {
-      if (!state.auditing) return;
-      onAuditResult({ error: 'The page did not answer the audit in time. Reload it and try again.', findings: [], counts: {}, total: 0 });
-    }, AUDIT_TIMEOUT_MS);
-  });
-}
-
-function onAuditResult(report) {
-  clearTimeout(auditTimer);
-  state.auditing = false;
-  state.lastAudit = report || null;
-  syncToolbar();
-  auditPanel.setReport(report);
-  if (auditWaiter) { const done = auditWaiter; auditWaiter = null; done(report); }
-  if (!report || report.error) return;
-  if (!report.total) toast('Audit passed — no issues found', 'success');
-  else toast(`Audit found ${report.total} issue${report.total === 1 ? '' : 's'}`, report.counts && report.counts.critical ? 'error' : 'warn');
+  return runAuditFor(ops.capture('audit')).then((res) => res.report);
 }
 
 // Severity decides both the action tag and the note priority, so a promoted
@@ -1990,27 +2273,49 @@ function onAuditResult(report) {
 const AUDIT_ACTION = { critical: 'fix', serious: 'fix', moderate: 'change', minor: 'comment' };
 const AUDIT_PRIORITY = { critical: 'critical', serious: 'high', moderate: 'normal', minor: 'low' };
 
-function findingToAnnotation(f) {
+// `source` is the identity of the audited page ({url,title,viewport,...}); the
+// note is stamped with it, not with whatever page is showing when the user
+// presses "Add as note".
+function findingToAnnotation(f, source) {
   const detail = f.detail ? ` ${f.detail}` : '';
   const help = f.help ? ` Fix: ${f.help}` : '';
-  return {
+  const out = {
     kind: f.target && f.target.selector ? 'element' : 'region',
     action: AUDIT_ACTION[f.severity] || 'comment',
     note: `[audit:${f.ruleId}] ${f.title}.${detail}${help}`.trim(),
     target: f.target || {},
     priority: AUDIT_PRIORITY[f.severity] || 'normal',
   };
+  if (source) {
+    out.url = source.url;
+    out.title = source.title;
+    if (source.viewport) out.viewport = source.viewport;
+  }
+  return out;
 }
 
 async function promoteFindings(findings) {
   const list = (findings || []).filter(Boolean);
   if (!list.length) { toast('Nothing to capture', 'warn'); return; }
+  const ctx = ops.capture('promote');
+  const tab = tabById(ctx.tabId);
+  const audit = tab && tab.derived.audit;
+  if (!audit || !sameAuditedPage(audit.source, { tabId: ctx.tabId, url: ctx.url })) {
+    toast('These findings belong to a different page — run the audit again', 'warn');
+    return;
+  }
+  let session;
+  try { session = await ensureSession(); } catch (e) {
+    toast('Could not start a session: ' + (e && e.message ? e.message : e), 'error');
+    return;
+  }
   const done = [];
   for (const f of list) {
-    const saved = await captureAnnotation(findingToAnnotation(f));
+    const saved = await captureAnnotation(findingToAnnotation(f, audit.source), { ctx, session });
     if (saved) done.push(f.id);
   }
-  auditPanel.markPromoted(done);
+  done.forEach((id) => audit.promoted.add(id));
+  if (tab.derived.audit === audit && state.activeTabId === tab.id) auditPanel.markPromoted(done);
   if (done.length) toast(`Captured ${done.length} finding${done.length === 1 ? '' : 's'} as notes`, 'success');
 }
 
@@ -2048,12 +2353,51 @@ async function importBundleText(text) {
     await refreshProjects();
     await openProject(res.project);
     const c = res.counts;
-    toast(`Imported “${res.project.name}” — ${c.sessions} session(s), ${c.annotations} note(s), ${c.recordings} recording(s)`, 'success');
+    const summary = `“${res.project.name}” — ${c.sessions} session(s), ${c.annotations} note(s), ${c.recordings} recording(s)`;
+    if (res.partial || (res.warnings && res.warnings.length)) {
+      // Not an unqualified success: say what was dropped or altered.
+      toast(`Imported ${summary} — partial: ${res.droppedCount || 0} item(s) dropped`, 'warn', 6000);
+      showImportReport(res);
+    } else {
+      toast(`Imported ${summary}`, 'success');
+    }
     return res;
   } catch (e) {
     toast('Import failed: ' + (e && e.message ? e.message : e), 'error');
     return null;
   }
+}
+
+function noteList(items) {
+  return h('ul', {}, items.map((t) => h('li', { text: t })));
+}
+
+// What a bundle import dropped or altered (import is validated, never silent).
+function showImportReport(res) {
+  const dropped = (res.dropped || []).map((d) => `${d.type} #${(d.index || 0) + 1}: ${d.reason}`);
+  if ((res.droppedCount || 0) > dropped.length) dropped.push(`…and ${res.droppedCount - dropped.length} more`);
+  const parts = [];
+  if (dropped.length) parts.push(h('h4', { text: 'Not imported' }), noteList(dropped));
+  if (res.warnings && res.warnings.length) parts.push(h('h4', { text: 'Changed on import' }), noteList(res.warnings));
+  modal({ title: 'Import was partial', width: 520, body: h('div', {}, parts), actions: [{ label: 'Close', kind: 'primary' }] });
+}
+
+// Playwright export: say which steps could not be exported and that secrets
+// are supplied at runtime, never written into the file.
+function showPlaywrightExportNotes(out) {
+  const skipped = (out && out.skipped) || [];
+  const secrets = (out && out.secrets) || [];
+  if (!skipped.length && !secrets.length) return;
+  const parts = [];
+  if (skipped.length) {
+    parts.push(h('h4', { text: `${skipped.length} step${skipped.length === 1 ? '' : 's'} not exported — the test fails at each` }),
+      noteList(skipped.slice(0, 12).map((s2) => (s2.index < 0 ? 'Start URL' : `Step ${s2.index + 1}${s2.type ? ' (' + s2.type + ')' : ''}`) + ': ' + s2.reason)));
+  }
+  if (secrets.length) {
+    parts.push(h('h4', { text: 'Secrets are not in the file' }),
+      h('p', { class: 'field-hint', text: 'Set these environment variables before running the test:' }), noteList(secrets));
+  }
+  modal({ title: 'Playwright export notes', width: 520, body: h('div', {}, parts), actions: [{ label: 'Close', kind: 'primary' }] });
 }
 
 // ============================================================ RECORDING EXPORT
@@ -2062,6 +2406,7 @@ async function exportRecordingAs(format, rec) {
     const out = await caos.export.recording(format, rec.id);
     const saved = await caos.fs.save({ defaultName: out.defaultName, content: out.content });
     if (saved) toast(format === 'json' ? 'Journey exported' : 'Playwright test written', 'success');
+    if (saved && format === 'playwright') showPlaywrightExportNotes(out);
     return out;
   } catch (e) {
     toast('Export failed: ' + (e && e.message ? e.message : e), 'error');
@@ -2120,10 +2465,6 @@ function onScreenshot(e) {
   ]);
 }
 
-function currentUrlAnnotations() {
-  return state.annotations.filter((a) => a.url === state.currentUrl);
-}
-
 // Action→color map from the canonical config (passed to the screenshot compositor).
 function actionColors() {
   const m = {};
@@ -2131,15 +2472,18 @@ function actionColors() {
   return m;
 }
 
-// Ask the inspector for live page-coordinate boxes for the given annotations.
-function requestPageBoxes(annotations) {
+// Live scroll origin, device pixel ratio and CSS viewport of ONE guest, so
+// overlay boxes can be converted into the screenshot's coordinate space.
+function measureGuest(webview) {
   return new Promise((resolve) => {
-    const handler = (e) => {
-      if (e.channel === 'caos:page-boxes') { wv.removeEventListener('ipc-message', handler); resolve(e.args[0] || []); }
-    };
-    wv.addEventListener('ipc-message', handler);
-    sendWv('caos:request-page-boxes', annotations);
-    setTimeout(() => { wv.removeEventListener('ipc-message', handler); resolve([]); }, 3000);
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    setTimeout(() => finish(null), 1500);
+    try {
+      Promise.resolve(webview.executeJavaScript(
+        '({scroll:{x:window.scrollX,y:window.scrollY},dpr:window.devicePixelRatio,viewport:{w:window.innerWidth,h:window.innerHeight}})'
+      )).then(finish, () => finish(null));
+    } catch (_e) { finish(null); }
   });
 }
 
@@ -2149,30 +2493,41 @@ async function saveShot(dataUrl, count, suffix) {
   if (saved) toast(count ? `Screenshot saved with ${count} annotations` : 'Screenshot saved', 'success');
 }
 
+// The tab, document, viewport and scroll origin are snapshotted around the
+// async capture (controllers/screenshot-capture.js). Overlay boxes are FRESH
+// (requested right after the pixels), tagged by coordinate space, and converted
+// into the image's space; if the page moved they are omitted, not misdrawn.
 async function doScreenshot(full) {
+  const ctx = ops.capture('screenshot');
+  if (!ctx.wv) { toast('Open a page first', 'warn'); return; }
   try {
-    if (!full) {
-      const img = await wv.capturePage();
-      let dataUrl = img.toDataURL();
-      const onPage = currentUrlAnnotations().filter((a) => a.target && a.target.box);
-      if (onPage.length) dataUrl = await compositeAnnotations(dataUrl, onPage, { cssWidth: wv.clientWidth, colors: actionColors() });
-      await saveShot(dataUrl, onPage.length);
-      return;
-    }
-    // Full page: capture beyond the viewport via CDP, then composite using
-    // freshly-resolved page-coordinate boxes.
-    const cap = await caos.fs.captureFullPage(wv.getWebContentsId());
-    if (!cap || !cap.ok) { toast('Full-page capture failed: ' + ((cap && cap.error) || '?'), 'error'); return; }
-    let dataUrl = cap.dataUrl;
-    const onPage = currentUrlAnnotations();
-    let count = 0;
-    if (onPage.length) {
-      const boxes = await requestPageBoxes(onPage);
-      const items = onPage.map((a, i) => ({ action: a.action, note: a.note, box: boxes[i] })).filter((it) => it.box);
-      count = items.length;
-      if (items.length) dataUrl = await compositeAnnotations(dataUrl, items, { cssWidth: cap.cssWidth, colors: actionColors() });
-    }
-    await saveShot(dataUrl, count, 'fullpage');
+    const res = await captureScreenshot(ctx, { full: !!full }, {
+      staleReason: (c, o) => ops.staleReason(c, o),
+      measure: (c) => measureGuest(c.wv),
+      captureViewport: async (c) => (await c.wv.capturePage()).toDataURL(),
+      captureFull: (c) => caos.fs.captureFullPage(c.wv.getWebContentsId()),
+      requestBoxes: (c, items, space) => {
+        const requestId = 'box-' + c.runId;
+        return requestFromGuest(c.wv, {
+          channel: 'caos:request-boxes',
+          payload: { requestId, space, annotations: items },
+          replyChannel: 'caos:boxes',
+          accept: (r) => !!r && r.requestId === requestId,
+          timeoutMs: 3000,
+          fallback: null,
+        });
+      },
+      documentIdOf: (c) => { const t = tabById(c.tabId); return (t && t.documentId) || ''; },
+      annotationsFor: (c) => state.annotations
+        .filter((a) => a.url === c.url && a.target)
+        .map((a) => ({ ...a, pinNum: state.annotations.indexOf(a) + 1 })),
+      composite: (dataUrl, items, o) => compositeAnnotations(dataUrl, items, { ...o, colors: actionColors() }),
+      fallbackWidth: (c) => c.wv.clientWidth,
+    });
+    if (!res.ok) { toast(res.error || 'Screenshot failed', res.error && /cancelled/.test(res.error) ? 'warn' : 'error'); return; }
+    await saveShot(res.dataUrl, res.count, full ? 'fullpage' : '');
+    if (res.note) toast(res.note, 'warn', 4000);
+    else if (res.skipped) toast(`${res.skipped} note${res.skipped === 1 ? '' : 's'} could not be placed on the screenshot`, 'warn', 4000);
   } catch (e) {
     toast('Screenshot failed: ' + (e && e.message ? e.message : e), 'error');
   }
@@ -2197,9 +2552,10 @@ async function copyText(text, okMsg) {
 }
 
 async function copyExport(format) {
-  if (!state.currentSession) { toast('Open or start a session first', 'warn'); return; }
+  const session = state.currentSession; // export the session the user asked about, even if they switch meanwhile
+  if (!session) { toast('Open or start a session first', 'warn'); return; }
   try {
-    const result = await caos.export.build(format, state.currentSession.id, { consoleLog: tabConsole() });
+    const result = await caos.export.build(format, session.id, { consoleLog: tabConsole() });
     if (!result || !result.content) { toast('Nothing to copy', 'warn'); return; }
     await copyText(result.content, 'Prompt copied to clipboard');
     markShipped();
@@ -2210,9 +2566,10 @@ async function copyExport(format) {
 }
 
 async function doExport(format) {
-  if (!state.currentSession) { toast('Open or start a session first', 'warn'); return; }
+  const session = state.currentSession;
+  if (!session) { toast('Open or start a session first', 'warn'); return; }
   try {
-    const result = await caos.export.build(format, state.currentSession.id, { consoleLog: tabConsole() });
+    const result = await caos.export.build(format, session.id, { consoleLog: tabConsole() });
     if (!result) { toast('Nothing to export', 'warn'); return; }
     const saved = await caos.fs.save({ defaultName: result.defaultName, content: result.content });
     if (saved) toast(`Exported ${format}`, 'success');
@@ -2223,12 +2580,13 @@ async function doExport(format) {
 
 // ============================================================ AGENT HAND-OFF
 async function handoffToAgent() {
-  if (!state.currentSession) { toast('Open or start a session first', 'warn'); return; }
+  const session = state.currentSession;
+  if (!session) { toast('Open or start a session first', 'warn'); return; }
   if (!state.annotations.length) { toast('No notes to hand off yet', 'warn'); return; }
 
   let res;
   try {
-    res = await caos.agent.write(state.currentSession.id, { consoleLog: tabConsole() });
+    res = await caos.agent.write(session.id, { consoleLog: tabConsole() });
   } catch (e) {
     toast('Hand-off failed: ' + (e && e.message ? e.message : e), 'error');
     return;
@@ -2238,12 +2596,29 @@ async function handoffToAgent() {
   let presets = state.agentPresets;
   try { presets = await caos.agent.detect(); state.agentPresets = presets; } catch (_e) { /* keep */ }
 
+  let project = null;
+  try { project = session.projectId ? await caos.projects.get(session.projectId) : null; } catch (_e) { /* treated as no project */ }
+  const where = handoffWhere(res, project);
+
   markShipped();
   toast('Request written', 'success');
   openHandoffModal({
     file,
     command,
     presets,
+    cwd: where.cwd,
+    entry: where.entry,
+    needsLocalDirectory: where.needsLocalDirectory,
+    notices: where.notices,
+    // Pick a real folder for an imported / URL project. Only the main process
+    // can clear "imported"; the next agent.run re-reads the project there.
+    onChooseDirectory: !project ? undefined : async () => {
+      const updated = await caos.projects.relocate(project.id);
+      if (!updated) return null;
+      if (state.currentProject && state.currentProject.id === updated.id) state.currentProject = updated;
+      await refreshProjects();
+      return { cwd: updated.path };
+    },
     onSetCommand: async (cmd) => {
       command = cmd;
       const next = await caos.settings.set({ agentCommand: cmd });
@@ -2255,7 +2630,7 @@ async function handoffToAgent() {
     onRun: async ({ file: promptFile, onChunk }) => {
       const unsub = caos.agent.onOutput((chunk) => onChunk && onChunk(chunk));
       try {
-        return await caos.agent.run(state.currentSession.id, promptFile);
+        return await caos.agent.run(session.id, promptFile);
       } finally {
         if (unsub) unsub();
       }
@@ -2341,11 +2716,45 @@ function profileActions() {
       return state.providers;
     },
     licenseStatus: () => caos.license.status(),
+    dataInventory: () => caos.billing.dataInventory(),
+    exportAccountData: exportAccountData,
+    deleteAccountData: deleteAccountData,
     activateLicense: (key) => caos.license.activate(key),
     syncSignIn: (email) => caos.sync.signIn(email),
     syncSignOut: () => caos.sync.signOut(),
     agentPresets: state.agentPresets || [],
   };
+}
+
+// "Your data on this device": export saves the JSON the main process built.
+async function exportAccountData() {
+  const pack = await caos.billing.gdprExport();
+  if (!pack) throw new Error('Nothing to export');
+  const saved = await caos.fs.save({ defaultName: pack.defaultName, content: pack.content });
+  if (saved) toast('Data exported', 'success');
+  return pack;
+}
+
+// Delete everything the app stores, then make the open window forget it too.
+// The raw result goes back to the modal, which states what was and was not erased.
+async function deleteAccountData() {
+  const result = await caos.billing.gdprDelete();
+  try {
+    projectGen.invalidate();
+    state.currentProject = null;
+    sessions.close();
+    if (verifyPanel) verifyPanel.setRun(null);
+    const next = await caos.settings.get();
+    if (next) state.settings = next;
+    state.providers = await caos.secrets.providers();
+    syncProfileUi();
+    await refreshProjects();
+    await refreshSessions();
+    await refreshRecordings();
+    await refreshHistory();
+    await refreshBookmarks();
+  } catch (e) { console.warn('[delete] refresh failed: ' + ((e && e.message) || e)); }
+  return result;
 }
 
 function syncProfileUi() {
@@ -2414,14 +2823,15 @@ function armNextAction() {
 function markShipped() {
   state.nextActionArmed = false;
   if (notesPanel && notesPanel.setNextAction) notesPanel.setNextAction({ show: false });
-  if (coachmarks && coachmarks.isVisible()) coachmarks.advance('shipped');
+  notifyCoach('shipped');
   if (!caos.e2e) caos.settings.set({ nextActionDone: true }).then((next) => { if (next) state.settings = next; });
 }
 
 async function exportClientPack() {
-  if (!state.currentSession) { toast('Open or start a session first', 'warn'); return; }
+  const session = state.currentSession;
+  if (!session) { toast('Open or start a session first', 'warn'); return; }
   try {
-    const pack = await caos.review.clientPack(state.currentSession.id);
+    const pack = await caos.review.clientPack(session.id);
     const name = ((pack && pack.title) || 'client-pack').replace(/[^\w.-]+/g, '-').slice(0, 60) + '.md';
     const saved = await caos.fs.save({ defaultName: name, content: (pack && pack.markdown) || '' });
     if (saved) {
@@ -2437,61 +2847,59 @@ async function exportClientPack() {
 async function applyChecklist(id) {
   const session = await ensureSession();
   const res = await caos.review.applyChecklist(id, session.id);
-  state.annotations = await caos.annotations.bySession(session.id);
-  notesPanel.setAnnotations(state.annotations);
+  const list = await caos.annotations.bySession(session.id);
+  if (sessions.isCurrent(session.id)) {
+    state.annotations = list;
+    notesPanel.setAnnotations(state.annotations);
+  }
   if (res && res.created && res.created.length) {
     bumpSessionCount(session.id, res.created.length);
     toast('Checklist added as notes', 'success');
   }
 }
 
-async function captureViewportShot() {
+// Viewport pixels of the tab captured in ctx. Only the visible tab can be
+// captured faithfully; a background tab yields no shot rather than another
+// tab's pixels.
+async function captureViewportShot(ctx) {
   try {
-    if (!wv) return '';
-    const img = await wv.capturePage();
+    const c = ctx || ops.capture('shot');
+    if (!c.wv || ops.staleReason(c, { active: true })) return '';
+    const img = await c.wv.capturePage();
     return img && img.toDataURL ? img.toDataURL() : '';
   } catch (_e) {
     return '';
   }
 }
 
+// Verify: a single-flight run whose session, tab, baseline and recording are
+// captured at the start (controllers/verify-controller.js). Results are saved
+// only to that session; failed/skipped audits stay failed/skipped.
+const verifyRunner = createVerifyRunner({
+  getSession: () => state.currentSession,
+  captureContext: () => ops.capture('verify'),
+  getAnnotations: () => state.annotations,
+  getSelectedRecording: () => state.selectedRecording,
+  getBaselineAudit: (ctx) => {
+    const tab = tabById(ctx.tabId);
+    const a = tab && tab.derived.audit;
+    // Only an audit of THIS page counts as a baseline; otherwise there is none.
+    return a && sameAuditedPage(a.source, { tabId: ctx.tabId, url: ctx.url }) ? a.outcome : null;
+  },
+  setBusy: (on) => { if (verifyPanel) verifyPanel.setRunning(on); },
+  captureShot: (ctx) => captureViewportShot(ctx),
+  runAudit: async (ctx) => (await runAuditFor(ctx)).outcome,
+  replay: (ctx, rec) => replayRecording(rec, { ctx }),
+  save: (sessionId, payload) => caos.review.verifySave(sessionId, payload),
+  showRun: (run) => { if (verifyPanel) verifyPanel.setRun(run); },
+  currentUrlOf: (ctx) => { const t = tabById(ctx.tabId); return (t && t.url) || ctx.url; },
+  toast: (m, k) => toast(m, k),
+});
+
 async function verifySession() {
   if (!state.currentSession) { toast('Open or start a session first', 'warn'); return null; }
-  if (verifyPanel) verifyPanel.setRunning(true);
   switchTab('verify');
-  const notesOpen = state.annotations.filter((a) => (a.status || 'open') !== 'resolved').length;
-  const beforeAudit = state.lastAudit || (auditPanel && auditPanel.getReport && auditPanel.getReport()) || { total: 0, counts: {} };
-  const beforeShot = await captureViewportShot();
-  const rec = state.selectedRecording;
-  const beforeJourney = rec && rec.lastRun
-    ? { id: rec.id, name: rec.name, passed: rec.lastRun.passed, failed: rec.lastRun.failed, total: rec.lastRun.total, at: rec.lastRun.at }
-    : null;
-
-  const afterAudit = await runAudit();
-  let afterJourney = beforeJourney;
-  if (rec) {
-    const report = await replaySelected();
-    if (report) afterJourney = { id: rec.id, name: rec.name, passed: report.passed, failed: report.failed, total: report.total, at: report.at };
-  }
-  const afterShot = await captureViewportShot();
-  let saved;
-  try {
-    saved = await caos.review.verifySave(state.currentSession.id, {
-      notes: { open: notesOpen, total: state.annotations.length },
-      before: { audit: beforeAudit, journey: beforeJourney, screenshot: beforeShot },
-      after: { audit: afterAudit || { total: 0, counts: {} }, journey: afterJourney, screenshot: afterShot },
-    });
-  } catch (e) {
-    toast('Could not save verify run: ' + (e && e.message ? e.message : e), 'error');
-    if (verifyPanel) verifyPanel.setRunning(false);
-    return null;
-  }
-  if (verifyPanel) {
-    verifyPanel.setRunning(false);
-    if (saved && saved.run) verifyPanel.setRun(saved.run);
-  }
-  if (saved && saved.ok) toast('Verify run saved', 'success');
-  return saved;
+  return verifyRunner.run();
 }
 
 // ============================================================ HELPERS

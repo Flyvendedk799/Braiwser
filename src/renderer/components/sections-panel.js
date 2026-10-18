@@ -4,6 +4,31 @@
 // clicking selects and jumps to it, the grip drags it to a new place (among its
 // siblings or into another section), and the eye hides it. Every structural
 // change goes through the same edit-note pipeline as a drag on the canvas.
+//
+// Structural identity (RF-08): the tree the guest serializes already EXCLUDES
+// script/style/noscript/inspector nodes, so a position in this list is not a DOM
+// child index. Every reorder / moveInto payload therefore also names the nodes
+// involved by selector (and by `domIndex` when the serializer provides one):
+//
+//   actions.reorder({ parentSelector, parentId,   // the container (nid from the tree)
+//                     nodeId, selector,           // the node being moved (nid wins)
+//                     fromIndex, toIndex,         // content indexes: toIndex is the FINAL slot
+//                     fromDomIndex?,              // real DOM child index, when known
+//                     destSelector, destId, placement })   // informational: the sibling it lands next to
+//   actions.moveInto({ nodeId, selector, parentSelector, parentId,
+//                      index,                      // content index among the target's children
+//                      beforeId?, beforeSelector? })  // the sibling it is inserted before (absent = append)
+//
+// These are exactly the fields the guest's caos:reorder-sibling / caos:move-into
+// handlers read (see the header of src/webview/inspector.js): identity — nid, then
+// selector — wins, indexes only count when no identity was sent, and a lost
+// identity is REJECTED by the guest (caos:structure-result { ok:false, reason }).
+// Nodes without `nid` (older guests) still work: selector/index are sent alone.
+//
+// Keyboard (RF-09): the tree uses roving focus. Row keys act only on the row
+// itself (never on keydown bubbling from its eye/toggle buttons); Up/Down/Home/End
+// move, Right/Left expand-or-descend / collapse-or-ascend, Enter/Space select,
+// Alt+Up/Down reorders among siblings. A re-render keeps focus on the same row.
 import { h, icon, clear } from '../lib/dom.js';
 import { displayName, selectorLabel, ICON_FOR } from '../lib/naming.js';
 
@@ -27,6 +52,7 @@ export function createSectionsPanel(actions) {
   const refreshBtn = h('button', {
     class: 'sec-icon-btn',
     title: 'Re-read the page structure',
+    'aria-label': 'Re-read the page structure',
     html: icon('reload', 13),
     on: { click: () => actions.refresh() },
   });
@@ -34,6 +60,7 @@ export function createSectionsPanel(actions) {
     class: 'sec-search',
     type: 'search',
     placeholder: 'Filter sections…',
+    'aria-label': 'Filter sections',
     on: {
       input: () => {
         filter = search.value.trim().toLowerCase();
@@ -98,7 +125,7 @@ export function createSectionsPanel(actions) {
       title: kids.length ? (openNow ? 'Collapse' : 'Expand') : '',
       'aria-label': kids.length ? (openNow ? 'Collapse' : 'Expand') : '',
       'aria-hidden': kids.length && !flat ? null : 'true',
-      tabindex: kids.length && !flat ? '0' : '-1',
+      tabindex: '-1', // keyboard users expand with Right/Left on the row
       html: icon('chevron', 11),
       on: {
         click: (e) => {
@@ -111,7 +138,8 @@ export function createSectionsPanel(actions) {
     const eye = h('button', {
       class: 'sec-eye',
       title: node.hidden ? 'Show on the page' : 'Hide on the page (records a removal note)',
-      'aria-label': node.hidden ? 'Show on the page' : 'Hide on the page',
+      'aria-label': (node.hidden ? 'Show on the page: ' : 'Hide on the page: ') + displayName(node),
+      tabindex: '-1', // reachable from its row (see setStop); not a tab stop of its own
       html: icon(node.hidden ? 'eye-off' : 'eye', 13),
       on: {
         click: (e) => {
@@ -130,7 +158,8 @@ export function createSectionsPanel(actions) {
           (node.hidden ? ' is-hidden' : ''),
         title: node.selector || '',
         role: 'treeitem',
-        tabindex: '0',
+        tabindex: '-1', // roving: setStop() gives exactly one row tabindex 0
+        'aria-level': String(depth + 1),
         'aria-selected': node.selector && node.selector === activeSelector ? 'true' : 'false',
         ...(kids.length && !flat ? { 'aria-expanded': openNow ? 'true' : 'false' } : {}),
         on: {
@@ -144,17 +173,39 @@ export function createSectionsPanel(actions) {
           },
           // Keyboard focus should highlight the element on the page just like
           // hovering does, or the tree is unusable without a mouse.
-          focus: () => actions.hover(node),
+          focus: () => { setStop(row); actions.hover(node); },
           keydown: (e) => {
+            // Keys that bubble up from the eye / toggle buttons are theirs.
+            if (e.target !== e.currentTarget) return;
             if (e.key === 'Enter' || e.key === ' ') {
               e.preventDefault();
               actions.select(node);
-            } else if (e.key === 'ArrowRight' && kids.length && !flat && !openNow) {
+            } else if (e.key === 'ArrowRight') {
+              if (kids.length && !flat && !openNow) {
+                e.preventDefault();
+                setOpen(node, depth, true);
+              } else if (kids.length && !flat && openNow) {
+                const child = row.parentElement && row.parentElement.querySelector(':scope > .sec-group > .sec-item > .sec-row');
+                if (child) { e.preventDefault(); child.focus(); }
+              }
+            } else if (e.key === 'ArrowLeft') {
+              if (kids.length && !flat && openNow) {
+                e.preventDefault();
+                setOpen(node, depth, false);
+              } else if (!flat) {
+                const parentRow = row.parentElement && row.parentElement.parentElement && row.parentElement.parentElement.parentElement
+                  && row.parentElement.parentElement.parentElement.querySelector(':scope > .sec-row');
+                if (parentRow) { e.preventDefault(); parentRow.focus(); }
+              }
+            } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
               e.preventDefault();
-              setOpen(node, depth, true);
-            } else if (e.key === 'ArrowLeft' && kids.length && !flat && openNow) {
+              if (e.altKey && !flat) keyboardMove(node, group, index, parentSelector, e.key === 'ArrowDown' ? 1 : -1);
+              else stepFocus(row, e.key === 'ArrowDown' ? 1 : -1);
+            } else if (e.key === 'Home' || e.key === 'End') {
               e.preventDefault();
-              setOpen(node, depth, false);
+              const rows = allRows();
+              const to = e.key === 'Home' ? rows[0] : rows[rows.length - 1];
+              if (to) to.focus();
             }
           },
         },
@@ -177,15 +228,84 @@ export function createSectionsPanel(actions) {
     return row;
   }
 
-  function renderGroup(nodes, depth, parentSelector) {
-    const group = h('div', { class: 'sec-group' });
+  // ---- roving focus helpers ------------------------------------------------
+  const allRows = () => Array.from(listWrap.querySelectorAll('.sec-row'));
+
+  // Exactly one row (and its eye button) is a tab stop; the rest are reached
+  // with the arrow keys, like any tree.
+  function setStop(rowEl) {
+    allRows().forEach((r) => {
+      const on = r === rowEl;
+      r.tabIndex = on ? 0 : -1;
+      const eye = r.querySelector('.sec-eye');
+      if (eye) eye.tabIndex = on ? 0 : -1;
+    });
+  }
+
+  function stepFocus(fromRow, dir) {
+    const rows = allRows();
+    const to = rows[rows.indexOf(fromRow) + dir];
+    if (to) to.focus();
+  }
+
+  // Rows that exist in the DOM but whose group is the one being keyboard-moved:
+  // Alt+Up/Down is the keyboard equivalent of dragging a row among its siblings.
+  function keyboardMove(node, group, index, parentSelector, dir) {
+    const to = index + dir;
+    const nodes = group._nodes || [];
+    if (to < 0 || to >= nodes.length) return;
+    emitReorder(node, group, parentSelector, index, to);
+  }
+
+  function emitReorder(node, group, parentSelector, from, to) {
+    const nodes = group._nodes || [];
+    const dest = nodes[to];
+    const payload = {
+      parentSelector,
+      fromIndex: from,
+      toIndex: to,
+      // Stable identity, resolved by the guest independent of visual position.
+      selector: node.selector,
+      destSelector: dest ? dest.selector : null,
+      placement: to > from ? 'after' : 'before',
+    };
+    if (group._parentNid != null) payload.parentId = group._parentNid;
+    if (node.nid != null) payload.nodeId = node.nid;
+    if (dest && dest.nid != null) payload.destId = dest.nid;
+    if (typeof node.domIndex === 'number') payload.fromDomIndex = node.domIndex;
+    actions.reorder(payload);
+  }
+
+  function emitMoveInto(node, target) {
+    const nodes = (target.group && target.group._nodes) || [];
+    // The slot is in the target's own list; the dragged node is never in it
+    // (this is a cross-container move), so nodes[index] is what it lands before.
+    const before = nodes[target.index] || null;
+    const payload = {
+      selector: node.selector,
+      parentSelector: target.parentSelector,
+      index: target.index,
+    };
+    if (node.nid != null) payload.nodeId = node.nid;
+    if (target.group && target.group._parentNid != null) payload.parentId = target.group._parentNid;
+    if (before) {
+      payload.beforeSelector = before.selector;
+      if (before.nid != null) payload.beforeId = before.nid;
+    }
+    actions.moveInto(payload);
+  }
+
+  function renderGroup(nodes, depth, parentSelector, parentNid) {
+    const group = h('div', { class: 'sec-group', role: depth === 0 ? null : 'group' });
     group._parentSelector = parentSelector;
+    group._parentNid = parentNid;
+    group._nodes = nodes;
     nodes.forEach((node, i) => {
       const row = renderRow(node, group, i, depth, parentSelector, false);
-      const item = h('div', { class: 'sec-item' }, [row]);
+      const item = h('div', { class: 'sec-item', role: 'none' }, [row]);
       item._row = row;
       item._node = node;
-      if (isOpen(node, depth)) item.appendChild(renderGroup(node.children, depth + 1, node.selector));
+      if (isOpen(node, depth)) item.appendChild(renderGroup(node.children, depth + 1, node.selector, node.nid));
       group.appendChild(item);
     });
     return group;
@@ -202,7 +322,34 @@ export function createSectionsPanel(actions) {
     return out;
   }
 
+  // Re-rendering rebuilds every row, which would drop keyboard focus to <body>.
+  // Remember which row (by selector) and control had it, and put it back.
   function render() {
+    const active = document.activeElement;
+    let saved = null;
+    if (active && listWrap.contains(active)) {
+      const rowEl = active.closest('.sec-row');
+      if (rowEl && rowEl._node) {
+        saved = { selector: rowEl._node.selector, which: active === rowEl ? 'row' : active.classList.contains('sec-eye') ? 'eye' : 'row' };
+      }
+    }
+    renderTree();
+    // One tab stop: the restored row, else the selected row, else the first.
+    const rows = allRows();
+    const stop = (saved && rows.find((r) => r._node.selector === saved.selector))
+      || rows.find((r) => r.classList.contains('active'))
+      || rows[0];
+    if (stop) setStop(stop);
+    if (saved && stop && (!document.activeElement || !listWrap.contains(document.activeElement))) {
+      const hit = rows.find((r) => r._node.selector === saved.selector);
+      if (hit) {
+        const target = saved.which === 'eye' ? hit.querySelector('.sec-eye') || hit : hit;
+        try { target.focus({ preventScroll: true }); } catch (_e) { /* ignore */ }
+      }
+    }
+  }
+
+  function renderTree() {
     clear(listWrap);
     if (!tree) {
       count.textContent = '';
@@ -234,7 +381,7 @@ export function createSectionsPanel(actions) {
       return;
     }
     count.textContent = sections.length + (sections.length === 1 ? ' section' : ' sections');
-    listWrap.appendChild(renderGroup(sections, 0, tree.selector || 'body'));
+    listWrap.appendChild(renderGroup(sections, 0, tree.selector || 'body', tree.nid));
   }
 
   // ---- drag: reorder among siblings, or into another section ---------------
@@ -356,13 +503,9 @@ export function createSectionsPanel(actions) {
     if (sameParent) {
       const to = d.target.index > d.index ? d.target.index - 1 : d.target.index;
       if (to === d.index) return;
-      actions.reorder({ parentSelector: d.parentSelector, fromIndex: d.index, toIndex: to });
+      emitReorder(d.node, d.group, d.parentSelector, d.index, to);
     } else if (d.target.parentSelector) {
-      actions.moveInto({
-        selector: d.node.selector,
-        parentSelector: d.target.parentSelector,
-        index: d.target.index,
-      });
+      emitMoveInto(d.node, d.target);
     }
   }
 

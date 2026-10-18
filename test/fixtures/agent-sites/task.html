@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Profile settings</title>
+<style>body{font:16px system-ui;margin:24px}label{display:block;margin:8px 0}[role=status]{margin-top:12px;min-height:1.5em}</style></head>
+<body>
+<header><h1>Profile settings</h1></header>
+<main>
+  <form id="profile" aria-label="Profile" onsubmit="return false">
+    <label>Display name <input id="name" name="displayName" type="text"></label>
+    <label>Plan
+      <select id="plan" name="plan"><option value="free">Free</option><option value="pro">Pro</option></select>
+    </label>
+    <label><input id="terms" type="checkbox" name="terms"> Accept terms</label>
+    <button id="save" type="button">Save</button>
+  </form>
+  <div role="status" id="status">Pending</div>
+</main>
+<script>
+document.getElementById('save').addEventListener('click', function () {
+  var terms = document.getElementById('terms').checked;
+  var name = document.getElementById('name').value;
+  document.getElementById('status').textContent = terms ? ('Saved: ' + name + ' / ' + document.getElementById('plan').value) : 'Please accept the terms';
+});
+</script>
+</body></html>

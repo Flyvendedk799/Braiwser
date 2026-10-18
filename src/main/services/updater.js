@@ -1,7 +1,24 @@
 // Auto-update + opt-in crash breadcrumb wiring for packaged builds.
+//
+// Nothing here talks to the network on its own: no check is made at start-up, only
+// when the user asks (`checkForUpdates`). An update that is found is then
+// downloaded from the GitHub release feed in package.json and installed when the
+// app quits. Unsigned builds (CSC_IDENTITY_AUTO_DISCOVERY=false in CI) cannot
+// auto-update on macOS, which requires a signed app.
 let updater = null;
 
-function initUpdater({ getWindow, repos }) {
+function runningPackaged() {
+  try {
+    const { app } = require('electron');
+    return !!(app && app.isPackaged);
+  } catch (_e) {
+    return false;
+  }
+}
+
+function initUpdater({ getWindow, repos, packaged = runningPackaged() }) {
+  // Updates only make sense for an installed build; a source run has no update feed.
+  if (!packaged) return { ok: false, reason: 'updates are only available in packaged builds' };
   // electron-updater is optional until installed in package.json; packaged
   // apps enable it when the dependency resolves.
   try {

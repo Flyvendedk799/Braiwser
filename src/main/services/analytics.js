@@ -1,6 +1,7 @@
-// Privacy-respecting analytics + user-triggered diagnostics.
-// Events are stored locally; only flushed when analyticsOptIn is true AND a
-// future endpoint is configured. Default: never leaves the machine.
+// Local-only analytics + user-triggered diagnostics.
+// Events are recorded on this machine, and only when analyticsOptIn is true. There is
+// no upload path and no collection endpoint in this version: nothing here is ever
+// transmitted. The diagnostics bundle is a file the user chooses to save and share.
 const fs = require('fs');
 const path = require('path');
 const os = require('os');

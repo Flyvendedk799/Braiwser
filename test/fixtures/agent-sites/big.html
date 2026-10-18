@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Big page</title></head>
+<body>
+<main id="root"><h1>Big page</h1></main>
+<script>
+// 10,000+ elements: 1,500 rows x (li, span, a, button, input, span, em) = 10,500 + container
+var root = document.getElementById('root');
+var ul = document.createElement('ul');
+for (var i = 0; i < 1500; i++) {
+  var li = document.createElement('li');
+  li.innerHTML = '<span>Row ' + i + '</span> <a href="#r' + i + '">Link ' + i + '</a> '
+    + '<button type="button">Action ' + i + '</button> <input type="text" aria-label="Field ' + i + '"> <span>x</span><em>y</em>';
+  ul.appendChild(li);
+}
+root.appendChild(ul);
+</script>
+</body></html>

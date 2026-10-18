@@ -3,7 +3,38 @@
 //   • Page — [Sections | Layers] for the live document.
 // Pure-render component: the library re-renders fully from update()'s data, and
 // row interactions are delegated to the controller via the `actions` bag.
+//
+// Keyboard model (RF-09): a row is a roving list item. Enter/Space/arrows act on
+// the ROW only when the row itself has focus — a keydown that bubbles up from a
+// nested action button (rename, delete, export…) is left alone so the button's
+// native Enter/Space click fires instead of selecting the parent. Tablists use
+// arrow/Home/End with a roving tabindex. update() rebuilds the lists, so it
+// remembers which row/control had focus and puts it back (or on the nearest
+// surviving neighbour when that row was just deleted).
 import { h, icon, clear, timeAgo } from '../lib/dom.js';
+
+// Wire WAI-ARIA tablist keys onto a set of tab buttons: Left/Right (wrapping),
+// Home/End. Selecting moves focus with it (automatic activation).
+function wireTablist(buttons, order, select) {
+  order.forEach((id, i) => {
+    const b = buttons[id];
+    b.tabIndex = i === 0 ? 0 : -1;
+    b.addEventListener('keydown', (e) => {
+      if (e.target !== e.currentTarget) return;
+      const at = order.indexOf(id);
+      let to = -1;
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') to = (at + 1) % order.length;
+      else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') to = (at - 1 + order.length) % order.length;
+      else if (e.key === 'Home') to = 0;
+      else if (e.key === 'End') to = order.length - 1;
+      if (to < 0) return;
+      e.preventDefault();
+      const next = order[to];
+      select(next);
+      buttons[next].focus();
+    });
+  });
+}
 
 export function createSidebar(actions, panels) {
   const projectsList = h('div', { class: 'side-list' });
@@ -48,6 +79,7 @@ export function createSidebar(actions, panels) {
     viewButtons[id] = b;
     viewNav.appendChild(b);
   });
+  wireTablist(viewButtons, ['workspace', 'page'], (id) => actions.selectView && actions.selectView(id));
   const top = h('div', { class: 'side-top' }, [viewNav, collapseBtn]);
 
   // ---- page tabs -------------------------------------------------------------
@@ -69,6 +101,7 @@ export function createSidebar(actions, panels) {
     tabButtons[id] = b;
     tabBar.appendChild(b);
   });
+  wireTablist(tabButtons, ['sections', 'layers'], (id) => actions.selectTab(id));
 
   const stack = h('div', { class: 'side-stack' }, [panels.sections, panels.layers]);
   const pageView = h('div', { class: 'side-page' }, [tabBar, stack]);
@@ -126,14 +159,15 @@ export function createSidebar(actions, panels) {
     try { const x = new URL(u); return x.protocol === 'file:' ? decodeURIComponent(x.pathname.split('/').pop()) : x.hostname.replace(/^www\./, '') + x.pathname; } catch (_e) { return u; }
   }
 
-  function row({ icon: ic, name, meta, active, count, onClick, rowActions, id }) {
+  function row({ icon: ic, name, meta, active, count, onClick, rowActions, id, key }) {
     const acts = h('div', { class: 'sr-actions' });
     (rowActions || []).forEach((a) =>
       acts.appendChild(
         h('button', {
           class: `sr-act ${a.danger ? 'danger' : ''}`,
           title: a.title,
-          'aria-label': a.title,
+          'aria-label': name ? `${a.title}: ${name}` : a.title,
+          dataset: { act: a.title },
           html: icon(a.icon, 13),
           on: {
             click: (e) => {
@@ -149,16 +183,30 @@ export function createSidebar(actions, panels) {
     // keyboard operation by hand instead.
     return h('div', {
       class: `side-row ${active ? 'active' : ''}`,
-      dataset: id ? { rowId: id } : null,
+      dataset: Object.assign({}, id ? { rowId: id } : {}, key ? { focusKey: key } : {}),
       role: 'button',
       tabindex: '0',
       'aria-pressed': active ? 'true' : 'false',
       on: {
         click: onClick,
         keydown: (e) => {
+          // Only the row's own key presses count. A bubbled Enter/Space from a
+          // nested action button must reach that button untouched.
+          if (e.target !== e.currentTarget) return;
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
             if (onClick) onClick();
+            return;
+          }
+          const dir = e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : 0;
+          if (dir || e.key === 'Home' || e.key === 'End') {
+            const rows = Array.from(e.currentTarget.parentElement.querySelectorAll(':scope > .side-row'));
+            const at = rows.indexOf(e.currentTarget);
+            const to = e.key === 'Home' ? 0 : e.key === 'End' ? rows.length - 1 : at + dir;
+            if (rows[to]) {
+              e.preventDefault();
+              rows[to].focus();
+            }
           }
         },
       },
@@ -178,6 +226,7 @@ export function createSidebar(actions, panels) {
       const on = k === id;
       b.classList.toggle('active', on);
       b.setAttribute('aria-selected', on ? 'true' : 'false');
+      b.tabIndex = on ? 0 : -1;
     });
     panels.sections.classList.toggle('active', id === 'sections');
     panels.layers.classList.toggle('active', id === 'layers');
@@ -190,11 +239,53 @@ export function createSidebar(actions, panels) {
       const active = key === next;
       button.classList.toggle('active', active);
       button.setAttribute('aria-selected', active ? 'true' : 'false');
+      button.tabIndex = active ? 0 : -1;
     });
+  }
+
+  // ---- focus retention across a full re-render --------------------------------
+  const LISTS = { projects: projectsList, sessions: sessionsList, recordings: recordingsList, bookmarks: bookmarksList, history: historyList };
+  Object.entries(LISTS).forEach(([name, el]) => { el.dataset.list = name; });
+
+  function captureFocus() {
+    const active = document.activeElement;
+    if (!active || !root.contains(active)) return null;
+    const rowEl = active.closest && active.closest('.side-row');
+    if (!rowEl || !rowEl.parentElement) return null;
+    const listEl = rowEl.parentElement;
+    const siblings = Array.from(listEl.querySelectorAll(':scope > .side-row'));
+    return {
+      list: listEl.dataset.list,
+      key: rowEl.dataset.focusKey || null,
+      index: siblings.indexOf(rowEl),
+      act: active === rowEl ? null : (active.dataset && active.dataset.act) || null,
+    };
+  }
+
+  function restoreFocus(saved) {
+    if (!saved || (document.activeElement && root.contains(document.activeElement))) return;
+    const listEl = LISTS[saved.list];
+    if (!listEl) return;
+    const rows = Array.from(listEl.querySelectorAll(':scope > .side-row'));
+    let rowEl = saved.key ? rows.find((r) => r.dataset.focusKey === saved.key) : null;
+    const exact = !!rowEl;
+    if (!rowEl && rows.length) rowEl = rows[Math.min(Math.max(saved.index, 0), rows.length - 1)];
+    if (!rowEl) {
+      // The list emptied (last row deleted): land on the section's add button.
+      const add = listEl.parentElement && listEl.parentElement.querySelector('.side-add');
+      if (add) add.focus();
+      return;
+    }
+    let target = rowEl;
+    if (exact && saved.act) {
+      target = Array.from(rowEl.querySelectorAll('.sr-act')).find((b) => b.dataset.act === saved.act) || rowEl;
+    }
+    try { target.focus(); } catch (_e) { /* ignore */ }
   }
 
   function update(state) {
     const { projects, currentProject, sessions, currentSession, recordings, selectedRecording, sessionCounts, history, bookmarks } = state;
+    const savedFocus = captureFocus();
 
     const currentCount = currentSession && sessionCounts ? sessionCounts[currentSession.id] || 0 : 0;
     contextTitle.textContent = currentSession ? currentSession.name : (currentProject && currentProject.name) || 'No session';
@@ -211,6 +302,7 @@ export function createSidebar(actions, panels) {
     for (const p of projects) {
       projectsList.appendChild(
         row({
+          key: 'project:' + p.id,
           icon: p.kind === 'url' ? 'reload' : 'folder',
           name: p.name,
           meta: p.path || p.kind,
@@ -233,6 +325,7 @@ export function createSidebar(actions, panels) {
     for (const s of sessions) {
       sessionsList.appendChild(
         row({
+          key: 'session:' + s.id,
           icon: 'file',
           name: s.name,
           meta: s.title || s.url || timeAgo(s.updatedAt),
@@ -258,6 +351,7 @@ export function createSidebar(actions, panels) {
       recordingsList.appendChild(
         row({
           id: r.id,
+          key: 'recording:' + r.id,
           icon: 'replay',
           name: r.name,
           meta: (r.steps ? r.steps.length : 0) + ' steps · ' + timeAgo(r.updatedAt) + runMeta,
@@ -282,6 +376,7 @@ export function createSidebar(actions, panels) {
     for (const b of bms) {
       bookmarksList.appendChild(
         row({
+          key: 'bookmark:' + (b.id || b.url),
           icon: 'locate',
           name: b.title || urlLabel(b.url),
           meta: urlLabel(b.url),
@@ -300,6 +395,7 @@ export function createSidebar(actions, panels) {
     for (const e of hist.slice(0, 50)) {
       historyList.appendChild(
         row({
+          key: 'history:' + e.url + '@' + (e.visitedAt || ''),
           icon: 'reload',
           name: e.title || urlLabel(e.url),
           meta: urlLabel(e.url) + ' · ' + timeAgo(e.visitedAt),
@@ -307,6 +403,7 @@ export function createSidebar(actions, panels) {
         })
       );
     }
+    restoreFocus(savedFocus);
   }
 
   // Point at a row that just appeared — the drawer is no use if you cannot see

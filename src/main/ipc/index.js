@@ -9,22 +9,36 @@ const config = require('../config');
 
 function register({ repos, paths, getWindow }) {
   const win = () => getWindow() || BrowserWindow.getFocusedWindow();
-  const on = (channel, fn) => ipcMain.handle(channel, async (_e, ...args) => fn(...args));
+  // Every channel is registered through the security guard: the call must come
+  // from a registered shell window's top-level frame (src/main/security/ipc-guard.js),
+  // never a guest webContents or subframe. Handlers keep their plain (...args)
+  // signature; `on.withEvent` additionally passes the IPC event first.
+  const security = require('../security');
+  security.attachRepos(repos);
+  // Folders/files the user picks in a native dialog become allowed file: roots for guests.
+  const AFTER = {
+    'caos:open-file': (r) => { if (r && r.path) security.allowFileRoot(r.path); },
+    'caos:open-directory': (r) => { if (r && r.path) security.allowFileRoot(r.path); },
+  };
+  const on = (channel, fn) => security.handle(ipcMain, channel, async (...args) => {
+    // Pro add-ons are refused here, in the main process, in builds that enforce
+    // licences (build-config.js). No-op in dev, e2e-bypass and unrestricted builds.
+    require('../services/license').assertChannel(repos, channel, args);
+    const result = await fn(...args);
+    if (AFTER[channel]) { try { AFTER[channel](result); } catch (_e) { /* ignore */ } }
+    return result;
+  });
+  on.withEvent = (channel, fn) => security.handle(ipcMain, channel, fn, { withEvent: true });
 
   // --- e2e self-test: print report and exit ---
   // Checks stream in as they run, so a renderer crash still leaves a report.
-  const e2eChecks = [];
-  on('caos:e2e-check', (c) => { e2eChecks.push(c); return true; });
-  register.e2ePartial = () => e2eChecks;
+  // Every terminal state (this handler, a crash, a hang, a timeout) is finalized by
+  // one place — see e2e-finalizer.js for the stable report format.
+  const e2e = require('../e2e-finalizer').getE2EFinalizer(app);
+  on('caos:e2e-check', (c) => e2e.recordCheck(c));
+  register.e2ePartial = () => e2e.partial();
   on('caos:e2e-done', (report) => {
-    const failures = ((report && report.checks) || []).filter((c) => !c.pass);
-    const failed = !report || report.ok === false || !!report.fatal || failures.length > 0;
-    if (report && report.fatal) console.log('E2E FATAL: ' + report.fatal);
-    for (const f of failures) console.log(`E2E FAIL: ${f.name}${f.detail ? ' :: ' + f.detail : ''}`);
-    console.log(`E2E ${failed ? 'FAILED' : 'PASSED'} — ${(report && report.passed) || 0}/${(report && report.total) || 0} checks`);
-    console.log('CAOS_E2E_REPORT ' + JSON.stringify(report));
-    // Exit non-zero on failure so CI actually goes red.
-    setTimeout(() => app.exit(failed ? 1 : 0), 100);
+    e2e.finalize('completed', { report });
     return true;
   });
 
@@ -57,6 +71,12 @@ function register({ repos, paths, getWindow }) {
   // Current effective system theme, for settings.theme === 'system'.
   on('caos:system-theme.get', () => (nativeTheme.shouldUseDarkColors ? 'dark' : 'light'));
 
+  // Position main-owned WebContentsView guests. No-op until the agent runtime
+  // attaches its guest host. The host clamps the rectangle to the window.
+  let guestViews = null;
+  register.attachGuestViews = (views) => { guestViews = views || null; };
+  on('caos:guest-view.place', (rect) => (guestViews ? guestViews.place(rect) : { placed: 0, bounds: null }));
+
   // --- filesystem ---
   on('caos:open-file', async () => {
     const r = await dialog.showOpenDialog(win(), {
@@ -64,7 +84,9 @@ function register({ repos, paths, getWindow }) {
       filters: [{ name: 'Web pages', extensions: ['html', 'htm'] }, { name: 'All files', extensions: ['*'] }],
     });
     if (r.canceled || !r.filePaths.length) return null;
-    return { path: r.filePaths[0], url: pathToFileURL(r.filePaths[0]).href };
+    // `path` stays the picked file (compat); `dir` is the project directory and
+    // `entry` the page. projects.create() splits a file path the same way.
+    return { path: r.filePaths[0], dir: require('path').dirname(r.filePaths[0]), entry: r.filePaths[0], url: pathToFileURL(r.filePaths[0]).href };
   });
   on('caos:open-directory', async () => {
     const r = await dialog.showOpenDialog(win(), { title: 'Open a project folder', properties: ['openDirectory'] });
@@ -113,6 +135,24 @@ function register({ repos, paths, getWindow }) {
   on('caos:projects.touch', (id) => repos.projects.touch(id));
   on('caos:projects.update', (id, patch) => repos.projects.update(id, patch));
   on('caos:projects.remove', (id) => repos.projects.remove(id));
+  // An imported project's folder is untrusted until the user picks a local one
+  // here, in a native dialog (the only way `imported` is ever cleared).
+  on('caos:projects.relocate', async (id) => {
+    const r = await dialog.showOpenDialog(win(), { title: 'Choose the local folder for this project', properties: ['openDirectory'] });
+    if (r.canceled || !r.filePaths.length) return null;
+    const dir = r.filePaths[0];
+    let entry = null;
+    for (const name of ['index.html', 'public/index.html', 'src/index.html', 'dist/index.html']) {
+      const p = require('path').join(dir, name);
+      if (fs.existsSync(p)) { entry = p; break; }
+    }
+    security.allowFileRoot(dir);
+    return repos.projects.relocate(id, { path: dir, entry });
+  });
+
+  // --- storage health / recovery (a damaged file is read-only, never overwritten) ---
+  on('caos:store.status', () => repos.health());
+  on('caos:store.recover', (name, mode) => repos.recover(String(name || ''), mode === 'empty' ? 'empty' : mode === 'backup' ? 'backup' : undefined));
 
   // --- sessions ---
   on('caos:sessions.list', (projectId) => repos.sessions.list(projectId));
@@ -133,7 +173,11 @@ function register({ repos, paths, getWindow }) {
   // --- product platform (license, sync, team, billing, integrations, …) ---
   on('caos:license.status', () => require('../services/license').status(repos));
   on('caos:license.activate', (key) => require('../services/license').activate(repos, key));
-  on('caos:license.demoKey', (opts) => require('../services/license').issueDemoKey(opts || {}));
+  // Demo licences exist only in dev / e2e / ci builds (build-config.js); a release
+  // build does not register this channel at all, and issueDemoKey refuses regardless.
+  if (require('../services/license').demoKeysEnabled()) {
+    on('caos:license.demoKey', (opts) => require('../services/license').issueDemoKey(opts || {}));
+  }
   on('caos:license.canUse', (feature) => require('../services/license').canUse(repos, feature));
 
   on('caos:analytics.track', (event, props) => require('../services/analytics').track(repos, event, props || {}));
@@ -158,6 +202,7 @@ function register({ repos, paths, getWindow }) {
   on('caos:billing.seats', (seats) => require('../services/billing').applySeatChange(repos, seats));
   on('caos:billing.gdprExport', () => require('../services/billing').exportGdprPackage(repos));
   on('caos:billing.gdprDelete', () => require('../services/billing').deleteAccountData(repos));
+  on('caos:billing.dataInventory', () => require('../services/billing').dataInventory(repos));
 
   on('caos:integrations.issue', (payload) => require('../services/integrations').createIssueDraft(repos, payload || {}));
   on('caos:integrations.ciStarter', (projectPath) => require('../services/integrations').writeCiStarter(projectPath));
@@ -311,6 +356,8 @@ function register({ repos, paths, getWindow }) {
       return { ok: false, error: String(err && err.message ? err.message : err) };
     }
   });
+  // Cancels an in-flight caos:ai.run that was started with the same payload.requestId.
+  on('caos:ai.cancel', (requestId) => require('../services/ai').cancelAiTask(requestId));
 
   // --- recording exports (markdown / pdf / video) ---
   on('caos:recording.report', (recordingId, format) => {
@@ -403,7 +450,7 @@ function register({ repos, paths, getWindow }) {
         recording,
       });
     }
-    const { file, cwd, length } = writeRequest({
+    const { file, cwd, length, requestId, imported } = writeRequest({
       session,
       annotations,
       project,
@@ -412,15 +459,15 @@ function register({ repos, paths, getWindow }) {
       content,
     });
     try { require('../services/analytics').track(repos, 'handoff_success', { templated: !!content }); } catch (_e) { /* ignore */ }
-    return { file, cwd, length, command: (repos.settings.get().agentCommand || '').trim() };
+    return { file, cwd, length, requestId, imported, command: (repos.settings.get().agentCommand || '').trim() };
   });
   on('caos:agent.run', async (sessionId, filePath) => {
     const command = (repos.settings.get().agentCommand || '').trim();
     if (!command) return { ok: false, error: 'No agent command configured (set one in Settings).' };
     const session = repos.sessions.get(sessionId);
     const project = resolveProject(session);
-    const cwd = project && project.kind === 'local' && project.path ? project.path : repos.dir;
-    const { runCommand } = require('../services/agent/handoff');
+    const { runCommand, cwdFor } = require('../services/agent/handoff');
+    const cwd = cwdFor(project, repos.dir);
     const w = win();
     const onChunk = (chunk) => { try { if (w && !w.isDestroyed()) w.webContents.send('caos:agent.output', chunk); } catch (_e) { /* ignore */ } };
     return runCommand({ command, cwd, filePath, project, onChunk });
@@ -428,88 +475,47 @@ function register({ repos, paths, getWindow }) {
   on('caos:reveal', (filePath) => { shell.showItemInFolder(filePath); return true; });
 
   // --- full-page screenshot via CDP (captures beyond the viewport) ---
-  on('caos:capture-fullpage', async (webContentsId) => {
+  // The debugger is shared through the broker (services/browser/debugger-broker.js)
+  // so capture never detaches an attachment it does not own. The result carries
+  // `transformed`: true for the resized/flattened full-page export, false for an
+  // unmodified viewport capture (usable as evidence).
+  on.withEvent('caos:capture-fullpage', async (event, webContentsId) => {
     const wc = webContents.fromId(webContentsId);
     if (!wc || wc.isDestroyed()) return { ok: false, error: 'guest webContents not found' };
-    // Only attach the debugger to a guest <webview> hosted by our window — never
-    // the privileged renderer or an arbitrary webContents id from the renderer.
-    const host = win() && !win().isDestroyed() ? win().webContents : null;
-    if (wc.getType() !== 'webview' || (host && wc.hostWebContents !== host)) {
+    // Only attach the debugger to a guest <webview> hosted by the REQUESTING
+    // shell window — never the privileged renderer or an arbitrary id.
+    if (wc.getType() !== 'webview' || !wc.hostWebContents || wc.hostWebContents.id !== event.sender.id) {
       return { ok: false, error: 'not a guest webContents' };
     }
-    const dbg = wc.debugger;
-    let attached = false;
-    let overrode = false;
-    try {
-      if (!dbg.isAttached()) { dbg.attach('1.3'); attached = true; }
-      // Capture from the top so the shot starts at the top of the document.
-      try { await wc.executeJavaScript('window.scrollTo(0, 0)', true); } catch (_e) { /* ignore */ }
-      await new Promise((r) => setTimeout(r, 60));
-      const metrics = await dbg.sendCommand('Page.getLayoutMetrics');
-      const size = metrics.cssContentSize || metrics.contentSize || { width: 1200, height: 800 };
-      // Grow the VIEWPORT to the document and take an ordinary screenshot.
-      // 'captureBeyondViewport' is the tidier API, but on this Chromium it takes
-      // the renderer down outright (a NOTREACHED, not a catchable error) often
-      // enough to lose the app — and a crash is a worse screenshot than a
-      // slightly reflowed one. Height is capped so a runaway page cannot ask for
-      // a surface nothing can allocate.
-      const width = Math.max(320, Math.min(4000, Math.ceil(size.width)));
-      const full = Math.ceil(size.height);
-      const height = Math.max(240, Math.min(12000, full));
-      await dbg.sendCommand('Emulation.setDeviceMetricsOverride', {
-        width,
-        height,
-        deviceScaleFactor: 1,
-        mobile: false,
-      });
-      overrode = true;
-      // Soften sticky/fixed chrome so full-page shots don't stamp the same
-      // header onto every band of a long document.
-      try {
-        await wc.executeJavaScript(`(() => {
-          if (window.__braiwserFixedRestore) return;
-          const nodes = Array.from(document.querySelectorAll('*'));
-          const changed = [];
-          for (const el of nodes) {
-            const cs = getComputedStyle(el);
-            if (cs.position === 'fixed' || cs.position === 'sticky') {
-              changed.push({ el, position: el.style.position, top: el.style.top });
-              el.style.position = 'absolute';
-            }
-          }
-          window.__braiwserFixedRestore = () => {
-            for (const c of changed) {
-              c.el.style.position = c.position;
-              c.el.style.top = c.top;
-            }
-            delete window.__braiwserFixedRestore;
-          };
-        })()`, true);
-      } catch (_e) { /* ignore */ }
-      await new Promise((r) => setTimeout(r, 140)); // let it lay out at the new size
-      const shot = await dbg.sendCommand('Page.captureScreenshot', { format: 'png' });
-      return {
-        ok: true,
-        dataUrl: 'data:image/png;base64,' + shot.data,
-        cssWidth: width,
-        cssHeight: height,
-        truncated: height < full,
-      };
-    } catch (e) {
-      // Last resort: whatever is on screen right now.
-      try {
-        const img = await wc.capturePage();
-        const size = img.getSize();
-        return { ok: true, dataUrl: img.toDataURL(), cssWidth: size.width, cssHeight: size.height, viewportOnly: true };
-      } catch (_e2) {
-        return { ok: false, error: String((e && e.message) || e) };
-      }
-    } finally {
-      try { await wc.executeJavaScript('window.__braiwserFixedRestore && window.__braiwserFixedRestore()', true); } catch (_e) { /* ignore */ }
-      if (overrode) { try { await dbg.sendCommand('Emulation.clearDeviceMetricsOverride'); } catch (_e) { /* ignore */ } }
-      try { if (attached) dbg.detach(); } catch (_e) { /* ignore */ }
-    }
+    const { captureFullPage } = require('../services/browser/fullpage-capture');
+    return captureFullPage(wc);
   });
+
+  // --- video export source: one-shot, frame-bound display-media grant ---
+  // Arms (guest id) or ends (null) a run; see src/main/security/display-media.js.
+  on.withEvent('caos:video.source', (event, id) =>
+    require('../security/display-media').getController().arm(event, id));
+
+  // --- keep one guest unthrottled while a replay runs in a hidden tab ---
+  // Throttling is on by default; see services/browser/keep-awake.js.
+  on.withEvent('caos:throttle.hold', (event, id) =>
+    require('../services/browser/keep-awake').getKeepAwake().hold(event.sender, id));
+
+  // --- agent runtime UI (browser:* channels) ---
+  // Registered only when the agentRuntime flag was on at launch (the shell preload
+  // exposes the facade under the same condition). The broker comes from
+  // register.agentBroker or services/browser/broker.getBroker(); see ipc/browser.js.
+  if (security.agentRuntimeEnabled()) {
+    try {
+      register.agentRuntimeIpc = require('./browser').register({
+        handle: on.withEvent,
+        getWindow: () => getWindow(),
+        getBroker: () => register.agentBroker || null,
+        flag: security.agentRuntimeEnabled,
+        isShellWebContents: security.isShellWebContents,
+      });
+    } catch (err) { console.log('[agent-runtime] ipc unavailable: ' + ((err && err.message) || err)); }
+  }
 }
 
 module.exports = register;

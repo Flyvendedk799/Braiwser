@@ -6,13 +6,56 @@ const { contextBridge, ipcRenderer } = require('electron');
 const invoke = (channel, ...args) => ipcRenderer.invoke(channel, ...args);
 const e2eEnabled = process.env.BRAIWSER_E2E === '1' || process.env.CAOS_E2E === '1';
 
+// Defence in depth only: src/main/security/ipc-guard.js re-validates sender and
+// arguments in the main process. These reject early, as promises, with clear text.
+const rejectBad = (msg) => Promise.reject(new TypeError(msg));
+const isAbsPathString = (v) => typeof v === 'string' && v.length > 0 && v.length <= 4096 && !v.includes('\0') && /^([a-zA-Z]:[\\/]|\\\\|\/)/.test(v);
+const isId = (v) => Number.isInteger(v) && v > 0;
+
+// agentRuntime — facade for the browser/agent runtime. DISABLED (not exposed at
+// all) unless the main process passed --braiwser-agent-runtime=1 (feature flag
+// BRAIWSER_AGENT_RUNTIME=1, settings.featureFlags.agentRuntime, or e2e). Only
+// `browser:`-prefixed channels exist on it; every other channel is refused here
+// and re-validated by the main-process IPC guard. Replies are whatever the
+// main-side handler returns; push events arrive through on().
+const AGENT_CHANNEL = /^browser:[A-Za-z0-9._:-]{1,56}$/;
+const agentRuntimeEnabled = e2eEnabled
+  || process.env.BRAIWSER_AGENT_RUNTIME === '1'
+  || (Array.isArray(process.argv) && process.argv.includes('--braiwser-agent-runtime=1'));
+const agentRuntime = {
+  enabled: true,
+  invoke: (channel, payload) => (AGENT_CHANNEL.test(String(channel))
+    ? invoke(String(channel), payload === undefined ? {} : payload)
+    : rejectBad('agentRuntime: only browser:* channels are available')),
+  on: (channel, cb) => {
+    if (!AGENT_CHANNEL.test(String(channel)) || typeof cb !== 'function') return () => {};
+    const listener = (_e, payload) => cb(payload);
+    ipcRenderer.on(String(channel), listener);
+    return () => ipcRenderer.removeListener(String(channel), listener);
+  },
+};
+
 const api = {
   // End-to-end self-test hooks (only meaningful when BRAIWSER_E2E=1 / CAOS_E2E=1).
   e2e: e2eEnabled,
-  e2eDone: (payload) => invoke('caos:e2e-done', payload),
-  e2eCheck: (check) => invoke('caos:e2e-check', check),
+  // Only present in an e2e run: a normal session exposes no self-test channels.
+  ...(e2eEnabled ? {
+    e2eDone: (payload) => invoke('caos:e2e-done', payload),
+    e2eCheck: (check) => invoke('caos:e2e-check', check),
+  } : {}),
 
   config: () => invoke('caos:config'),
+
+  // Hold one guest webContents unthrottled while a replay runs (null releases).
+  // Throttling is otherwise left on; video export lifts it by itself.
+  power: {
+    keepAwake: (webContentsId) => (webContentsId === null || isId(webContentsId) ? invoke('caos:throttle.hold', webContentsId) : rejectBad('keepAwake needs a webContents id or null')),
+  },
+
+  // Move main-owned agent pages into a rectangle of the shell window.
+  guestView: {
+    place: (rect) => invoke('caos:guest-view.place', rect),
+  },
 
   // Menu accelerators dispatch command ids here; app.js owns the command table.
   onCommand: (cb) => {
@@ -42,8 +85,8 @@ const api = {
     openDirectory: () => invoke('caos:open-directory'),
     save: (payload) => invoke('caos:save', payload),
     saveScreenshot: (payload) => invoke('caos:save-screenshot', payload),
-    reveal: (filePath) => invoke('caos:reveal', filePath),
-    captureFullPage: (webContentsId) => invoke('caos:capture-fullpage', webContentsId),
+    reveal: (filePath) => (isAbsPathString(filePath) ? invoke('caos:reveal', filePath) : rejectBad('reveal needs an absolute path')),
+    captureFullPage: (webContentsId) => (isId(webContentsId) ? invoke('caos:capture-fullpage', webContentsId) : rejectBad('captureFullPage needs a webContents id')),
   },
 
   agent: {
@@ -67,6 +110,12 @@ const api = {
     touch: (id) => invoke('caos:projects.touch', id),
     update: (id, patch) => invoke('caos:projects.update', id, patch),
     remove: (id) => invoke('caos:projects.remove', id),
+    relocate: (id) => invoke('caos:projects.relocate', id),
+  },
+
+  store: {
+    status: () => invoke('caos:store.status'),
+    recover: (name, mode) => invoke('caos:store.recover', name, mode),
   },
 
   sessions: {
@@ -124,6 +173,8 @@ const api = {
 
   ai: {
     run: (payload) => invoke('caos:ai.run', payload),
+    // Pass the same `requestId` given to run() to stop that call.
+    cancel: (requestId) => invoke('caos:ai.cancel', requestId),
   },
 
   export: {
@@ -132,7 +183,7 @@ const api = {
     recordingReport: (id, format) => invoke('caos:recording.report', id, format),
     recordingPdf: (id) => invoke('caos:recording.pdf', id),
     saveBinary: (payload) => invoke('caos:save-binary', payload),
-    videoSource: (webContentsId) => invoke('caos:video.source', webContentsId),
+    videoSource: (webContentsId) => (webContentsId === null || isId(webContentsId) ? invoke('caos:video.source', webContentsId) : rejectBad('videoSource needs a webContents id or null')),
     saveElement: (payload) => invoke('caos:element.save', payload),
     recording: (format, recordingId) => invoke('caos:export.recording', format, recordingId),
   },
@@ -177,6 +228,7 @@ const api = {
     seats: (n) => invoke('caos:billing.seats', n),
     gdprExport: () => invoke('caos:billing.gdprExport'),
     gdprDelete: () => invoke('caos:billing.gdprDelete'),
+    dataInventory: () => invoke('caos:billing.dataInventory'),
   },
 
   integrations: {
@@ -207,6 +259,8 @@ const api = {
     schema: () => invoke('caos:enterprise.schema'),
   },
 };
+
+if (agentRuntimeEnabled) api.agentRuntime = agentRuntime;
 
 contextBridge.exposeInMainWorld('braiwser', api);
 contextBridge.exposeInMainWorld('caos', api);

@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Wide labels</title></head>
+<body>
+<main id="root"></main>
+<script>
+// 300 rows with long, unique, page-controlled labels: forces the 64 KiB byte cap before the 200-node cap.
+var root = document.getElementById('root');
+function pad(prefix, i, n) { var s = prefix + i + ' '; while (s.length < n) s += '漢字かな交じり '; return s.slice(0, n); }
+for (var i = 0; i < 300; i++) {
+  var li = document.createElement('section');
+  li.setAttribute('aria-label', pad('Group ', i, 100));
+  var b = document.createElement('button');
+  b.type = 'button';
+  b.textContent = pad('Button ', i, 400);
+  li.appendChild(b);
+  root.appendChild(li);
+}
+</script>
+</body></html>

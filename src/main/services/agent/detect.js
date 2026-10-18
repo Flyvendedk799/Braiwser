@@ -1,32 +1,18 @@
 // Probe PATH for known coding-agent CLIs and map them onto AGENT_PRESETS.
-const { spawnSync } = require('child_process');
+// Lookups use an argument array (never a shell) and report what would really be
+// launched: a real executable, or a .cmd shim on Windows.
 const { AGENT_PRESETS } = require('./templates');
+const { whichAll, pickExecutable } = require('./command');
 
 function which(bin) {
   if (!bin || bin === 'cat') return '';
-  try {
-    const cmd = process.platform === 'win32' ? 'where' : 'which';
-    const r = spawnSync(cmd, [bin], {
-      encoding: 'utf8',
-      timeout: 2500,
-      windowsHide: true,
-    });
-    if (r.status !== 0) return '';
-    const line = String(r.stdout || '').split(/\r?\n/).map((s) => s.trim()).find(Boolean);
-    return line || '';
-  } catch (_e) {
-    return '';
-  }
-}
-
-function binOf(command) {
-  const token = String(command || '').trim().split(/\s+/)[0] || '';
-  return token.replace(/^["']|["']$/g, '');
+  const picked = pickExecutable(whichAll(bin));
+  return picked ? picked.path : '';
 }
 
 function detectAgents() {
   return AGENT_PRESETS.map((preset) => {
-    const bin = binOf(preset.command);
+    const bin = preset.exe || '';
     const found = which(bin);
     return {
       id: preset.id,

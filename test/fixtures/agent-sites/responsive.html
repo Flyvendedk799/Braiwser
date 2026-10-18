@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Responsive shop</title>
+<style>
+body{font:16px system-ui;margin:0}
+nav[aria-label=Primary]{display:flex;gap:16px;padding:12px;background:#eef}
+nav[aria-label=Primary] a{color:#225}
+main{padding:16px}
+footer{padding:12px;background:#eee}
+/* The compact layout keeps the Primary navigation: it just wraps. */
+@media (max-width:600px){nav[aria-label=Primary]{flex-wrap:wrap}}
+</style></head>
+<body>
+<header><h1>Responsive shop</h1></header>
+<nav aria-label="Primary"><a href="#home">Home</a><a href="#products">Products</a><a href="#about">About</a></nav>
+<main aria-label="Content"><p>The Primary navigation, this content and the footer are visible at every width.</p></main>
+<footer aria-label="Site footer">Footer</footer>
+</body></html>

@@ -20,11 +20,11 @@
     <div class="icp">
       <article>
         <h3>Install</h3>
-        <p>Download a release build, or <code>npm install && npm start</code> from the repo. Requires Node 18+ for development.</p>
+        <p>Download a release build, or <code>npm install && npm start</code> from the repo. Requires Node 20+ for development.</p>
       </article>
       <article>
         <h3>AI credentials</h3>
-        <p>Claude / Codex subscription (CLI already signed in), or Anthropic / OpenAI API keys in Settings. No key → local synthesis.</p>
+        <p>Claude / Codex subscription (CLI already signed in), or Anthropic / OpenAI API keys in Settings. With nothing connected you get a clearly labelled local summary; an expired or unreadable credential is reported as an error rather than hidden.</p>
       </article>
       <article>
         <h3>Agent hand-off</h3>
@@ -43,8 +43,8 @@
         <p>Agency persona: set studio name, mark notes client-facing, export HTML report or client pack Markdown.</p>
       </article>
       <article>
-        <h3>Sync &amp; team</h3>
-        <p>Experimental. Sign-in under Settings queues encrypted snapshots locally — there is no hosted sync endpoint yet.</p>
+        <h3>Sync, team &amp; integrations</h3>
+        <p>Local-only. Sync &ldquo;sign-in&rdquo; records an email on this machine and the queue stages encrypted snapshots locally &mdash; there is no hosted service, so it is not a backup. Team invitations are not sent and comments are not shared. Issue integrations produce drafts; Braiwser does not send them. Single sign-on, SCIM and billing are not implemented.</p>
       </article>
     </div>
   </section>

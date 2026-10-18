@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Duplicates</title></head>
+<body>
+<main>
+  <h1>Duplicate names</h1>
+  <button type="button" onclick="document.getElementById('log').textContent='delete A'">Delete</button>
+  <button type="button" onclick="document.getElementById('log').textContent='delete B'">Delete</button>
+  <ul>
+    <li>Alice <button type="button" onclick="document.getElementById('log').textContent='remove alice'">Remove</button></li>
+    <li>Bob <button type="button" onclick="document.getElementById('log').textContent='remove bob'">Remove</button></li>
+  </ul>
+  <button type="button" onclick="document.getElementById('log').textContent='unique'">Unique action</button>
+  <button type="button" id="dup-maker" onclick="var b=document.createElement('button');b.type='button';b.textContent='Unique action';document.querySelector('main').appendChild(b)">Add twin</button>
+  <div role="status" id="log">idle</div>
+</main>
+</body></html>

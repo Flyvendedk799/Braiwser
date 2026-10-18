@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Delayed</title></head>
+<body>
+<main>
+  <button id="start" type="button">Start job</button>
+  <div role="status" id="status">Waiting</div>
+</main>
+<script>
+document.getElementById('start').addEventListener('click', function () {
+  document.getElementById('status').textContent = 'Working';
+  setTimeout(function () { document.getElementById('status').textContent = 'Done'; }, 600);
+});
+</script>
+</body></html>
