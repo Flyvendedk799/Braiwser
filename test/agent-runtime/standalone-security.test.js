@@ -53,6 +53,7 @@ test('capture failure and capture racing privacy cannot become a fresh frame', a
 test('pause retries keep one epoch and revoked v2 control cannot use legacy resume', async t => {
   const h=world();t.after(()=>h.broker.close());const s=await h.open();
   const run=await h.a.startRun({sessionId:s.sessionId,pageId:s.pageId,requestKey:'pause-run',skillId:'verify-journey',skillVersion:'1.0.0',inputs:{name:'Fixture'}});
+  await require('./harness').waitRun(h.a,run.runId);
   const session=h.broker._internals.sessions.get(s.sessionId),c=h.broker._internals.handoffs;
   const input={runId:run.runId,requestKey:'pause-once',expectedControlEpoch:session.lease.fence};
   const first=await h.a.pauseRun(input),second=await h.a.pauseRun(input);
