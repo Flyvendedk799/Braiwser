@@ -64,6 +64,9 @@ export async function run(I) {
     });
 
     // --- 0. Load the fixture ---
+    // The webview's initial src is still being attached at renderer startup.
+    // Wait for that navigation before replacing it, or it can overwrite ours.
+    await until(() => guest(`location.href === ${JSON.stringify(I.state.config.welcomeUrl)} && document.readyState === 'complete'`));
     const ready = waitDomReady();
     I.navigateTo(fixtureUrl);
     await ready;
@@ -1447,6 +1450,7 @@ export async function run(I) {
       I.state.settings.theme = 'dark';
       I.applyTheme();
       check('dark theme is applied to the document', document.documentElement.dataset.theme === 'dark');
+      await until(() => getComputedStyle(document.body).backgroundColor !== lightBg);
       const darkBg = getComputedStyle(document.body).backgroundColor;
       check('theme actually repaints the shell', lightBg !== darkBg, `${lightBg} vs ${darkBg}`);
       I.state.settings.theme = 'system';
