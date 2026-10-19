@@ -38,6 +38,12 @@ jobs:
       - name: Static check
         run: npm run check
 
+      - name: Install matching Chromium for standalone and driver fixtures
+        run: npx playwright-core install --with-deps chromium
+
+      - name: Enable the Chromium sandbox on the disposable runner
+        run: bash .github/scripts/browser-sandbox.sh
+
       - name: Unit tests
         run: npm run test:unit
 

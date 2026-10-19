@@ -57,15 +57,15 @@ export function createFakeBroker(options = {}) {
     if (active) verdict = 'pending';
     else if (run.state === 'uncertain' || run.state === 'interrupted') verdict = 'unknown';
     else verdict = v.status;
-    const events = run.events.filter((e) => e.sequence >= afterSequence).slice(0, maxEvents);
+    const events = run.events.filter((e) => e.sequence > afterSequence).slice(0, maxEvents);
     const dto = {
-      runId: run.runId, state: run.state, verdict, sequence: run.events.length,
+      runId: run.runId, state: run.state, verdict, sequence: run.events.length + 1,
       cancelRequested: run.cancelRequested,
       planned: v.planned, executed: v.executed, passed: v.passed, skipped: v.skipped, cancelled: v.cancelled,
       timedOut: v.timedOut, evidenceComplete: v.evidenceComplete, uncertainEffect: v.uncertainEffect,
       requiredAssertions: v.requiredAssertions, passedAssertions: v.passedAssertions,
       deadlineAt: run.deadlineAt, pending: v.pending, failed: v.failed, unknown: v.unknown,
-      events, nextSequence: events.length ? events[events.length - 1].sequence + 1 : afterSequence,
+      events, nextSequence: events.length ? events[events.length - 1].sequence : afterSequence,
       manifestUri: `braiwser://runs/${run.runId}/manifest`,
     };
     if (state.corrupt === 'passed-without-proof' && run.state !== 'queued') {
@@ -81,7 +81,7 @@ export function createFakeBroker(options = {}) {
     finish(runId, { state: next, results, evidenceComplete = true }) {
       const run = runs.get(runId);
       run.state = next; run.results = results; run.evidenceComplete = evidenceComplete;
-      run.events.push({ sequence: run.events.length, kind: 'terminal', summary: `run ${next}` });
+      run.events.push({ sequence: run.events.length + 1, kind: 'terminal', summary: `run ${next}` });
     },
     run(runId) { return runs.get(runId); },
     forPrincipal(principal) {
@@ -156,7 +156,7 @@ export function createFakeBroker(options = {}) {
           const stepIds = ['s1', 's2', 's3'];
           const run = { runId, owner: principal.id, state: 'queued', stepIds, assertionIds: ['s3'], results: [], evidenceComplete: false,
             cancelRequested: false, deadlineAt: '2026-10-09T12:00:00.000Z',
-            events: [{ sequence: 0, kind: 'accepted', summary: 'run accepted' }] };
+            events: [{ sequence: 1, kind: 'accepted', summary: 'run accepted' }] };
           runs.set(runId, run); requestKeys.set(key, { digest, runId });
           return runDto(run);
         },
@@ -165,7 +165,7 @@ export function createFakeBroker(options = {}) {
           log('cancelRun', { runId }, ctx);
           const run = ownRun(principal, runId);
           run.cancelRequested = true;
-          if (run.state === 'queued') { run.state = 'cancelled'; run.events.push({ sequence: run.events.length, kind: 'cancelled', summary: 'cancelled before dispatch' }); }
+          if (run.state === 'queued') { run.state = 'cancelled'; run.events.push({ sequence: run.events.length + 1, kind: 'cancelled', summary: 'cancelled before dispatch' }); }
           return runDto(run);
         },
         async handoff(args, ctx) {

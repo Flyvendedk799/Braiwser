@@ -41,11 +41,11 @@ test('a journey runs end to end: durable events, committed manifest, evidence co
 test('event paging: afterSequence / maxEvents / nextSequence', async () => {
   const h = boot(); const s = await h.open(); const run = await waitRun(h.a, (await start(h.a, s)).runId);
   const first = await h.a.getRun({ runId: run.runId, afterSequence: 0, maxEvents: 3 });
-  assert.equal(first.events.length, 3); assert.equal(first.nextSequence, 4);
-  const rest = await h.a.getRun({ runId: run.runId, afterSequence: first.nextSequence - 1, maxEvents: 100 });
+  assert.equal(first.events.length, 3); assert.equal(first.nextSequence, 3);
+  const rest = await h.a.getRun({ runId: run.runId, afterSequence: first.nextSequence, maxEvents: 100 });
   assert.equal(rest.events[0].sequence, 4); assert.equal(rest.events.length, run.sequence - 3);
   const none = await h.a.getRun({ runId: run.runId, afterSequence: run.sequence, maxEvents: 10 });
-  assert.equal(none.events.length, 0); assert.equal(none.nextSequence, run.sequence + 1);
+  assert.equal(none.events.length, 0); assert.equal(none.nextSequence, run.sequence);
   assert.equal(await codeOf(h.a.getRun({ runId: run.runId, maxEvents: 101 })), 'DENIED');
   await h.broker.close();
 });

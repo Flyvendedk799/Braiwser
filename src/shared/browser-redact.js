@@ -50,10 +50,11 @@ function redactUrl(raw) {
 function createRedactor({ secrets = [] } = {}) {
   const known = new Set();
   const forms = [];
-  function addSecret(value) {
-    if (typeof value !== 'string' || value.length < 4 || known.has(value)) return;
+  function addSecret(value, { minimumLength = 4 } = {}) {
+    if (typeof value !== 'string' || value.length < minimumLength || known.has(value)) return;
     known.add(value);
     forms.push(value, encodeURIComponent(value), Buffer.from(value).toString('base64'));
+    forms.sort((a, b) => b.length - a.length);
   }
   secrets.forEach(addSecret);
 

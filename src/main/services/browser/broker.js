@@ -296,7 +296,8 @@ function createBroker(options = {}) {
   };
 
   async function observeCore(session, rec, { maxNodes = 200, focus, cursor, noSpend = false }, principal, runId) {
-    if (session.privateInput) throw dtoError('DENIED', 'PRIVATE_INPUT_ACTIVE: observations are suspended while private input is on', { detail: 'PRIVATE_INPUT_ACTIVE' });
+    const privacyEpoch = session.privacyEpoch || 0;
+    if (session.privateInput || session.privateReadBlocked) throw dtoError('DENIED', 'PRIVATE_INPUT_ACTIVE: private content must be safely reconciled before observation', { detail: 'PRIVATE_INPUT_ACTIVE' });
     policy.assertActive(session.grant, principal);
     policy.assertClass(session.grant, 'observe');
     if (!noSpend) policy.spend(session.grant, 'observations');
@@ -321,6 +322,7 @@ function createBroker(options = {}) {
         if (e.code === 'STALE_DOCUMENT') throw dtoError('STALE_REF', 'the document changed during observation; observe again', { retry: 'refresh', detail: 'STALE_DOCUMENT' });
         throw dtoError('UNAVAILABLE', 'driver could not observe the page', { retry: 'safe-read', detail: 'OBSERVE_FAILED' });
       }
+      if (session.privateInput || session.privateReadBlocked || privacyEpoch !== (session.privacyEpoch || 0)) throw dtoError('DENIED', 'PRIVATE_INPUT_ACTIVE: observation was fenced');
       const res = read.value || {};
       const rawNodes = Array.isArray(res.nodes) ? res.nodes.filter((n) => n && typeof n.refId === 'string' && typeof n.role === 'string').slice(0, limits.maxNodes) : [];
       const cleaned = rawNodes.map((n) => ({ ...n, name: evidence.redactor.text(clip(n.name, 200), 200), role: clip(n.role, 80), table: structOf(n, 'table'), list: structOf(n, 'list') }));
@@ -568,15 +570,13 @@ function createBroker(options = {}) {
       if (!input || !C.isClientId(input.runId)) throw C.invalid('runId');
       const run = ownedRun(input.runId, principal);
       const session = ownedSession(run.sessionId, principal, { allowUi: true });
-      if (input.expectedControlEpoch !== undefined && input.expectedControlEpoch !== session.lease.fence) {
-        throw C.brokerError('DENIED', 'STALE_CONTROL_EPOCH: control epoch does not match', { detail: 'STALE_CONTROL_EPOCH' });
-      }
-      const requestKey = input.requestKey === undefined ? null : (C.isClientId(input.requestKey) ? input.requestKey : (() => { throw C.invalid('requestKey'); })());
+      if (!C.isClientId(input.requestKey)) throw C.invalid('requestKey');
+      const requestKey = input.requestKey;
       const digest = C.sha256({ runId: run.runId, requestKey, epoch: input.expectedControlEpoch || null });
-      const result = await handoffCoord.withLock(session.sessionId, async () => {
+      const result = await handoffCoord.withLock(session.sessionId, () => handoffCoord.pauseOnce(session, input, principal, async () => {
         const paused = await handoffCoord.pause(session, { acknowledgeUncertain: principal.kind === 'ui', drainTimeoutMs: limits.drainTimeoutMs });
         return paused;
-      });
+      }));
       session.invalidateAll();
       policy.revokeApprovals({ sessionId: session.sessionId });
       emit('owner-changed', { sessionId: session.sessionId, owner: result.owner, fence: result.fence, runId: run.runId });
@@ -634,6 +634,8 @@ function createBroker(options = {}) {
       const principal = principalOf(ctx);
       const v = C.validateSessionPage(input);
       const session = ownedSession(v.sessionId, principal, { allowUi: true });
+      // Legacy trusted UI cannot bypass a v2 episode or its one-use grant.
+      if (handoffCoord.hasLiveSession(session.sessionId)) throw dtoError('DENIED', 'use the v2 return-to-agent protocol');
       return handoffs.resume(session, { pageId: v.pageId }, principal);
     });
   }
@@ -738,6 +740,8 @@ function createBroker(options = {}) {
       // evidence store as an internal binary artifact; only a bounded metadata record and ids ever leave this method.
       async capture(step, found) {
         try {
+          const privacyEpoch = session.privacyEpoch || 0;
+          if (session.privateInput || session.privateTainted) return { status: 'failed', code: 'PRIVATE_INPUT_ACTIVE' };
           policy.assertActive(session.grant, principal);
           policy.assertClass(session.grant, 'observe');
           policy.spend(session.grant, 'observations');
@@ -748,6 +752,7 @@ function createBroker(options = {}) {
           }
           if (typeof rec.driverPage.capture !== 'function') return { status: 'failed', code: 'UNSUPPORTED' };
           const read = await rec.owned.read(() => withTimeout(Promise.resolve().then(() => rec.driverPage.capture(refId ? { refId } : {})), limits.stepTimeoutMs));
+          if (session.privateInput || session.privateTainted || privacyEpoch !== (session.privacyEpoch || 0)) return { status: 'failed', code: 'PRIVATE_INPUT_ACTIVE' };
           const shot = read.value || {};
           const m = shot.meta || {};
           const size = (o) => (o && Number.isFinite(o.width) && Number.isFinite(o.height) ? { width: Math.round(o.width), height: Math.round(o.height) } : null);
@@ -794,7 +799,10 @@ function createBroker(options = {}) {
       async assert(assertion) {
         let timer;
         try {
-          const read = await rec.owned.read(() => Promise.race([rec.driverPage.evaluateAssertion(assertion), new Promise((_, rej) => { timer = setTimeout(() => rej(Object.assign(new Error('assertion timeout'), { code: 'DEADLINE_EXCEEDED' })), limits.stepTimeoutMs); })]));
+          const privacyEpoch = session.privacyEpoch || 0;
+          if (session.privateInput || session.privateReadBlocked) return { status: 'unknown', code: 'PRIVATE_INPUT_ACTIVE' };
+          const read = await rec.owned.read(() => Promise.race([rec.driverPage.evaluateAssertion(assertion, { timeoutMs: limits.assertionWaitMs || 0 }), new Promise((_, rej) => { timer = setTimeout(() => rej(Object.assign(new Error('assertion timeout'), { code: 'DEADLINE_EXCEEDED' })), limits.stepTimeoutMs); })]));
+          if (session.privateInput || session.privateReadBlocked || privacyEpoch !== (session.privacyEpoch || 0)) return { status: 'unknown', code: 'PRIVATE_INPUT_ACTIVE' };
           const r = read.value || {};
           return { status: ['passed', 'failed', 'unknown'].includes(r.status) ? r.status : 'unknown', actual: r.actual, code: r.code };
         } catch (e) { return { status: 'unknown', code: e.code || 'ASSERTION_ERROR' }; } finally { clearTimeout(timer); }
@@ -807,9 +815,9 @@ function createBroker(options = {}) {
         const owner = rec.owned.owner;
         if (owner === 'quarantined') return 'quarantined';
         setState('needsHuman', 'waiting for the human to finish and resume');
-        if (session.lease.isAgent()) { setState('running', 'agent control restored'); return 'resumed'; }
+        if (session.lease.isAgent()) { setState('running', 'agent control restored'); return session.lastHandoffVersion === 2 ? 'resumed-v2' : 'resumed'; }
         const w = await waitForEvent(events, 'owner-changed', (e) => e.sessionId === session.sessionId && e.owner === 'agent', { signal: rt.controller.signal, timeoutMs: limits.humanWaitMs });
-        if (w === 'event') { setState('running', 'agent control restored after fresh observation'); return 'resumed'; }
+        if (w === 'event') { setState('running', 'agent control restored after fresh observation'); return session.lastHandoffVersion === 2 ? 'resumed-v2' : 'resumed'; }
         return w;
       },
     };
@@ -959,6 +967,7 @@ function createBroker(options = {}) {
       if (!input || !C.isClientId(input.runId)) throw C.invalid('runId');
       const run = ownedRun(input.runId, principal);
       const rt = runtimes.get(run.runId);
+      handoffCoord.revokeRun(run.runId);
       if (!C.TERMINAL_STATES.includes(run.state)) {
         runStore.requestCancel(run.runId);
         recordEvent(run, 'cancel_requested', 'cancellation requested; future dispatch is stopped, in-flight work stays uncertain');

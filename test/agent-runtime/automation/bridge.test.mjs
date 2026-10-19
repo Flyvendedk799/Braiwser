@@ -86,6 +86,9 @@ test('tokens map to server-chosen principals: ownership holds across connections
   const s = await a.openSession({ driver: 'playwright', mode: 'headless', grant: { allowedOrigins: ['https://app.test'] } });
   await assert.rejects(() => b.observe({ sessionId: s.sessionId, pageId: s.pageId }), (e) => e.publicError.code === 'DENIED');
   assert.ok((await a.observe({ sessionId: s.sessionId, pageId: s.pageId })).observationId);
+  const uri = 'braiwser://capabilities';
+  await a.readResource(uri);
+  assert.equal(broker.state.calls.at(-1).args.uri, uri);
   // The client cannot smuggle a principal: extra params are just params.
   await assert.rejects(() => b.observe({ sessionId: s.sessionId, pageId: s.pageId, principal: P('mcp:a'), ctx: { principal: P('mcp:a') } }));
   assert.ok(broker.state.calls.every((c) => ['mcp:a', 'cli:b'].includes(c.principal)));

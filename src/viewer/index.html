@@ -31,8 +31,8 @@
   </header>
   <main>
     <form id="redeem" hidden>
-      <p>This link does not grant control. Enter the one-time code from the trusted Braiwser channel.</p>
-      <label>One-time code <input id="code" name="code" autocomplete="one-time-code" required /></label>
+      <p>This link does not grant control. Enter the owner token from the protected viewer-owner.json file on your browser host.</p>
+      <label>Owner token <input id="code" name="code" type="password" autocomplete="off" required /></label>
       <button type="submit">Continue</button>
       <p id="redeem-error" role="alert"></p>
     </form>

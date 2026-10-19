@@ -5,7 +5,8 @@ import { z } from 'zod';
 import core from './workflow-core.js';
 
 export const SCHEMA_VERSION = 1;
-export const CAPABILITY_VERSION = '1.0.0';
+export const CAPABILITY_VERSION = '1.1.0';
+export const closeResultSchema = z.strictObject({ closed: z.literal(true) });
 export const DEFAULT_RESPONSE_BUDGET = 64 * 1024; // bytes; audit target
 
 export const id = z.string().regex(/^[A-Za-z0-9_.:-]{1,160}$/, 'Invalid identifier');
@@ -215,6 +216,7 @@ export const inputs = {
     reviewSessionId: id.optional(),
     grant: grantRequest,
   }),
+  browser_session_close: z.strictObject({ sessionId: id }),
   browser_observe: z.strictObject({
     ...page, maxNodes: z.number().int().min(1).max(200).default(80),
     focus: z.string().max(200).optional(), cursor: cursor.optional(),

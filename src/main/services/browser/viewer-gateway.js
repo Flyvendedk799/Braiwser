@@ -1,229 +1,225 @@
-// Standalone viewer transport. Binds loopback unless a remote deployment names
-// an https origin. The broker remains the authority for control and input.
+// The broker owns all control. This transport is deliberately loopback only.
 'use strict';
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { createViewerAuth } = require('./viewer-auth');
 const { FRAME_STALE_MS } = require('./handoff-coordinator');
-
+const H = require('../../../shared/handoff-contracts');
 const VIEWER_ROOT = path.resolve(__dirname, '../../../viewer');
-
-function readBody(req, limit = 64 * 1024) {
+function readBody(req, limit = 16 * 1024) {
   return new Promise((resolve, reject) => {
-    const chunks = [];
-    let size = 0;
-    req.on('data', (c) => {
-      size += c.length;
-      if (size > limit) { reject(Object.assign(new Error('body too large'), { v2Code: 'ACCESS_REVOKED' })); req.destroy(); return; }
-      chunks.push(c);
-    });
-    req.on('end', () => {
-      if (!chunks.length) return resolve({});
-      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); }
-      catch { reject(Object.assign(new Error('INVALID_INPUT: body must be JSON'), { v2Code: 'ACCESS_REVOKED' })); }
-    });
+    let size = 0; const chunks = [];
+    req.on('data', (c) => { size += c.length; if (size > limit) { reject(H.v2Error('ACCESS_REVOKED', 'body too large')); req.destroy(); } else chunks.push(c); });
+    req.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch { reject(H.v2Error('ACCESS_REVOKED', 'invalid JSON')); } });
     req.on('error', reject);
   });
 }
-
-function createViewerGateway({ broker, auth, host = '127.0.0.1', port = 0, clock = { now: () => Date.now() }, frameStaleMs = FRAME_STALE_MS } = {}) {
-  if (!broker) throw new TypeError('viewer gateway requires the owning broker');
+function createViewerGateway({ broker, auth, owner = null, host = '127.0.0.1', port = 0,
+  clock = { now: () => Date.now() }, frameStaleMs = FRAME_STALE_MS, heartbeatMs = 15000 } = {}) {
+  if (!broker || host !== '127.0.0.1') throw new TypeError('owning broker and loopback host required');
   const tokens = auth || createViewerAuth({ clock });
-  const secure = false;
-  let server = null;
-  let baseUrl = null;
   const frames = new Map();
-  const inputSeq = new Map();
-
-  function coord() { return broker._internals && broker._internals.handoffs; }
-
-  function send(res, status, body, headers = {}) {
-    const text = JSON.stringify(body);
-    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...headers });
-    res.end(text);
-  }
-  function fail(res, err) {
+  let frameSequence = 0;
+  let server, baseUrl, timer;
+  const coord = () => broker._internals.handoffs;
+  const send = (res, status, body, headers = {}) => {
+    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', ...headers });
+    res.end(JSON.stringify(body));
+  };
+  const fail = (res, err) => {
     const code = err.v2Code || 'INTERNAL';
-    const status = code === 'CONTROL_BUSY' ? 409 : code === 'VIEWER_UNREACHABLE' ? 503 : code === 'ACCESS_EXPIRED' || code === 'ACCESS_REVOKED' ? 401 : 400;
-    send(res, status, { ok: false, error: { code, message: String(err.message || code).slice(0, 300) } });
+    send(res, code === 'CONTROL_BUSY' ? 409 : ['ACCESS_EXPIRED', 'ACCESS_REVOKED'].includes(code) ? 401 : 400,
+      { ok: false, error: { code, message: code === 'INTERNAL' ? 'Viewer operation failed; reconcile before retry.' : String(err.message).slice(0, 300) } });
+  };
+  function live(view, handoffId, { allowClosed = false } = {}) {
+    if (!view || view.handoffId !== handoffId) throw H.v2Error('ACCESS_REVOKED', 'sign in required');
+    const rec = coord().get(handoffId);
+    if (!rec || (owner && (rec.principalId !== owner.principalId || view.ownerId !== owner.id))) throw H.v2Error('ACCESS_REVOKED', 'owner mismatch');
+    if (!allowClosed) coord().assertLive(rec);
+    const session = broker._internals.sessions.get(rec.sessionId);
+    if (!session || session.closed) throw H.v2Error('ACCESS_REVOKED', 'browser context lost');
+    broker._internals.policy.assertActive(session.grant, { id: session.ownerId });
+    return { rec, session };
   }
-
-  async function frameFor(rec, session, viewer) {
+  async function frameFor(rec, session, view) {
+    coord().assertLive(rec);
+    view.lastSeen = clock.now();
     const page = session.page(rec.pageId);
-    let image = null;
-    let meta = { width: 0, height: 0, scale: 1 };
-    const withheld = rec.privateInput === true && (!viewer || viewer.mode !== 'control' || viewer.instanceId !== rec.viewerInstance);
-    if (!withheld && page.driverPage && typeof page.driverPage.screenshot === 'function') {
-      try {
-        const shot = await page.driverPage.screenshot({});
-        if (shot && Buffer.isBuffer(shot.bytes)) image = shot.bytes.toString('base64');
-        if (shot && shot.meta) meta = { width: shot.meta.viewport && shot.meta.viewport.width || 0, height: shot.meta.viewport && shot.meta.viewport.height || 0, scale: shot.meta.scale || 1 };
-      } catch { /* a missing frame is reported stale, not invented */ }
+    const epoch = rec.controlEpoch, privacy = session.privacyEpoch || 0;
+    const documentEpoch = page.documentEpoch, driverEpoch = page.driverPage.documentEpoch;
+    const withheld = (rec.privateInput || session.privateTainted) && rec.viewerInstance !== view.id;
+    let shot;
+    if (!withheld && typeof page.driverPage.screenshot === 'function') {
+      try { shot = await page.driverPage.screenshot({}); } catch { /* report missing, never fresh */ }
     }
-    const prev = frames.get(rec.handoffId) || { sequence: 0 };
-    const next = {
-      sequence: prev.sequence + 1,
-      capturedAt: new Date(clock.now()).toISOString(),
-      controlEpoch: rec.controlEpoch,
-      documentEpoch: page.documentEpoch,
-      fresh: true,
-      withheld,
-      image: withheld ? null : image,
-      ...meta,
-    };
-    frames.set(rec.handoffId, { ...next, at: clock.now() });
-    return next;
+    coord().assertLive(rec);
+    const changed = epoch !== rec.controlEpoch || privacy !== (session.privacyEpoch || 0)
+      || documentEpoch !== page.documentEpoch || driverEpoch !== page.driverPage.documentEpoch;
+    const image = !changed && !withheld && Buffer.isBuffer(shot?.bytes) && shot.bytes.length <= 4 * 1024 * 1024 ? shot.bytes.toString('base64') : null;
+    const frame = { sequence: ++frameSequence, capturedAt: new Date(clock.now()).toISOString(),
+      controlEpoch: epoch, documentEpoch, driverEpoch, privacyEpoch: privacy,
+      fresh: !!image, withheld: !!withheld || changed, image,
+      width: shot?.meta?.viewport?.width || 0, height: shot?.meta?.viewport?.height || 0, scale: 1, at: clock.now() };
+    frames.set(view.id, frame);
+    return frame;
   }
-
-  async function handle(req, res) {
-    const url = new URL(req.url, baseUrl || 'http://127.0.0.1');
-    const pathname = url.pathname;
+  async function input(rec, session, view, body) {
+    if (view.mode !== 'control' || rec.viewerInstance !== view.id || rec.state !== 'human') throw H.v2Error('ACCESS_REVOKED', 'control required');
+    const frame = frames.get(view.id), page = session.page(rec.pageId);
+    if (!frame?.fresh || frame.withheld || frame.sequence !== body.frameSequence || frame.controlEpoch !== rec.controlEpoch
+      || frame.documentEpoch !== page.documentEpoch || body.documentEpoch !== page.documentEpoch
+      || frame.driverEpoch !== page.driverPage.documentEpoch || frame.privacyEpoch !== (session.privacyEpoch || 0)
+      || clock.now() - frame.at > frameStaleMs) throw H.v2Error('STALE_CONTROL_EPOCH', 'fresh frame required');
+    if (typeof page.driverPage.humanInput !== 'function') throw H.v2Error('UNSUPPORTED_HANDOFF', 'driver does not implement human input');
+    if (['click', 'move'].includes(body.kind) && (![body.x, body.y].every(Number.isFinite)
+      || body.x < 0 || body.y < 0 || body.x >= frame.width || body.y >= frame.height)) throw H.v2Error('STALE_CONTROL_EPOCH', 'coordinates outside captured viewport');
+    view.lastSeen = clock.now();
+    // Await the actual dispatch while holding the session lock. Release/resume cannot overtake it.
+    if (rec.privateInput && body.kind === 'text' && typeof body.text === 'string') {
+      broker._internals.evidence.redactor.addSecret(body.text);
+      session.privateText = (session.privateText || '') + body.text;
+      broker._internals.evidence.redactor.addSecret(session.privateText);
+      session.privateTainted = true;
+    }
+    let result;
+    const privateBlocked = session.privateReadBlocked === true;
+    if (rec.privateInput) session.privateReadBlocked = true;
     try {
-      if (req.method === 'GET' && (pathname === '/' || pathname === '/viewer.js' || pathname.startsWith('/handoff/'))) {
-        if (pathname === '/viewer.js') {
-          const js = fs.readFileSync(path.join(VIEWER_ROOT, 'viewer.js'));
-          res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'self'" });
-          res.end(js);
-          return;
-        }
-        const html = fs.readFileSync(path.join(VIEWER_ROOT, 'index.html'));
-        res.writeHead(200, {
-          'content-type': 'text/html; charset=utf-8',
-          'cache-control': 'no-store',
-          'x-content-type-options': 'nosniff',
-          'content-security-policy': "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'",
-          'referrer-policy': 'no-referrer',
-        });
-        res.end(html);
-        return;
+      result = await page.driverPage.humanInput({ kind: body.kind, x: body.x, y: body.y,
+        key: body.key, text: body.text, deltaX: body.deltaX, deltaY: body.deltaY,
+        expectedDocumentEpoch: frame.driverEpoch, privateInput: rec.privateInput === true });
+      if (rec.privateInput) {
+        for (const value of result?.privateValues || []) broker._internals.evidence.redactor.addSecret(value, { minimumLength: 1 });
+        session.privateReadBlocked = privateBlocked || result?.privateCaptureComplete !== true;
       }
-      const m = pathname.match(/^\/v1\/handoffs\/([A-Za-z0-9_-]{1,80})(?:\/([a-z]+))?$/);
-      if (!m) { send(res, 404, { ok: false, error: { code: 'ACCESS_REVOKED', message: 'not found' } }); return; }
-      const handoffId = m[1];
-      const action = m[2] || '';
-      const c = coord();
-      if (!c) throw Object.assign(new Error('VIEWER_UNREACHABLE: handoff coordinator is not running'), { v2Code: 'VIEWER_UNREACHABLE' });
-
+    } catch (error) {
+      if (error.code !== 'UNSUPPORTED') {
+        rec.blocker = 'RECONCILIATION_REQUIRED';
+        if (session.lease.owner === 'human') coord().release(rec, session);
+      }
+      throw error;
+    }
+    if (result?.dispatched !== true) throw H.v2Error('RECONCILIATION_REQUIRED', 'input outcome unknown', { effectUnknown: true });
+    frames.delete(view.id);
+    return { accepted: true, dispatched: true };
+  }
+  async function handle(req, res) {
+    try {
+      if (req.headers.host !== new URL(baseUrl).host) throw H.v2Error('ACCESS_REVOKED', 'host rejected');
+      const pathname = new URL(req.url, baseUrl).pathname;
+      if (req.method === 'GET' && (pathname === '/viewer.js' || /^\/handoff\/[A-Za-z0-9_-]{1,80}$/.test(pathname))) {
+        const js = pathname === '/viewer.js';
+        res.writeHead(200, { 'content-type': js ? 'text/javascript; charset=utf-8' : 'text/html; charset=utf-8',
+          'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff',
+          'content-security-policy': "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'" });
+        res.end(fs.readFileSync(path.join(VIEWER_ROOT, js ? 'viewer.js' : 'index.html'))); return;
+      }
+      const match = pathname.match(/^\/v1\/handoffs\/([A-Za-z0-9_-]{1,80})(?:\/([a-z]+))?$/);
+      if (!match) { send(res, 404, { ok: false }); return; }
+      const [, handoffId, action = ''] = match, c = coord();
       if (req.method === 'POST' && action === 'redeem') {
-        if (tokens.blocked(handoffId)) throw Object.assign(new Error('ACCESS_REVOKED: too many attempts'), { v2Code: 'ACCESS_REVOKED' });
+        if (req.headers.origin !== baseUrl || !tokens.originAllowed(req, baseUrl)) throw H.v2Error('ACCESS_REVOKED', 'origin rejected');
+        if (tokens.blocked(handoffId)) throw H.v2Error('ACCESS_REVOKED', 'too many attempts');
         const body = await readBody(req);
-        try {
-          c.redeem(handoffId, body.code);
-        } catch (err) {
-          if (tokens.noteFailure(handoffId)) err = Object.assign(new Error('ACCESS_REVOKED: too many attempts'), { v2Code: 'ACCESS_REVOKED' });
-          throw err;
+        const rec = c.get(handoffId); c.assertLive(rec);
+        if (owner) {
+          const supplied = crypto.createHash('sha256').update(String(body.ownerToken || '')).digest();
+          const expected = crypto.createHash('sha256').update(owner.token).digest();
+          if (rec.principalId !== owner.principalId || !crypto.timingSafeEqual(supplied, expected)) {
+            tokens.noteFailure(handoffId); throw H.v2Error('ACCESS_REVOKED', 'owner authentication rejected');
+          }
+        } else {
+          try { c.redeem(handoffId, body.code); } catch (err) { tokens.noteFailure(handoffId); throw err; }
         }
         tokens.clearFailures(handoffId);
-        const rec = tokens.issue(handoffId, { mode: 'observe' });
-        send(res, 200, { ok: true, value: { handoffId, mode: 'observe' } }, { 'set-cookie': tokens.setCookieHeader(rec, { secure }) });
-        return;
+        const view = tokens.issue(handoffId, { mode: 'observe' });
+        view.ownerId = owner?.id || rec.principalId; view.lastSeen = clock.now();
+        send(res, 200, { ok: true, value: { handoffId, mode: 'observe' } }, { 'set-cookie': tokens.setCookieHeader(view) }); return;
       }
-
+      const view = req.method === 'POST' ? tokens.assertWrite(req, baseUrl) : tokens.read(req);
+      const { rec, session } = live(view, handoffId, { allowClosed: !action || action === 'resume' });
       if (req.method === 'GET' && !action) {
-        const view = tokens.read(req);
-        if (!view || view.handoffId !== handoffId) throw Object.assign(new Error('ACCESS_REVOKED: sign in required'), { v2Code: 'ACCESS_REVOKED' });
-        send(res, 200, { ok: true, value: c.status(handoffId, {}) });
-        return;
+        send(res, 200, { ok: true, value: c.status(handoffId, {}) }); return;
       }
-
       if (req.method === 'GET' && action === 'frame') {
-        const view = tokens.read(req);
-        if (!view || view.handoffId !== handoffId) throw Object.assign(new Error('ACCESS_REVOKED: sign in required'), { v2Code: 'ACCESS_REVOKED' });
-        const framed = c.get(handoffId);
-        if (!framed) throw Object.assign(new Error('ACCESS_REVOKED: unknown handoff'), { v2Code: 'ACCESS_REVOKED' });
-        const framedSession = broker._internals.sessions.get(framed.sessionId);
-        if (!framedSession || framedSession.closed) throw Object.assign(new Error('VIEWER_UNREACHABLE: browser session is gone'), { v2Code: 'VIEWER_UNREACHABLE' });
-        send(res, 200, { ok: true, value: await frameFor(framed, framedSession, { mode: view.mode, instanceId: view.id }) });
-        return;
+        send(res, 200, { ok: true, value: await frameFor(rec, session, view) }); return;
       }
-
-      const sessionAuth = tokens.assertWrite(req, baseUrl);
-      if (sessionAuth.handoffId !== handoffId) throw Object.assign(new Error('ACCESS_REVOKED: session is for a different handoff'), { v2Code: 'ACCESS_REVOKED' });
-      const body = req.method === 'POST' ? await readBody(req) : {};
-      const rec = c.get(handoffId);
-      const session = broker._internals.sessions.get(rec.sessionId);
-      if (!session || session.closed) throw Object.assign(new Error('VIEWER_UNREACHABLE: browser session is gone'), { v2Code: 'VIEWER_UNREACHABLE' });
-
-      if (req.method !== 'POST') { send(res, 405, { ok: false, error: { code: 'ACCESS_REVOKED', message: 'method not allowed' } }); return; }
-
-      const value = await c.withLock(session.sessionId, async () => {
+      if (req.method !== 'POST') { send(res, 405, { ok: false }); return; }
+      const body = await readBody(req);
+      if (owner && (typeof body.viewerInstanceId !== 'string' || !/^[A-Za-z0-9_-]{16,80}$/.test(body.viewerInstanceId))) throw H.v2Error('ACCESS_REVOKED', 'viewer instance required');
+      const value = await c.withLock(session.sessionId, () => c.writeOnce(rec, {
+        principalId: view.id, requestKey: body.requestKey, expectedControlEpoch: body.expectedControlEpoch,
+        action, payload: body,
+      }, async () => {
         if (action === 'acquire') {
-          c.acquire(handoffId, { viewerInstance: sessionAuth.id, expectedControlEpoch: body.expectedControlEpoch });
-          sessionAuth.mode = 'control';
-          sessionAuth.instanceId = sessionAuth.id;
-          return c.markAcquired(c.get(handoffId), session, sessionAuth.id);
+          if (view.clientInstance && view.clientInstance !== body.viewerInstanceId && rec.state === 'human') throw H.v2Error('CONTROL_BUSY', 'another tab holds control');
+          c.acquire(handoffId, { viewerInstance: view.id, expectedControlEpoch: body.expectedControlEpoch });
+          const acquired = c.markAcquired(rec, session, view.id); view.clientInstance = body.viewerInstanceId; view.mode = 'control'; view.lastSeen = clock.now(); return acquired;
         }
-        if (action === 'release') return c.release(c.get(handoffId), session);
-        if (action === 'resume') {
-          if (session.lease.owner === 'human') c.release(c.get(handoffId), session);
-          const grant = c.authorizeResume(c.get(handoffId), session, { principalId: 'viewer', runId: rec.runId, expectedControlEpoch: c.get(handoffId).controlEpoch });
-          return broker.resumeRun({
-            handoffId, runId: rec.runId, expectedControlEpoch: grant.controlEpoch, requestKey: body.requestKey || grant.grantId,
-          }, { principal: { id: 'viewer', kind: 'ui', scopes: ['ui'] } });
-        }
-        if (action === 'private') {
-          if (body.enabled === false) return c.endPrivate(c.get(handoffId), session);
-          return c.beginPrivate(c.get(handoffId), session);
-        }
+        if (owner && rec.state === 'human' && view.clientInstance !== body.viewerInstanceId) throw H.v2Error('CONTROL_BUSY', 'another tab holds control');
+        if (rec.viewerInstance !== view.id && action !== 'resume' && !(owner && action === 'cancel')) throw H.v2Error('ACCESS_REVOKED', 'controlling viewer required');
+        if (action === 'release') { view.mode = 'observe'; return c.release(rec, session); }
+        if (action === 'private') { frames.clear(); return body.enabled === false ? c.endPrivate(rec, session) : c.beginPrivate(rec, session); }
+        if (action === 'input') return input(rec, session, view, body);
         if (action === 'cancel') {
-          if (rec.runId) await broker.cancelRun({ runId: rec.runId }, { principal: { id: session.ownerId, kind: 'ui', scopes: ['ui'] } });
-          return c.release(c.get(handoffId), session);
+          const principal = { id: session.ownerId, kind: 'mcp', scopes: [] };
+          if (rec.runId) await broker.cancelRun({ runId: rec.runId }, { principal });
+          if (session.lease.owner === 'human') c.release(rec, session);
+          c.revoke(handoffId); tokens.revokeHandoff(handoffId); frames.clear(); return { cancelled: true };
         }
-        if (action === 'input') return acceptInput(rec, session, sessionAuth, body);
-        throw Object.assign(new Error('ACCESS_REVOKED: unknown viewer action'), { v2Code: 'ACCESS_REVOKED' });
-      });
+        if (action === 'resume') {
+          if (session.privateReadBlocked) throw H.v2Error('RECONCILIATION_REQUIRED', 'Private content could not be tracked safely; close this browser context before continuing.');
+          if (rec.blocker === 'RECONCILIATION_REQUIRED') throw H.v2Error('RECONCILIATION_REQUIRED', 'input outcome must be reconciled');
+          if (rec.viewerInstance && rec.viewerInstance !== view.id) throw H.v2Error('CONTROL_BUSY', 'another viewer holds control');
+          if (session.lease.owner === 'human') c.release(rec, session);
+          if (session.privateInput) c.endPrivate(rec, session);
+          const page = session.page(rec.pageId);
+          // Fresh authoritative read must settle before issuing a grant. No blocked action is replayed here.
+          const epoch = page.documentEpoch;
+          await page.driverPage.observe({ maxNodes: 1 });
+          if (epoch !== page.documentEpoch) throw H.v2Error('RECONCILIATION_REQUIRED', 'document changed during return');
+          c.authorizeResume(rec, session, { principalId: view.ownerId, consumerId: session.ownerId,
+            runId: rec.runId, expectedControlEpoch: rec.controlEpoch });
+          return broker.resumeRun({ handoffId, runId: rec.runId, expectedControlEpoch: rec.controlEpoch, requestKey: body.requestKey },
+            { principal: { id: session.ownerId, kind: 'mcp', scopes: [] } });
+        }
+        throw H.v2Error('ACCESS_REVOKED', 'unsupported action');
+      }));
       send(res, 200, { ok: true, value });
-    } catch (err) {
-      fail(res, err.v2Code ? err : Object.assign(err, { v2Code: err.v2Code || 'INTERNAL' }));
-    }
+    } catch (err) { fail(res, err); }
   }
-
-  function acceptInput(rec, session, viewer, body) {
-    if (viewer.mode !== 'control' || rec.viewerInstance !== viewer.id || rec.state !== 'human') {
-      throw Object.assign(new Error('ACCESS_REVOKED: this viewer cannot send input'), { v2Code: 'ACCESS_REVOKED' });
-    }
-    if (body.controlEpoch !== rec.controlEpoch) throw Object.assign(new Error('STALE_CONTROL_EPOCH: frame epoch is stale'), { v2Code: 'STALE_CONTROL_EPOCH' });
-    const frame = frames.get(rec.handoffId);
-    const age = frame ? clock.now() - frame.at : Infinity;
-    if (!frame || body.frameSequence !== frame.sequence || age > frameStaleMs || frame.withheld) {
-      throw Object.assign(new Error('STALE_CONTROL_EPOCH: input frozen until a fresh frame is acknowledged'), { v2Code: 'STALE_CONTROL_EPOCH' });
-    }
-    const seen = inputSeq.get(rec.handoffId) || new Set();
-    const key = `${body.frameSequence}:${body.kind}:${body.x}:${body.y}:${body.key || ''}`;
-    if (seen.has(key)) return { accepted: true, duplicate: true };
-    seen.add(key);
-    inputSeq.set(rec.handoffId, seen);
-    const page = session.page(rec.pageId);
-    if (page.driverPage && typeof page.driverPage.humanInput === 'function') {
-      page.driverPage.humanInput({ kind: body.kind, x: body.x, y: body.y, key: body.key, epoch: rec.controlEpoch });
-    }
-    return { accepted: true, duplicate: false, dispatched: typeof (page.driverPage && page.driverPage.humanInput) === 'function' };
-  }
-
   function listen() {
     server = http.createServer((req, res) => { handle(req, res).catch((err) => fail(res, err)); });
+    server.requestTimeout = 15000; server.headersTimeout = 10000; server.maxHeadersCount = 30;
     return new Promise((resolve, reject) => {
       server.once('error', reject);
       server.listen(port, host, () => {
-        const addr = server.address();
-        baseUrl = `http://${host}:${addr.port}`;
-        if (typeof broker.attachViewer === 'function') {
-          broker.attachViewer({ enabled: true, baseUrl, deployment: 'local' });
-        }
+        baseUrl = `http://${host}:${server.address().port}`;
+        broker.attachViewer({ enabled: true, baseUrl, deployment: 'local' });
+        timer = setInterval(() => {
+          for (const [id, view] of tokens.entries()) {
+            if (!view || clock.now() - view.lastSeen > heartbeatMs) {
+              frames.delete(id);
+              if (view) {
+                const rec = coord().get(view.handoffId), session = broker._internals.sessions.get(rec?.sessionId);
+                if (session && rec.state === 'human' && rec.viewerInstance === id) {
+                  void coord().withLock(session.sessionId, () => {
+                    if (rec.state === 'human' && rec.viewerInstance === id) coord().release(rec, session);
+                  });
+                }
+                tokens.revoke(id);
+              }
+            }
+          }
+        }, Math.max(100, heartbeatMs / 3)); timer.unref();
         resolve(baseUrl);
       });
     });
   }
-
-  function close() {
-    return new Promise((resolve) => {
-      if (!server) return resolve();
-      server.close(() => resolve());
-    });
-  }
-
+  async function close() { clearInterval(timer); frames.clear(); if (server) await new Promise((r) => { server.close(r); server.closeAllConnections(); }); }
   return { listen, close, get baseUrl() { return baseUrl; }, auth: tokens };
 }
-
 module.exports = { createViewerGateway };

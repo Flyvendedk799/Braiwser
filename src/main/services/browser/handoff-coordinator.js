@@ -26,6 +26,7 @@ function createHandoffCoordinator({
   const records = new Map();
   const keys = new Map(); // principalId:requestKey -> { digest, handoffId }
   const grants = new Map();
+  const controls = new Map();
   const locks = new Map();
   const lockStore = new AsyncLocalStorage();
   const file = dataDir ? path.join(dataDir, 'browser', 'handoffs.json') : null;
@@ -34,7 +35,9 @@ function createHandoffCoordinator({
     if (!file) return;
     const body = {
       version: 1,
-      records: [...records.values()].map(publicRecord),
+      controls: [...controls.entries()],
+      records: [...records.values()].map((rec) => ({ ...publicRecord(rec), inviteHash: null,
+        resumeResult: rec.resumeResult || null, writeReceipts: rec.writeReceipts || {} })),
       keys: [...keys.entries()].map(([k, v]) => ({ k, digest: v.digest, handoffId: v.handoffId })),
     };
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -47,6 +50,7 @@ function createHandoffCoordinator({
     if (!file || !fs.existsSync(file)) return;
     let parsed;
     try { parsed = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return; }
+    for (const [key, value] of parsed.controls || []) controls.set(key, value);
     for (const rec of Array.isArray(parsed.records) ? parsed.records : []) {
       if (!rec || !rec.handoffId) continue;
       // A restarted broker does not still own the live browser. The episode is closed.
@@ -73,7 +77,10 @@ function createHandoffCoordinator({
     locks.set(sessionId, tail);
     const next = new Set(held || []);
     next.add(sessionId);
-    return prev.then(() => lockStore.run(next, fn), () => lockStore.run(next, fn)).finally(() => release());
+    return prev.then(() => lockStore.run(next, fn), () => lockStore.run(next, fn)).finally(() => {
+      release();
+      if (locks.get(sessionId) === tail) locks.delete(sessionId);
+    });
   }
 
   function publicRecord(rec) {
@@ -144,7 +151,7 @@ function createHandoffCoordinator({
     const viewer = getViewer() || null;
     const viewerOn = !!(viewer && viewer.enabled && viewer.baseUrl);
     if (reported === 'checkpoint-relaunch') return { method: reported, viewer };
-    if ((reported === 'unsupported' || !reported) && viewerOn && session.mode === 'headless') {
+    if (viewerOn && session.mode === 'headless') {
       return { method: 'remote-view', viewer };
     }
     return { method: reported, viewer };
@@ -173,7 +180,7 @@ function createHandoffCoordinator({
     const replay = sameRequest(principal, requestKey, digest);
     if (replay) return { record: dto(replay), replayed: true };
     const { method, viewer } = effectiveMethod(session);
-    if (method !== 'native' && method !== 'remote-view') {
+    if (method !== 'remote-view') {
       throw H.v2Error('UNSUPPORTED_HANDOFF', `human handoff is not available (${method || 'unknown'})`);
     }
     let viewerUrl = null;
@@ -219,6 +226,7 @@ function createHandoffCoordinator({
     };
     pushEvent(rec, 'paused', 'agent input fenced; human control is not yet acquired');
     records.set(handoffId, rec);
+    session.lastHandoffVersion = 2;
     if (requestKey) keys.set(`${principal.id}:${requestKey}`, { digest, handoffId });
     session.invalidateAll();
     persist();
@@ -240,7 +248,8 @@ function createHandoffCoordinator({
       persist();
     }
     const events = rec.events.filter((e) => e.sequence > afterSequence).slice(0, maxEvents);
-    return { ...dto(rec), events, nextSequence: events.length ? events[events.length - 1].sequence + 1 : afterSequence };
+    // Exclusive cursor: last event consumed, passed back as afterSequence.
+    return { ...dto(rec), events, nextSequence: events.length ? events[events.length - 1].sequence : afterSequence };
   }
 
   function redeem(handoffId, code) {
@@ -310,6 +319,8 @@ function createHandoffCoordinator({
     if (rec.state !== 'human') throw H.v2Error('CONTROL_BUSY', 'private input requires the controlling human');
     session.privateInput = true;
     rec.privateInput = true;
+    session.privacyEpoch = (session.privacyEpoch || 0) + 1;
+    session.invalidateAll();
     pushEvent(rec, 'private-began', 'private input began');
     persist();
     return dto(rec);
@@ -318,6 +329,7 @@ function createHandoffCoordinator({
   function endPrivate(rec, session) {
     session.privateInput = false;
     rec.privateInput = false;
+    session.privacyEpoch = (session.privacyEpoch || 0) + 1;
     session.invalidateAll();
     for (const p of session.pages.values()) p.owned.documentEpoch += 0;
     pushEvent(rec, 'private-ended', 'private input ended');
@@ -325,7 +337,8 @@ function createHandoffCoordinator({
     return dto(rec);
   }
 
-  function authorizeResume(rec, session, { principalId, runId, expectedControlEpoch }) {
+  function authorizeResume(rec, session, { principalId, consumerId = rec.principalId, runId, expectedControlEpoch }) {
+    if (session.privateReadBlocked) throw H.v2Error('RECONCILIATION_REQUIRED', 'Private content could not be tracked safely; close this browser context.');
     assertLive(rec);
     if (expectedControlEpoch !== undefined && expectedControlEpoch !== rec.controlEpoch) {
       throw H.v2Error('STALE_CONTROL_EPOCH', 'control epoch does not match');
@@ -341,6 +354,7 @@ function createHandoffCoordinator({
       runId: runId || rec.runId,
       controlEpoch: rec.controlEpoch,
       principalId,
+      consumerId,
       expiresAt: Math.min(rec.expiresAt, clock.now() + 5 * 60 * 1000),
       used: false,
     };
@@ -353,6 +367,7 @@ function createHandoffCoordinator({
   }
 
   function consumeResume(session, { handoffId, runId, expectedControlEpoch, requestKey, principal }) {
+    if (session.privateReadBlocked) throw H.v2Error('RECONCILIATION_REQUIRED', 'Private content could not be tracked safely; close this browser context.');
     const digest = digestOf({ handoffId, runId: runId || null, expectedControlEpoch, requestKey });
     const replay = sameRequest(principal, requestKey, digest);
     if (replay && replay.resumeResult) return { ...replay.resumeResult, replayed: true };
@@ -361,6 +376,7 @@ function createHandoffCoordinator({
     if (rec.sessionId !== session.sessionId) throw H.v2Error('RESUME_NOT_AUTHORIZED', 'handoff is for a different session');
     if (expectedControlEpoch !== rec.controlEpoch) throw H.v2Error('STALE_CONTROL_EPOCH', 'control epoch does not match');
     const grant = [...grants.values()].find((g) => !g.used && g.handoffId === handoffId && g.controlEpoch === rec.controlEpoch
+      && g.consumerId === principal.id
       && (g.runId || null) === (runId || rec.runId || null) && clock.now() <= g.expiresAt);
     if (!grant) throw H.v2Error('RESUME_NOT_AUTHORIZED', 'no matching return-to-agent grant');
     if (session.lease.owner === 'human') session.lease.releaseToPaused();
@@ -412,9 +428,58 @@ function createHandoffCoordinator({
   // Test/trusted-channel only. Never copied into an MCP projection.
   function peekInvitation() { return null; }
 
+  async function writeOnce(rec, { principalId, requestKey, expectedControlEpoch, action, payload }, fn) {
+    if (typeof requestKey !== 'string' || !/^[A-Za-z0-9_.:-]{1,160}$/.test(requestKey)) {
+      throw H.v2Error('IDEMPOTENCY_CONFLICT', 'a bounded request key is required');
+    }
+    const key = `${principalId}:${requestKey}`;
+    const digest = digestOf({ action, expectedControlEpoch, payload });
+    rec.writeReceipts ||= {};
+    const previous = rec.writeReceipts[key];
+    if (previous) {
+      if (previous.digest !== digest) throw H.v2Error('IDEMPOTENCY_CONFLICT', 'request content changed');
+      if (!previous.complete) throw H.v2Error('RECONCILIATION_REQUIRED', 'previous dispatch has an unknown outcome', { effectUnknown: true });
+      if (previous.error) throw H.v2Error(previous.error, 'the original request was rejected');
+      return previous.value;
+    }
+    assertLive(rec);
+    if (expectedControlEpoch !== rec.controlEpoch) throw H.v2Error('STALE_CONTROL_EPOCH', 'control epoch does not match');
+    if (Object.keys(rec.writeReceipts).length >= 4000) throw H.v2Error('ACCESS_REVOKED', 'episode request budget exhausted');
+    rec.writeReceipts[key] = { digest, complete: false };
+    persist(); // Persist acceptance before any effect. Never replay an uncertain input.
+    let value;
+    try { value = await fn(); } catch (error) {
+      if (error.v2Code && error.publicError?.effectUnknown !== true) {
+        rec.writeReceipts[key] = { digest, complete: true, error: error.v2Code };
+        persist();
+      }
+      throw error;
+    }
+    rec.writeReceipts[key] = { digest, complete: true, value };
+    persist();
+    return value;
+  }
+
+  async function pauseOnce(session, input, principal, fn) {
+    const key = `${principal.id}:${input.requestKey}`;
+    const digest = digestOf({ sessionId: session.sessionId, runId: input.runId, epoch: input.expectedControlEpoch });
+    const previous = controls.get(key);
+    if (previous) {
+      if (previous.digest !== digest) throw H.v2Error('IDEMPOTENCY_CONFLICT', 'pause request content changed');
+      if (!previous.complete) throw H.v2Error('RECONCILIATION_REQUIRED', 'previous pause has not settled');
+      return previous.value;
+    }
+    if (input.expectedControlEpoch !== session.lease.fence) throw H.v2Error('STALE_CONTROL_EPOCH', 'control epoch does not match');
+    if (controls.size >= 4000) throw H.v2Error('ACCESS_REVOKED', 'control request budget exhausted');
+    controls.set(key, { digest, complete: false }); persist();
+    const value = await fn(); controls.set(key, { digest, complete: true, value }); persist(); return value;
+  }
+
   return {
+    hasLiveSession: (sessionId) => [...records.values()].some((r) => r.sessionId === sessionId && (r.state !== 'closed' || r.controlOwner !== 'agent')),
     withLock, pause, requestHandoff, status, get, redeem, acquire, markAcquired, release,
-    beginPrivate, endPrivate, authorizeResume, consumeResume, revoke, onSessionClosed, peekInvitation, dto,
+    beginPrivate, endPrivate, authorizeResume, consumeResume, revoke, onSessionClosed, peekInvitation, dto, assertLive, writeOnce, pauseOnce,
+    revokeRun: (runId) => { for (const rec of records.values()) if (rec.runId === runId) revoke(rec.handoffId); },
   };
 }
 

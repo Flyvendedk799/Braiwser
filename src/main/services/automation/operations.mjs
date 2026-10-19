@@ -11,7 +11,7 @@ import { toMcpReceipt } from './receipt.mjs';
 import {
   SCHEMA_VERSION, DEFAULT_RESPONSE_BUDGET, inputs, envelope, errorSchema,
   sessionSchema, observationSchema, receiptSchema, extractSchema, handoffSchema, runSchema,
-  pauseResultSchema, resumeResultSchema,
+  pauseResultSchema, resumeResultSchema, closeResultSchema,
   verdictConsistent, isProvenPass, id as idSchema, tableSchema, listSchema, paginationSchema,
 } from './schemas.mjs';
 
@@ -162,7 +162,7 @@ function fitToBudget(name, value, budget, args) {
     let dropped = null;
     while (kept.length && size() > budget) {
       dropped = kept.pop();
-      value = { ...value, events: kept, nextSequence: dropped.sequence };
+      value = { ...value, events: kept, nextSequence: kept.length ? kept[kept.length - 1].sequence : (args.afterSequence || 0) };
     }
     if (size() <= budget) return value;
   }
@@ -177,6 +177,13 @@ export function createOperations(facade, options = {}) {
   const budget = options.responseBudget || DEFAULT_RESPONSE_BUDGET;
 
   const defs = [
+    {
+      name: 'browser_session_close', title: 'Close browser session',
+      description: 'Close an owned session and fence its pending work. Dispatched effects are not rolled back.',
+      input: inputs.browser_session_close, value: closeResultSchema,
+      readOnly: false, destructive: false, idempotent: true,
+      async invoke(args, ctx) { await facade.closeSession(args, ctx); return { closed: true }; },
+    },
     {
       name: 'browser_session_open', title: 'Open browser session',
       description: 'Open an owned browser session and its first page. The grant is a request, narrowed to what the user allowed this client; profile reuse is explicit.',

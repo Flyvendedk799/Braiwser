@@ -177,7 +177,7 @@ function stateFor(terminal, gradeStatus) {
 function runToDTO(run, { afterSequence = 0, maxEvents = 50 } = {}) {
   const grade = gradeRun(run);
   const events = run.events.filter((e) => e.sequence > afterSequence).slice(0, Math.min(maxEvents, 100));
-  const nextSequence = events.length ? events[events.length - 1].sequence + 1 : Math.max(afterSequence, 0) + 1;
+  const nextSequence = events.length ? events[events.length - 1].sequence : Math.max(afterSequence, 0);
   return C.buildRunDTO({ runId: run.runId, state: run.state, cancelRequested: run.cancelRequested, grade, sequence: run.sequence, events, nextSequence,
     deadlineAt: run.deadlineAt, manifestUri: C.uris.manifest(run.evidenceRunId || run.runId) });
 }
@@ -227,10 +227,15 @@ async function executeStep(step, ctx) {
   if (signal.aborted) return result('cancelled', 'notDispatched', { code: 'CANCELLED' });
 
   const RETRY_CODES = ['STALE_DOCUMENT', 'STALE_REF', 'OWNERSHIP_LOST'];
+  let returnedFromHuman = false;
   // Retrying is only ever done for work that provably did not dispatch (or is read-only).
   const mayRetry = async (code) => {
     if (!RETRY_CODES.includes(code)) return false;
-    if (code === 'OWNERSHIP_LOST') return (await host.waitForAgent()) === 'resumed';
+    if (code === 'OWNERSHIP_LOST') {
+      const resumed = await host.waitForAgent();
+      returnedFromHuman = resumed === 'resumed-v2';
+      return resumed === 'resumed' || returnedFromHuman;
+    }
     return true;
   };
   if (step.type === 'navigate') {
@@ -309,6 +314,18 @@ async function executeStep(step, ctx) {
   };
   let last = null;
   for (let attempt = 0; attempt < MAX_STEP_ATTEMPTS; attempt++) {
+    if (returnedFromHuman) {
+      // Human input may already have completed the blocked mutation. Prove the
+      // declared following assertion before advancing; never blindly submit again.
+      const next = ctx.nextStep;
+      if (next && next.type === 'assert') {
+        const assertion = { kind: next.kind, op: next.op, expected: next.expected, target: next.target };
+        const checked = await host.assert(assertion, next);
+        if (checked.status === 'passed') return result('passed', 'confirmed', { code: 'HUMAN_RECONCILED',
+          evidenceIds: await record('reconciliation', { assertion, status: checked.status }), summary: 'human changes verified; action was not repeated' });
+      }
+      return result('unknown', 'unknown', { code: 'RECONCILIATION_REQUIRED', summary: 'human changes cannot prove the blocked action outcome' });
+    }
     if (signal.aborted) return result('cancelled', 'notDispatched', { code: 'CANCELLED' });
     let t;
     try { t = await findTarget(host, step.target); } catch (e) {
@@ -335,7 +352,7 @@ async function runPlanLoop({ plan, inputs, host, signal, onStepStart, onStepResu
     if (signal.aborted) break;
     if (onStepStart) onStepStart(step, i);
     let r;
-    try { r = await executeStep(step, { host, inputs, signal }); } catch (e) {
+    try { r = await executeStep(step, { host, inputs, signal, nextStep: plan.steps[i + 1] }); } catch (e) {
       r = { stepId: step.id, status: 'unknown', effect: 'unknown', evidenceIds: [], code: (e && e.code) || 'STEP_ERROR', summary: 'step errored; effect not established' };
     }
     if (onStepResult) onStepResult(r, i);

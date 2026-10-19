@@ -133,7 +133,7 @@ function classifyCommand(command, presets = []) {
 // All PATH matches for `bin`, in PATH order. spawnSync with an argument array:
 // `bin` is data, never shell text.
 function whichAll(bin, platform = process.platform) {
-  if (!bin || bin === 'cat') return [];
+  if (!bin) return [];
   try {
     const r = spawnSync(platform === 'win32' ? 'where' : 'which', platform === 'win32' ? [bin] : ['-a', bin], {
       encoding: 'utf8',

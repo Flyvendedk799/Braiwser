@@ -1,4 +1,4 @@
-// The adapter against the REAL broker (src/main/services/browser/broker.js) over
+﻿// The adapter against the REAL broker (src/main/services/browser/broker.js) over
 // the shared FakeDriver: real ownership, grants, ledger, evidence store, run
 // state machine and canonical grader. Proves the wire DTOs line up end to end.
 import { test, after } from 'node:test';
@@ -230,12 +230,13 @@ test('real broker: cancel stops future dispatch and keeps an honest terminal rea
 
 test('real broker: handoff reports the driver method and revokes agent dispatch', async () => {
   const r = rig({ humanHandoff: 'native' });
+  r.broker.attachViewer({ enabled: true, baseUrl: 'http://127.0.0.1:1234', deployment: 'local' });
   const h = await client(r);
   const s = await open(h);
   const page = ids(s);
   const ho = await h.ok('browser_handoff', { ...page, reason: 'captcha' });
-  assert.equal(ho.method, 'native');
-  assert.match(ho.userAction, /Take control/);
+  assert.equal(ho.method, 'remote-view');
+  assert.match(ho.userAction, /remote view/i);
   const ob = await h.call('browser_observe', page);
   // After handoff the agent must not be able to act until a human resumes.
   assert.equal(ob.structuredContent.error.code, 'DENIED', 'the page is under human control');
