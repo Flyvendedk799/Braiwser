@@ -86,6 +86,8 @@ test('standalone service, actual stdio MCP and authenticated human continue the 
   do { finished=await call('browser_run_status',{runId:run.runId}); if(!['queued','running','needsHuman'].includes(finished.state))break; await new Promise(r=>setTimeout(r,30)); }while(Date.now()<finishDeadline);
   assert.equal(finished.state,'passed',JSON.stringify(finished)); assert.equal(finished.runId,run.runId);
   const after = await call('browser_observe',ids);
+  const stored = await client.readResource({uri:after.evidenceUri});
+  assert.equal(JSON.parse(stored.contents[0].text).sessionId,ids.sessionId);
   assert.equal(after.sessionId,before.sessionId); assert.equal(after.pageId,before.pageId);
   assert.ok(JSON.stringify(after.nodes).includes('Submitted 1 Human fixture'),JSON.stringify(after.nodes));
   // Reconnect the MCP client: it must attach to the retained owner, not create a new browser.

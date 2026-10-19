@@ -164,7 +164,8 @@ function connectBridge({ endpoint, token, requestTimeoutMs = 60000, connectTimeo
     }
 
     const facade = { bridge: true, principalBound: true };
-    for (const method of METHODS) facade[method] = (params, ctx) => call(method, params, ctx);
+    for (const method of METHODS) facade[method] = (params, ctx) => call(method,
+      method === 'readResource' && typeof params === 'string' ? { uri: params } : params, ctx);
     facade.close = () => new Promise((r) => { if (closed) r(); else { socket.once('close', r); socket.end(); setTimeout(() => socket.destroy(), 500).unref(); } });
   });
 }

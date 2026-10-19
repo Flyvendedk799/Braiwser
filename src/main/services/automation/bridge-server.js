@@ -140,7 +140,7 @@ function createBridgeServer({
       const ctl = new AbortController();
       inFlight.set(id, ctl);
       Promise.resolve()
-        .then(() => entry.facade[method](frame.params || {}, { signal: ctl.signal }))
+        .then(() => entry.facade[method](method === 'readResource' ? frame.params?.uri : (frame.params || {}), { signal: ctl.signal }))
         .then((result) => {
           const text = JSON.stringify(result === undefined ? null : result);
           if (Buffer.byteLength(text) > maxResponseBytes) {
