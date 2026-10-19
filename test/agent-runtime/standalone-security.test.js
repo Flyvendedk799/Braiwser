@@ -50,3 +50,15 @@ test('capture failure and capture racing privacy cannot become a fresh frame', a
   const result=(await pending).value;assert.equal(result.fresh,false);assert.equal(result.image,null);
   assert.equal(JSON.stringify(new createHandoffCoordinator({dataDir:h.dataDir}).status(rec.handoffId,{})).includes('SECRET-CANARY'),false);
 });
+test('pause retries keep one epoch and revoked v2 control cannot use legacy resume', async t => {
+  const h=world();t.after(()=>h.broker.close());const s=await h.open();
+  const run=await h.a.startRun({sessionId:s.sessionId,pageId:s.pageId,requestKey:'pause-run',skillId:'verify-journey',skillVersion:'1.0.0',inputs:{name:'Fixture'}});
+  const session=h.broker._internals.sessions.get(s.sessionId),c=h.broker._internals.handoffs;
+  const input={runId:run.runId,requestKey:'pause-once',expectedControlEpoch:session.lease.fence};
+  const first=await h.a.pauseRun(input),second=await h.a.pauseRun(input);
+  assert.equal(first.controlEpoch,second.controlEpoch);
+  await assert.rejects(()=>h.a.pauseRun({...input,expectedControlEpoch:first.controlEpoch}),/IDEMPOTENCY_CONFLICT/);
+  const next=await h.open();const handoff=await h.a.requestHandoff({sessionId:next.sessionId,pageId:next.pageId,requestKey:'v2-stop'});
+  const live=h.broker._internals.sessions.get(next.sessionId);c.markAcquired(c.get(handoff.handoffId),live,'human');c.revoke(handoff.handoffId);
+  await assert.rejects(()=>h.u.resume({sessionId:next.sessionId,pageId:next.pageId}),/v2 return-to-agent/);
+});

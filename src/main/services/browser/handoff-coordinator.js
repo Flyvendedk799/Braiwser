@@ -26,6 +26,7 @@ function createHandoffCoordinator({
   const records = new Map();
   const keys = new Map(); // principalId:requestKey -> { digest, handoffId }
   const grants = new Map();
+  const controls = new Map();
   const locks = new Map();
   const lockStore = new AsyncLocalStorage();
   const file = dataDir ? path.join(dataDir, 'browser', 'handoffs.json') : null;
@@ -34,6 +35,7 @@ function createHandoffCoordinator({
     if (!file) return;
     const body = {
       version: 1,
+      controls: [...controls.entries()],
       records: [...records.values()].map((rec) => ({ ...publicRecord(rec), inviteHash: null,
         resumeResult: rec.resumeResult || null, writeReceipts: rec.writeReceipts || {} })),
       keys: [...keys.entries()].map(([k, v]) => ({ k, digest: v.digest, handoffId: v.handoffId })),
@@ -48,6 +50,7 @@ function createHandoffCoordinator({
     if (!file || !fs.existsSync(file)) return;
     let parsed;
     try { parsed = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return; }
+    for (const [key, value] of parsed.controls || []) controls.set(key, value);
     for (const rec of Array.isArray(parsed.records) ? parsed.records : []) {
       if (!rec || !rec.handoffId) continue;
       // A restarted broker does not still own the live browser. The episode is closed.
@@ -455,10 +458,26 @@ function createHandoffCoordinator({
     return value;
   }
 
+  async function pauseOnce(session, input, principal, fn) {
+    const key = `${principal.id}:${input.requestKey}`;
+    const digest = digestOf({ sessionId: session.sessionId, runId: input.runId, epoch: input.expectedControlEpoch });
+    const previous = controls.get(key);
+    if (previous) {
+      if (previous.digest !== digest) throw H.v2Error('IDEMPOTENCY_CONFLICT', 'pause request content changed');
+      if (!previous.complete) throw H.v2Error('RECONCILIATION_REQUIRED', 'previous pause has not settled');
+      return previous.value;
+    }
+    if (input.expectedControlEpoch !== session.lease.fence) throw H.v2Error('STALE_CONTROL_EPOCH', 'control epoch does not match');
+    if (controls.size >= 4000) throw H.v2Error('ACCESS_REVOKED', 'control request budget exhausted');
+    controls.set(key, { digest, complete: false }); persist();
+    const value = await fn(); controls.set(key, { digest, complete: true, value }); persist(); return value;
+  }
+
   return {
-    hasLiveSession: (sessionId) => [...records.values()].some((r) => r.sessionId === sessionId && r.state !== 'closed'),
+    hasLiveSession: (sessionId) => [...records.values()].some((r) => r.sessionId === sessionId && (r.state !== 'closed' || r.controlOwner !== 'agent')),
     withLock, pause, requestHandoff, status, get, redeem, acquire, markAcquired, release,
-    beginPrivate, endPrivate, authorizeResume, consumeResume, revoke, onSessionClosed, peekInvitation, dto, assertLive, writeOnce,
+    beginPrivate, endPrivate, authorizeResume, consumeResume, revoke, onSessionClosed, peekInvitation, dto, assertLive, writeOnce, pauseOnce,
+    revokeRun: (runId) => { for (const rec of records.values()) if (rec.runId === runId) revoke(rec.handoffId); },
   };
 }
 

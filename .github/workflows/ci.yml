@@ -41,10 +41,8 @@ jobs:
       - name: Install matching Chromium for standalone and driver fixtures
         run: npx playwright-core install --with-deps chromium
 
-      - name: Use the runner's installed Chrome sandbox helper
-        run: |
-          test -u /opt/google/chrome/chrome-sandbox
-          echo 'CHROME_DEVEL_SANDBOX=/opt/google/chrome/chrome-sandbox' >> "$GITHUB_ENV"
+      - name: Enable the Chromium sandbox on the disposable runner
+        run: bash .github/scripts/browser-sandbox.sh
 
       - name: Unit tests
         run: npm run test:unit

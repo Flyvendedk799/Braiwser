@@ -570,15 +570,13 @@ function createBroker(options = {}) {
       if (!input || !C.isClientId(input.runId)) throw C.invalid('runId');
       const run = ownedRun(input.runId, principal);
       const session = ownedSession(run.sessionId, principal, { allowUi: true });
-      if (input.expectedControlEpoch !== undefined && input.expectedControlEpoch !== session.lease.fence) {
-        throw C.brokerError('DENIED', 'STALE_CONTROL_EPOCH: control epoch does not match', { detail: 'STALE_CONTROL_EPOCH' });
-      }
-      const requestKey = input.requestKey === undefined ? null : (C.isClientId(input.requestKey) ? input.requestKey : (() => { throw C.invalid('requestKey'); })());
+      if (!C.isClientId(input.requestKey)) throw C.invalid('requestKey');
+      const requestKey = input.requestKey;
       const digest = C.sha256({ runId: run.runId, requestKey, epoch: input.expectedControlEpoch || null });
-      const result = await handoffCoord.withLock(session.sessionId, async () => {
+      const result = await handoffCoord.withLock(session.sessionId, () => handoffCoord.pauseOnce(session, input, principal, async () => {
         const paused = await handoffCoord.pause(session, { acknowledgeUncertain: principal.kind === 'ui', drainTimeoutMs: limits.drainTimeoutMs });
         return paused;
-      });
+      }));
       session.invalidateAll();
       policy.revokeApprovals({ sessionId: session.sessionId });
       emit('owner-changed', { sessionId: session.sessionId, owner: result.owner, fence: result.fence, runId: run.runId });
@@ -969,6 +967,7 @@ function createBroker(options = {}) {
       if (!input || !C.isClientId(input.runId)) throw C.invalid('runId');
       const run = ownedRun(input.runId, principal);
       const rt = runtimes.get(run.runId);
+      handoffCoord.revokeRun(run.runId);
       if (!C.TERMINAL_STATES.includes(run.state)) {
         runStore.requestCancel(run.runId);
         recordEvent(run, 'cancel_requested', 'cancellation requested; future dispatch is stopped, in-flight work stays uncertain');
