@@ -5,6 +5,10 @@
   const viewerInstanceId = crypto.randomUUID();
   window.braiwserViewerInstance = viewerInstanceId;
   let state, frame, busy = false, privateOn = false;
+  function setBusy(value) {
+    busy = value;
+    for (const id of ['take', 'pause', 'back', 'stop', 'priv']) el(id).disabled = value || state?.state === 'closed';
+  }
   const csrf = () => decodeURIComponent(document.cookie.match(/(?:^|; )braiwser_csrf=([^;]+)/)?.[1] || '');
   async function api(action = '', body) {
     const res = await fetch(root + (action ? '/' + action : ''), { method: body ? 'POST' : 'GET', credentials: 'same-origin',
@@ -16,7 +20,7 @@
   const show = (text) => { el('status').textContent = text; };
   async function tick() {
     if (busy) return;
-    busy = true;
+    setBusy(true);
     try {
       state = await api(); show(state.blocker || state.state);
       el('identity').textContent = `${state.controlOwner} · epoch ${state.controlEpoch}`;
@@ -26,15 +30,15 @@
       el('fresh').textContent = frame.fresh ? 'Live view' : 'Input frozen';
       if (frame.image) el('frame').src = `data:image/png;base64,${frame.image}`;
       else el('frame').removeAttribute('src');
-    } catch (err) { frame = null; show(err.message); } finally { busy = false; }
+    } catch (err) { frame = null; show(err.message); } finally { setBusy(false); }
   }
   async function write(action, data = {}) {
     if (busy || !state) return;
-    busy = true;
+    setBusy(true);
     try {
       const value = await api(action, { ...data, viewerInstanceId, expectedControlEpoch: state.controlEpoch, requestKey: crypto.randomUUID() });
       if (Number.isInteger(value.controlEpoch)) state = { ...state, ...value };
-    } catch (err) { show(err.message); } finally { busy = false; frame = null; }
+    } catch (err) { show(err.message); } finally { setBusy(false); frame = null; }
     await tick();
   }
   el('redeem').addEventListener('submit', async (ev) => {
