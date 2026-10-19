@@ -338,6 +338,7 @@ function createHandoffCoordinator({
   }
 
   function authorizeResume(rec, session, { principalId, consumerId = rec.principalId, runId, expectedControlEpoch }) {
+    if (session.privateReadBlocked) throw H.v2Error('RECONCILIATION_REQUIRED', 'Private content could not be tracked safely; close this browser context.');
     assertLive(rec);
     if (expectedControlEpoch !== undefined && expectedControlEpoch !== rec.controlEpoch) {
       throw H.v2Error('STALE_CONTROL_EPOCH', 'control epoch does not match');
@@ -366,6 +367,7 @@ function createHandoffCoordinator({
   }
 
   function consumeResume(session, { handoffId, runId, expectedControlEpoch, requestKey, principal }) {
+    if (session.privateReadBlocked) throw H.v2Error('RECONCILIATION_REQUIRED', 'Private content could not be tracked safely; close this browser context.');
     const digest = digestOf({ handoffId, runId: runId || null, expectedControlEpoch, requestKey });
     const replay = sameRequest(principal, requestKey, digest);
     if (replay && replay.resumeResult) return { ...replay.resumeResult, replayed: true };

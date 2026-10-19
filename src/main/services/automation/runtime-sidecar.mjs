@@ -18,8 +18,8 @@ if (!config.dataDir || !config.principal) throw new Error('Trusted runtime confi
 const dir = path.resolve(config.dataDir);
 fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 const info = path.join(dir, 'agent-bridge.json');
-if (!fs.existsSync(info)) {
-  if (fs.existsSync(path.join(dir, 'owner.lock'))) throw new Error('Owner lock exists; reconcile lost context before restart');
+const deadline = Date.now() + 15000;
+if (!fs.existsSync(info) && !fs.existsSync(path.join(dir, 'owner.lock'))) {
   const configFile = path.join(dir, 'server-config.json');
   fs.writeFileSync(configFile, JSON.stringify(config), { mode: 0o600 });
   const child = spawn(process.execPath, [fileURLToPath(new URL('./server.mjs', import.meta.url))], {
@@ -27,9 +27,9 @@ if (!fs.existsSync(info)) {
     windowsHide: true, stdio: 'ignore',
   });
   child.unref();
-  const deadline = Date.now() + 15000;
-  while (!fs.existsSync(info) && Date.now() < deadline) await new Promise(r => setTimeout(r, 50));
 }
+while (!fs.existsSync(info) && Date.now() < deadline) await new Promise(r => setTimeout(r, 50));
+if (!fs.existsSync(info)) throw new Error('Owner readiness timed out; reconcile lost context before restart');
 const probe = await bridge.connectBridge(bridge.readConnectionInfo(info));
 await probe.close();
 process.env.BRAIWSER_BRIDGE_INFO = info;

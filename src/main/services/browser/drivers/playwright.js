@@ -826,6 +826,28 @@ class PlaywrightPage extends EventEmitter {
   async humanInput(input) {
     this._assertUsable();
     await this._awaitBarrier();
+    const privateValues = [];
+    let privateEditableFound = false;
+    let privateCaptureComplete = true;
+    const capturePrivate = async () => {
+      if (!input.privateInput) return;
+      try {
+        for (const frame of this._raw.frames()) {
+          const snapshot = await frame.evaluate(() => {
+            const nodes = [...document.querySelectorAll('input,textarea,[contenteditable="true"]')];
+            const values = nodes.slice(0, 128).map(node => String(node.value ?? node.textContent ?? ''));
+            return { values: values.map(value => value.slice(0, 4096)), complete: nodes.length <= 128 && values.every(value => value.length <= 4096) };
+          });
+          privateValues.push(...snapshot.values);
+          privateEditableFound ||= snapshot.values.length > 0;
+          privateCaptureComplete &&= snapshot.complete;
+        }
+      } catch { privateCaptureComplete = false; }
+    };
+    await capturePrivate();
+    if (input.privateInput && ['text', 'key'].includes(input.kind) && !privateEditableFound) privateCaptureComplete = false;
+    if (input.expectedDocumentEpoch !== undefined && input.expectedDocumentEpoch !== this.documentEpoch)
+      throw driverError('STALE_REF', 'The document changed before human input dispatch.', { detail: 'STALE_DOCUMENT', dispatched: false, effectUnknown: false });
     const { kind, x, y, key, text, deltaX, deltaY } = input;
     const vp = this._raw.viewportSize();
     const bad = () => { throw driverError('UNSUPPORTED', 'Unsupported or invalid human input.'); };
@@ -843,7 +865,8 @@ class PlaywrightPage extends EventEmitter {
       if (![deltaX, deltaY].every((n) => Number.isFinite(n) && Math.abs(n) <= 4096)) bad();
       await this._raw.mouse.wheel(deltaX, deltaY);
     } else bad();
-    return { dispatched: true };
+    await capturePrivate();
+    return { dispatched: true, ...(input.privateInput ? { privateValues, privateCaptureComplete } : {}) };
   }
 
   async screenshot({ clip } = {}) {

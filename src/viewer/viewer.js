@@ -4,7 +4,7 @@
   const el = (id) => document.getElementById(id);
   const viewerInstanceId = crypto.randomUUID();
   window.braiwserViewerInstance = viewerInstanceId;
-  let state, frame, busy = false, privateOn = false;
+  let state, frame, displayedDocument, busy = false, privateOn = false;
   function setBusy(value) {
     busy = value;
     for (const id of ['take', 'pause', 'back', 'stop', 'priv']) el(id).disabled = value || state?.state === 'closed';
@@ -14,7 +14,7 @@
     const res = await fetch(root + (action ? '/' + action : ''), { method: body ? 'POST' : 'GET', credentials: 'same-origin',
       headers: body ? { 'content-type': 'application/json', 'x-braiwser-csrf': csrf() } : {}, body: body ? JSON.stringify(body) : undefined });
     const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.error?.message || 'Viewer request failed');
+    if (!res.ok || !data.ok) { const error = new Error(data.error?.message || 'Viewer request failed'); error.authenticationLost = res.status === 401; throw error; }
     return data.value;
   }
   const show = (text) => { el('status').textContent = text; };
@@ -27,10 +27,14 @@
       el('redeem').hidden = true; el('controls').hidden = false;
       if (state.state === 'closed') { frame = null; el('frame').removeAttribute('src'); return; }
       frame = await api('frame');
+      if (frame.fresh) displayedDocument = frame.documentEpoch;
       el('fresh').textContent = frame.fresh ? 'Live view' : 'Input frozen';
       if (frame.image) el('frame').src = `data:image/png;base64,${frame.image}`;
       else el('frame').removeAttribute('src');
-    } catch (err) { frame = null; show(err.message); } finally { setBusy(false); }
+    } catch (err) {
+      frame = null; el('frame').removeAttribute('src'); show(err.message);
+      if (err.authenticationLost) { state = undefined; displayedDocument = undefined; el('redeem').hidden = false; el('controls').hidden = true; }
+    } finally { setBusy(false); }
   }
   async function write(action, data = {}) {
     if (busy || !state) return;
@@ -54,7 +58,7 @@
   el('priv').addEventListener('click', async () => { privateOn = !privateOn; await write('private', { enabled: privateOn }); });
   let inputQueue = Promise.resolve();
   function input(data) {
-    const intendedDocument = frame?.documentEpoch ?? state?.documentEpoch;
+    const intendedDocument = displayedDocument;
     inputQueue = inputQueue.then(async () => {
       while (busy) await new Promise(resolve => setTimeout(resolve, 20));
       if (!frame?.fresh || state?.controlOwner !== 'human' || frame.documentEpoch !== intendedDocument) return;

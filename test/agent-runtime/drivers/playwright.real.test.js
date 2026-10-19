@@ -42,6 +42,24 @@ async function expectError(promise, code, detail) {
 
 const logText = (page) => page._raw.locator('#log').innerText();
 
+real('human input rechecks the document after the barrier and captures edited private values', async ({ page }) => {
+  await page._raw.setContent('<input aria-label="Secret">');
+  await page._raw.locator('input').focus();
+  const original = page._awaitBarrier;
+  page._awaitBarrier = async () => { page._bumpEpoch(); };
+  await expectError(page.humanInput({kind:'text',text:'must-not-dispatch',expectedDocumentEpoch:page.documentEpoch}), 'STALE_REF', 'STALE_DOCUMENT');
+  assert.equal(await page._raw.locator('input').inputValue(),'');
+  page._awaitBarrier = original;
+  await page.humanInput({kind:'text',text:'abcd',privateInput:true});
+  await page.humanInput({kind:'key',key:'Backspace',privateInput:true});
+  const result=await page.humanInput({kind:'text',text:'X',privateInput:true});
+  assert.equal(result.privateCaptureComplete,true);
+  assert.ok(result.privateValues.includes('abcX'));
+  const redactor=require('../../../src/shared/browser-redact').createRedactor();
+  for(const value of result.privateValues)redactor.addSecret(value,{minimumLength:1});
+  assert.equal(redactor.text('abcX').includes('abcX'),false);
+});
+
 // ---- capability document ---------------------------------------------------------------------
 test('capability document is versioned and conservative', () => {
   const caps = env ? env.driver.capabilities() : require('../../../src/main/services/browser/drivers/playwright').createPlaywrightDriver().capabilities();

@@ -297,7 +297,7 @@ function createBroker(options = {}) {
 
   async function observeCore(session, rec, { maxNodes = 200, focus, cursor, noSpend = false }, principal, runId) {
     const privacyEpoch = session.privacyEpoch || 0;
-    if (session.privateInput) throw dtoError('DENIED', 'PRIVATE_INPUT_ACTIVE: observations are suspended while private input is on', { detail: 'PRIVATE_INPUT_ACTIVE' });
+    if (session.privateInput || session.privateReadBlocked) throw dtoError('DENIED', 'PRIVATE_INPUT_ACTIVE: private content must be safely reconciled before observation', { detail: 'PRIVATE_INPUT_ACTIVE' });
     policy.assertActive(session.grant, principal);
     policy.assertClass(session.grant, 'observe');
     if (!noSpend) policy.spend(session.grant, 'observations');
@@ -322,7 +322,7 @@ function createBroker(options = {}) {
         if (e.code === 'STALE_DOCUMENT') throw dtoError('STALE_REF', 'the document changed during observation; observe again', { retry: 'refresh', detail: 'STALE_DOCUMENT' });
         throw dtoError('UNAVAILABLE', 'driver could not observe the page', { retry: 'safe-read', detail: 'OBSERVE_FAILED' });
       }
-      if (session.privateInput || privacyEpoch !== (session.privacyEpoch || 0)) throw dtoError('DENIED', 'PRIVATE_INPUT_ACTIVE: observation was fenced');
+      if (session.privateInput || session.privateReadBlocked || privacyEpoch !== (session.privacyEpoch || 0)) throw dtoError('DENIED', 'PRIVATE_INPUT_ACTIVE: observation was fenced');
       const res = read.value || {};
       const rawNodes = Array.isArray(res.nodes) ? res.nodes.filter((n) => n && typeof n.refId === 'string' && typeof n.role === 'string').slice(0, limits.maxNodes) : [];
       const cleaned = rawNodes.map((n) => ({ ...n, name: evidence.redactor.text(clip(n.name, 200), 200), role: clip(n.role, 80), table: structOf(n, 'table'), list: structOf(n, 'list') }));
@@ -800,9 +800,9 @@ function createBroker(options = {}) {
         let timer;
         try {
           const privacyEpoch = session.privacyEpoch || 0;
-          if (session.privateInput) return { status: 'unknown', code: 'PRIVATE_INPUT_ACTIVE' };
+          if (session.privateInput || session.privateReadBlocked) return { status: 'unknown', code: 'PRIVATE_INPUT_ACTIVE' };
           const read = await rec.owned.read(() => Promise.race([rec.driverPage.evaluateAssertion(assertion, { timeoutMs: limits.assertionWaitMs || 0 }), new Promise((_, rej) => { timer = setTimeout(() => rej(Object.assign(new Error('assertion timeout'), { code: 'DEADLINE_EXCEEDED' })), limits.stepTimeoutMs); })]));
-          if (session.privateInput || privacyEpoch !== (session.privacyEpoch || 0)) return { status: 'unknown', code: 'PRIVATE_INPUT_ACTIVE' };
+          if (session.privateInput || session.privateReadBlocked || privacyEpoch !== (session.privacyEpoch || 0)) return { status: 'unknown', code: 'PRIVATE_INPUT_ACTIVE' };
           const r = read.value || {};
           return { status: ['passed', 'failed', 'unknown'].includes(r.status) ? r.status : 'unknown', actual: r.actual, code: r.code };
         } catch (e) { return { status: 'unknown', code: e.code || 'ASSERTION_ERROR' }; } finally { clearTimeout(timer); }

@@ -21,6 +21,7 @@ function createViewerGateway({ broker, auth, owner = null, host = '127.0.0.1', p
   if (!broker || host !== '127.0.0.1') throw new TypeError('owning broker and loopback host required');
   const tokens = auth || createViewerAuth({ clock });
   const frames = new Map();
+  let frameSequence = 0;
   let server, baseUrl, timer;
   const coord = () => broker._internals.handoffs;
   const send = (res, status, body, headers = {}) => {
@@ -58,8 +59,7 @@ function createViewerGateway({ broker, auth, owner = null, host = '127.0.0.1', p
     const changed = epoch !== rec.controlEpoch || privacy !== (session.privacyEpoch || 0)
       || documentEpoch !== page.documentEpoch || driverEpoch !== page.driverPage.documentEpoch;
     const image = !changed && !withheld && Buffer.isBuffer(shot?.bytes) && shot.bytes.length <= 4 * 1024 * 1024 ? shot.bytes.toString('base64') : null;
-    const previous = frames.get(view.id);
-    const frame = { sequence: (previous?.sequence || 0) + 1, capturedAt: new Date(clock.now()).toISOString(),
+    const frame = { sequence: ++frameSequence, capturedAt: new Date(clock.now()).toISOString(),
       controlEpoch: epoch, documentEpoch, driverEpoch, privacyEpoch: privacy,
       fresh: !!image, withheld: !!withheld || changed, image,
       width: shot?.meta?.viewport?.width || 0, height: shot?.meta?.viewport?.height || 0, scale: 1, at: clock.now() };
@@ -85,9 +85,16 @@ function createViewerGateway({ broker, auth, owner = null, host = '127.0.0.1', p
       session.privateTainted = true;
     }
     let result;
+    const privateBlocked = session.privateReadBlocked === true;
+    if (rec.privateInput) session.privateReadBlocked = true;
     try {
       result = await page.driverPage.humanInput({ kind: body.kind, x: body.x, y: body.y,
-        key: body.key, text: body.text, deltaX: body.deltaX, deltaY: body.deltaY });
+        key: body.key, text: body.text, deltaX: body.deltaX, deltaY: body.deltaY,
+        expectedDocumentEpoch: frame.driverEpoch, privateInput: rec.privateInput === true });
+      if (rec.privateInput) {
+        for (const value of result?.privateValues || []) broker._internals.evidence.redactor.addSecret(value, { minimumLength: 1 });
+        session.privateReadBlocked = privateBlocked || result?.privateCaptureComplete !== true;
+      }
     } catch (error) {
       if (error.code !== 'UNSUPPORTED') {
         rec.blocker = 'RECONCILIATION_REQUIRED';
@@ -164,6 +171,7 @@ function createViewerGateway({ broker, auth, owner = null, host = '127.0.0.1', p
           c.revoke(handoffId); tokens.revokeHandoff(handoffId); frames.clear(); return { cancelled: true };
         }
         if (action === 'resume') {
+          if (session.privateReadBlocked) throw H.v2Error('RECONCILIATION_REQUIRED', 'Private content could not be tracked safely; close this browser context before continuing.');
           if (rec.blocker === 'RECONCILIATION_REQUIRED') throw H.v2Error('RECONCILIATION_REQUIRED', 'input outcome must be reconciled');
           if (rec.viewerInstance && rec.viewerInstance !== view.id) throw H.v2Error('CONTROL_BUSY', 'another viewer holds control');
           if (session.lease.owner === 'human') c.release(rec, session);

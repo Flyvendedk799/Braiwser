@@ -34,6 +34,23 @@ test('viewer dispatch is awaited and idempotent; revoked and stale frames cannot
   assert.equal((await pending).value.dispatched,true);assert.equal((await release).value.controlOwner,'paused');
   assert.equal((await api('input',body)).value.dispatched,true);assert.equal(dispatches,1,'lost reply retry returns the receipt');
   assert.equal((await api('input',{...body,x:3})).error.code,'IDEMPOTENCY_CONFLICT');
+  await api('acquire',{requestKey:'take-again',expectedControlEpoch:rec.controlEpoch});
+  const next=(await api('frame')).value;
+  assert.ok(next.sequence>frame.sequence,'input invalidation never reuses a frame sequence');
+  assert.equal((await api('input',{...body,requestKey:'old-frame',expectedControlEpoch:rec.controlEpoch})).error.code,'STALE_CONTROL_EPOCH');
+  assert.equal(dispatches,1);
+  c.beginPrivate(rec,session);
+  page.driverPage.humanInput=async()=>({dispatched:true,privateValues:['abcX'],privateCaptureComplete:true});
+  const secretFrame=(await api('frame')).value;
+  const secretResult=await api('input',{...body,kind:'text',text:'X',requestKey:'edited-secret',expectedControlEpoch:rec.controlEpoch,frameSequence:secretFrame.sequence,documentEpoch:secretFrame.documentEpoch});
+  assert.equal(secretResult.value.dispatched,true);assert.equal(JSON.stringify(secretResult).includes('abcX'),false);
+  assert.equal(h.broker._internals.evidence.redactor.text('abcX').includes('abcX'),false);
+  page.driverPage.humanInput=async()=>({dispatched:true,privateCaptureComplete:false});
+  const uncertainFrame=(await api('frame')).value;
+  await api('input',{...body,requestKey:'untracked-private',expectedControlEpoch:rec.controlEpoch,frameSequence:uncertainFrame.sequence,documentEpoch:uncertainFrame.documentEpoch});
+  c.endPrivate(rec,session);c.release(rec,session);
+  assert.throws(()=>c.authorizeResume(rec,session,{principalId:'human',expectedControlEpoch:rec.controlEpoch}),/RECONCILIATION_REQUIRED/);
+  await assert.rejects(()=>h.a.observe({sessionId:s.sessionId,pageId:s.pageId}),/PRIVATE_INPUT_ACTIVE/);
   c.revoke(rec.handoffId);assert.equal((await api('frame')).status,401);
 });
 test('capture failure and capture racing privacy cannot become a fresh frame', async t => {
