@@ -26,7 +26,7 @@ function createViewerAuth({ clock = { now: () => Date.now() }, ttlMs = 30 * 60 *
     try { expected = new URL(baseUrl).origin; } catch { return false; }
     const origin = req.headers.origin || '';
     const host = req.headers.host || '';
-    if (origin && origin !== expected) return false;
+    if (origin !== expected) return false;
     try {
       const hostUrl = new URL(`${new URL(baseUrl).protocol}//${host}`);
       if (hostUrl.host !== new URL(baseUrl).host) return false;
@@ -35,6 +35,8 @@ function createViewerAuth({ clock = { now: () => Date.now() }, ttlMs = 30 * 60 *
   }
 
   function issue(handoffId, { mode = 'observe' } = {}) {
+    for (const [id, session] of sessions) if (clock.now() > session.expiresAt) sessions.delete(id);
+    if (sessions.size >= 256) throw Object.assign(new Error('ACCESS_REVOKED: viewer session limit'), { v2Code: 'ACCESS_REVOKED' });
     const id = crypto.randomBytes(24).toString('base64url');
     const csrf = crypto.randomBytes(18).toString('base64url');
     const rec = { id, csrf, handoffId, mode, expiresAt: clock.now() + ttlMs };
@@ -96,7 +98,7 @@ function createViewerAuth({ clock = { now: () => Date.now() }, ttlMs = 30 * 60 *
     ];
   }
 
-  return { issue, read, revoke, revokeHandoff, assertWrite, originAllowed, noteFailure, clearFailures, blocked, setCookieHeader, COOKIE, CSRF_COOKIE };
+  return { issue, read, get: (id) => sessions.get(id), entries: () => sessions.entries(), revoke, revokeHandoff, assertWrite, originAllowed, noteFailure, clearFailures, blocked, setCookieHeader, COOKIE, CSRF_COOKIE };
 }
 
 module.exports = { createViewerAuth };

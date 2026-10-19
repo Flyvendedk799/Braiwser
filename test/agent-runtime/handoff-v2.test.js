@@ -2,7 +2,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
-const { boot } = require('./harness');
+const { boot: rawBoot } = require('./harness');
+function boot(options) { const h = rawBoot(options); h.broker.attachViewer({ enabled: true, baseUrl: 'http://127.0.0.1:1234', deployment: 'local' }); return h; }
 const { createViewerGateway } = require('../../src/main/services/browser/viewer-gateway');
 const { createHandoffCoordinator } = require('../../src/main/services/browser/handoff-coordinator');
 const { doctorReport } = require('../../src/main/services/automation/doctor');
@@ -12,7 +13,7 @@ function httpJson(base, method, pathname, { body, headers } = {}) {
   return new Promise((resolve, reject) => {
     const req = http.request(url, {
       method,
-      headers: { 'content-type': 'application/json', host: url.host, ...(headers || {}) },
+      headers: { 'content-type': 'application/json', host: url.host, origin: url.origin, ...(headers || {}) },
     }, (res) => {
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
@@ -108,25 +109,25 @@ test('viewer redeem is one-use, a second acquire is busy, stale input is frozen,
   assert.equal(frame.status, 200);
   assert.equal(frame.json.value.fresh, true);
   const acquired = await httpJson(base, 'POST', `/v1/handoffs/${opened.handoffId}/acquire`, {
-    headers, body: { expectedControlEpoch: opened.controlEpoch },
+    headers, body: { expectedControlEpoch: opened.controlEpoch, requestKey: 'acquire-1' },
   });
   assert.equal(acquired.status, 200, JSON.stringify(acquired.json));
   assert.equal(acquired.json.value.controlOwner, 'human');
   const busy = await httpJson(base, 'POST', `/v1/handoffs/${opened.handoffId}/acquire`, {
-    headers, body: { expectedControlEpoch: acquired.json.value.controlEpoch },
+    headers, body: { expectedControlEpoch: acquired.json.value.controlEpoch, requestKey: 'acquire-2' },
   });
   assert.equal(busy.status, 409);
   assert.equal(busy.json.error.code, 'CONTROL_BUSY');
 
   const fresh = await httpJson(base, 'GET', `/v1/handoffs/${opened.handoffId}/frame`, { headers: { cookie: headers.cookie } });
   const stale = await httpJson(base, 'POST', `/v1/handoffs/${opened.handoffId}/input`, {
-    headers, body: { controlEpoch: acquired.json.value.controlEpoch, frameSequence: fresh.json.value.sequence + 9, kind: 'click', x: 1, y: 1 },
+    headers, body: { expectedControlEpoch: acquired.json.value.controlEpoch, requestKey: 'input-1', controlEpoch: acquired.json.value.controlEpoch, frameSequence: fresh.json.value.sequence + 9, kind: 'click', x: 1, y: 1 },
   });
   assert.equal(stale.status, 400);
   assert.equal(stale.json.error.code, 'STALE_CONTROL_EPOCH');
 
   const resumed = await httpJson(base, 'POST', `/v1/handoffs/${opened.handoffId}/resume`, {
-    headers, body: { requestKey: 'vw_resume_1' },
+    headers, body: { requestKey: 'vw_resume_1', expectedControlEpoch: acquired.json.value.controlEpoch },
   });
   assert.equal(resumed.status, 200, JSON.stringify(resumed.json));
   assert.equal(resumed.json.value.controlOwner, 'agent');
@@ -149,10 +150,10 @@ test('private input suspends broker observations', async () => {
   const jar = jarFrom(redeemed.headers);
   const headers = { cookie: cookieHeader(jar), origin: base, 'x-braiwser-csrf': jar.braiwser_csrf };
   const acquired = await httpJson(base, 'POST', `/v1/handoffs/${opened.handoffId}/acquire`, {
-    headers, body: { expectedControlEpoch: opened.controlEpoch },
+    headers, body: { expectedControlEpoch: opened.controlEpoch, requestKey: 'acquire-1' },
   });
   assert.equal(acquired.status, 200, JSON.stringify(acquired.json));
-  const priv = await httpJson(base, 'POST', `/v1/handoffs/${opened.handoffId}/private`, { headers, body: { enabled: true } });
+  const priv = await httpJson(base, 'POST', `/v1/handoffs/${opened.handoffId}/private`, { headers, body: { enabled: true, requestKey: 'private-1', expectedControlEpoch: acquired.json.value.controlEpoch } });
   assert.equal(priv.status, 200, JSON.stringify(priv.json));
   await assert.rejects(
     () => h.a.observe({ sessionId: s.sessionId, pageId: s.pageId }),

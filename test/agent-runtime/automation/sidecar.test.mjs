@@ -30,7 +30,7 @@ test('a real stdio MCP client reaches the owning broker through the authenticate
   transport.stderr?.on('data', (d) => stderrChunks.push(d));
 
   const { tools } = await client.listTools();
-  assert.equal(tools.length, 11);
+  assert.equal(tools.length, 12);
   const open = await client.callTool({ name: 'browser_session_open', arguments: { driver: 'playwright', mode: 'headless', grant: { allowedOrigins: ['https://app.test'] } } });
   assert.equal(open.structuredContent.ok, true);
   const { sessionId, pageId } = open.structuredContent.value;
@@ -39,7 +39,7 @@ test('a real stdio MCP client reaches the owning broker through the authenticate
   // The broker saw the principal the SERVER assigned to the token, not anything the client said.
   assert.ok(broker.state.calls.every((c) => c.principal === 'mcp:stdio'));
   const caps = await client.readResource({ uri: 'braiwser://capabilities' });
-  assert.equal(JSON.parse(caps.contents[0].text).tools.length, 11);
+  assert.equal(JSON.parse(caps.contents[0].text).tools.length, 12);
 
   await client.close();
   await server.close();

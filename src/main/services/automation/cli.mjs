@@ -11,9 +11,7 @@ import { pathToFileURL } from 'node:url';
 import bridge from './bridge.js';
 import registryModule from './skill-registry.js';
 import { createOperations } from './operations.mjs';
-import { createRequire } from 'node:module';
-
-const require = createRequire(import.meta.url);
+import doctor from './doctor.js';
 
 const USAGE = `braiwser-agent <command> [flags]   (JSON on stdout)
 
@@ -112,7 +110,7 @@ export async function main(argv, io = {}) {
     return 0;
   }
   if (command === 'doctor') {
-    const { doctorReport } = require('./doctor.js');
+    const { doctorReport } = doctor;
     out(`${JSON.stringify({ ok: true, value: doctorReport({ env }), error: null })}\n`);
     return 0;
   }

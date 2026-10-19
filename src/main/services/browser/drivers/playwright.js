@@ -823,6 +823,29 @@ class PlaywrightPage extends EventEmitter {
   // ---- screenshots / presentation -------------------------------------------------------------
   // Unmodified pixels of the viewport (or of one observed element via capture({ refId })). The agent badge is Braiwser
   // UI, not page content, and is hidden for the shot. Nothing is masked, annotated or resized: meta.transformed is false.
+  async humanInput(input) {
+    this._assertUsable();
+    await this._awaitBarrier();
+    const { kind, x, y, key, text, deltaX, deltaY } = input;
+    const vp = this._raw.viewportSize();
+    const bad = () => { throw driverError('UNSUPPORTED', 'Unsupported or invalid human input.'); };
+    if (kind === 'click' || kind === 'move') {
+      if (!vp || !Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x >= vp.width || y >= vp.height) bad();
+      if (kind === 'click') await this._raw.mouse.click(x, y, { button: 'left', timeout: this._opts.dispatchTimeoutMs });
+      else await this._raw.mouse.move(x, y);
+    } else if (kind === 'text') {
+      if (typeof text !== 'string' || text.length > 4096 || text.includes('\u0000')) bad();
+      await this._raw.keyboard.insertText(text);
+    } else if (kind === 'key') {
+      if (!/^(?:(?:Control|Alt|Shift|Meta)\+){0,4}(?:[A-Za-z0-9]|Enter|Tab|Escape|Backspace|Delete|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Home|End|PageUp|PageDown|Space)$/.test(key || '')) bad();
+      await this._raw.keyboard.press(key);
+    } else if (kind === 'scroll') {
+      if (![deltaX, deltaY].every((n) => Number.isFinite(n) && Math.abs(n) <= 4096)) bad();
+      await this._raw.mouse.wheel(deltaX, deltaY);
+    } else bad();
+    return { dispatched: true };
+  }
+
   async screenshot({ clip } = {}) {
     this._assertUsable();
     const vp = this._raw.viewportSize() || { width: 0, height: 0 };
@@ -1032,7 +1055,7 @@ class PlaywrightDriver {
     const o = options || {};
     this.name = 'playwright';
     this._playwright = o.playwright || null;
-    this._executablePath = o.executablePath || undefined;
+    this._executablePath = o.executablePath || process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined;
     this._defaults = {
       actionabilityTimeoutMs: o.actionabilityTimeoutMs || 1500,
       dispatchTimeoutMs: o.dispatchTimeoutMs || 2000,

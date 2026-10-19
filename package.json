@@ -6,7 +6,8 @@
   "main": "src/main/main.js",
   "bin": {
     "braiwser-agent": "src/main/services/automation/cli.mjs",
-    "braiwser-mcp": "src/main/services/automation/sidecar.mjs"
+    "braiwser-mcp": "src/main/services/automation/sidecar.mjs",
+    "braiwser-server": "src/main/services/automation/server.mjs"
   },
   "author": "Braiwser",
   "license": "MIT",
@@ -28,7 +29,9 @@
     "dist:dir": "electron-builder --dir",
     "prerelease": "npm run build:guest",
     "release": "electron-builder --publish always",
-    "test:unit": "node --test \"test/**/*.test.js\" \"test/**/*.test.cjs\" \"test/**/*.test.mjs\" \"src/**/*.test.js\""
+    "test:unit": "node --test \"test/**/*.test.js\" \"test/**/*.test.cjs\" \"test/**/*.test.mjs\" \"src/**/*.test.js\"",
+    "server": "node src/main/services/automation/server.mjs",
+    "test:standalone": "node --test test/agent-runtime/automation/standalone.test.mjs test/agent-runtime/standalone-security.test.js"
   },
   "build": {
     "appId": "com.braiwser.app",

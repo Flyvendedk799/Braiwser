@@ -28,7 +28,7 @@ test('registers the broker tools with strict inputs, typed outputs and honest an
   const { tools } = await h.client.listTools();
   assert.deepEqual(tools.map((t) => t.name).sort(), [
     'browser_act', 'browser_extract', 'browser_handoff', 'browser_handoff_status', 'browser_observe', 'browser_run',
-    'browser_run_cancel', 'browser_run_pause', 'browser_run_resume', 'browser_run_status', 'browser_session_open'].sort());
+    'browser_run_cancel', 'browser_run_pause', 'browser_run_resume', 'browser_run_status', 'browser_session_close', 'browser_session_open'].sort());
   for (const t of tools) {
     assert.equal(t.inputSchema.additionalProperties, false, `${t.name} input must reject unknown keys`);
     assert.ok(t.outputSchema, `${t.name} has an output schema`);
@@ -307,11 +307,11 @@ test('status paging: bounded events, monotonic nextSequence', async () => {
   const { broker, h, page } = await setup();
   const run = await startRun(h, page);
   const r = broker.run(run.runId);
-  for (let i = 0; i < 12; i += 1) r.events.push({ sequence: r.events.length, kind: 'step', summary: `step ${i}`, stepId: 's1' });
+  for (let i = 0; i < 12; i += 1) r.events.push({ sequence: r.events.length + 1, kind: 'step', summary: `step ${i}`, stepId: 's1' });
   const one = await h.ok('browser_run_status', { runId: run.runId, afterSequence: 0, maxEvents: 5 });
   assert.equal(one.events.length, 5);
   const two = await h.ok('browser_run_status', { runId: run.runId, afterSequence: one.nextSequence, maxEvents: 5 });
-  assert.equal(two.events[0].sequence, one.nextSequence);
+  assert.equal(two.events[0].sequence, one.nextSequence + 1);
   assert.ok(two.nextSequence > one.nextSequence);
   await h.close();
 });
@@ -410,10 +410,12 @@ test('response budget: observation nodes and run events are cut with explicit tr
   const s = await setup({ responseBudget: 3 * 1024 });
   const run = await startRun(s.h, s.page);
   const r = s.broker.run(run.runId);
-  for (let i = 0; i < 40; i += 1) r.events.push({ sequence: r.events.length, kind: 'step', summary: 'y'.repeat(250) });
+  for (let i = 0; i < 40; i += 1) r.events.push({ sequence: r.events.length + 1, kind: 'step', summary: 'y'.repeat(250) });
   const status = await s.h.ok('browser_run_status', { runId: run.runId, maxEvents: 40 });
   assert.ok(status.events.length < 40);
-  assert.equal(status.nextSequence, status.events[status.events.length - 1].sequence + 1, 'dropped events remain reachable');
+  assert.equal(status.nextSequence, status.events[status.events.length - 1].sequence, 'cursor is the last consumed event');
+  const following = await s.h.ok('browser_run_status', { runId: run.runId, afterSequence: status.nextSequence, maxEvents: 40 });
+  assert.equal(following.events[0].sequence, status.nextSequence + 1, 'dropped events remain reachable without a gap');
   await s.h.close();
 });
 
@@ -450,7 +452,7 @@ test('resources: capabilities and catalog are readable; manifest redacts sensiti
   const run = await startRun(h, page);
   const caps = JSON.parse((await h.client.readResource({ uri: 'braiwser://capabilities' })).contents[0].text);
   assert.equal(caps.schemaVersion, 1);
-  assert.equal(caps.tools.length, 11);
+  assert.equal(caps.tools.length, 12);
   assert.ok(caps.skills.some((s) => s.id === 'verify-journey' && /^sha256:/.test(s.digest)));
   assert.ok(caps.guarantees.length >= 3);
   const catalog = JSON.parse((await h.client.readResource({ uri: 'braiwser://skills/catalog' })).contents[0].text);

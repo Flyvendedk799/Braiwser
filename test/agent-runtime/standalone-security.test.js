@@ -1,0 +1,52 @@
+﻿'use strict';
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { boot } = require('./harness');
+const { createViewerGateway } = require('../../src/main/services/browser/viewer-gateway');
+const { createHandoffCoordinator } = require('../../src/main/services/browser/handoff-coordinator');
+function world() { const h=boot();h.broker.attachViewer({enabled:true,baseUrl:'http://127.0.0.1:9999',deployment:'local'});return h; }
+test('exclusive cursors consume every event; grants enforce the intended consuming principal', async t => {
+  const h=world();t.after(()=>h.broker.close());const s=await h.open();
+  const opened=await h.a.requestHandoff({...s,requestKey:'cursor',reasonCode:'needsHuman'});
+  const c=h.broker._internals.handoffs, session=h.broker._internals.sessions.get(s.sessionId),rec=c.get(opened.handoffId);
+  let status=c.status(rec.handoffId,{maxEvents:1});assert.equal(status.nextSequence,1);
+  c.markAcquired(rec,session,'human');status=c.status(rec.handoffId,{afterSequence:status.nextSequence,maxEvents:1});
+  assert.equal(status.events[0].kind,'acquired');assert.equal(status.nextSequence,2);
+  c.release(rec,session);c.authorizeResume(rec,session,{principalId:'human-owner',consumerId:h.agentP.id,runId:null,expectedControlEpoch:rec.controlEpoch});
+  assert.throws(()=>c.consumeResume(session,{handoffId:rec.handoffId,runId:null,expectedControlEpoch:rec.controlEpoch,requestKey:'foreign',principal:h.otherP}),/RESUME_NOT_AUTHORIZED/);
+  assert.equal(c.consumeResume(session,{handoffId:rec.handoffId,runId:null,expectedControlEpoch:rec.controlEpoch,requestKey:'right',principal:h.agentP}).resumed,true);
+});
+test('viewer dispatch is awaited and idempotent; revoked and stale frames cannot dispatch', async t => {
+  const h=world(), gateway=createViewerGateway({broker:h.broker});const origin=await gateway.listen();
+  t.after(async()=>{await gateway.close();await h.broker.close();});
+  const s=await h.open(),opened=await h.a.requestHandoff({sessionId:s.sessionId,pageId:s.pageId,requestKey:'input',reasonCode:'needsHuman'});
+  const c=h.broker._internals.handoffs,rec=c.get(opened.handoffId),session=h.broker._internals.sessions.get(s.sessionId),page=session.page(s.pageId);
+  const viewer=gateway.auth.issue(rec.handoffId),cookies=gateway.auth.setCookieHeader(viewer).map(s=>s.split(';')[0]).join('; ');
+  const api=async(action,body)=>{const r=await fetch(`${origin}/v1/handoffs/${rec.handoffId}/${action}`,{method:body?'POST':'GET',headers:{cookie:cookies,origin,'content-type':'application/json','x-braiwser-csrf':viewer.csrf},body:body?JSON.stringify(body):undefined});return {status:r.status,...await r.json()};};
+  await api('acquire',{requestKey:'take',expectedControlEpoch:rec.controlEpoch});
+  let dispatches=0,finish;
+  page.driverPage.humanInput=async()=>{dispatches++;await new Promise(r=>finish=r);return {dispatched:true};};
+  const frame=(await api('frame')).value;
+  const body={requestKey:'click',expectedControlEpoch:rec.controlEpoch,frameSequence:frame.sequence,documentEpoch:frame.documentEpoch,kind:'click',x:2,y:2};
+  const pending=api('input',body);while(!finish)await new Promise(r=>setTimeout(r,1));
+  const release=api('release',{requestKey:'release',expectedControlEpoch:rec.controlEpoch});
+  await new Promise(r=>setTimeout(r,10));assert.equal(rec.state,'human','release cannot overtake dispatch');finish();
+  assert.equal((await pending).value.dispatched,true);assert.equal((await release).value.controlOwner,'paused');
+  assert.equal((await api('input',body)).value.dispatched,true);assert.equal(dispatches,1,'lost reply retry returns the receipt');
+  assert.equal((await api('input',{...body,x:3})).error.code,'IDEMPOTENCY_CONFLICT');
+  c.revoke(rec.handoffId);assert.equal((await api('frame')).status,401);
+});
+test('capture failure and capture racing privacy cannot become a fresh frame', async t => {
+  const h=world(),gateway=createViewerGateway({broker:h.broker});const origin=await gateway.listen();
+  t.after(async()=>{await gateway.close();await h.broker.close();});
+  const s=await h.open(),opened=await h.a.requestHandoff({sessionId:s.sessionId,pageId:s.pageId,requestKey:'capture',reasonCode:'needsHuman'});
+  const c=h.broker._internals.handoffs,rec=c.get(opened.handoffId),session=h.broker._internals.sessions.get(s.sessionId),page=session.page(s.pageId);
+  const viewer=gateway.auth.issue(rec.handoffId),cookie=gateway.auth.setCookieHeader(viewer).map(s=>s.split(';')[0]).join('; ');
+  const frame=async()=> (await (await fetch(`${origin}/v1/handoffs/${rec.handoffId}/frame`,{headers:{cookie}})).json());
+  page.driverPage.screenshot=async()=>{throw new Error('capture failed');};assert.equal((await frame()).value.fresh,false);
+  let finish;page.driverPage.screenshot=async()=>new Promise(r=>finish=r);const pending=frame();while(!finish)await new Promise(r=>setTimeout(r,1));
+  c.markAcquired(rec,session,'another-viewer');c.beginPrivate(rec,session);
+  finish({bytes:Buffer.from('SECRET-CANARY'),meta:{viewport:{width:100,height:100}}});
+  const result=(await pending).value;assert.equal(result.fresh,false);assert.equal(result.image,null);
+  assert.equal(JSON.stringify(new createHandoffCoordinator({dataDir:h.dataDir}).status(rec.handoffId,{})).includes('SECRET-CANARY'),false);
+});
