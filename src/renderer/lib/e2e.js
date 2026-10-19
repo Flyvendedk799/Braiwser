@@ -31,6 +31,14 @@ export async function run(I) {
     });
     // Helper: run JS in the guest main world.
     const guest = (code) => wv.executeJavaScript(code, true);
+    const until = async (predicate, timeout = 9000) => {
+      const deadline = Date.now() + timeout;
+      while (Date.now() < deadline) {
+        try { if (await predicate()) return true; } catch (_e) { /* navigation in progress */ }
+        await sleep(50);
+      }
+      return false;
+    };
     // Helpers: TRUSTED input (real mouse/keys) so isolated-world listeners fire
     // and values update natively — faithful to a real user.
     const clickAt = async (x, y) => {
@@ -60,7 +68,7 @@ export async function run(I) {
     I.navigateTo(fixtureUrl);
     await ready;
     await sleep(300);
-    const hasHero = await guest("!!document.getElementById('hero')");
+    const hasHero = await until(() => guest(`location.href === ${JSON.stringify(fixtureUrl)} && !!document.getElementById('hero')`));
     check('fixture loaded', hasHero);
 
     // --- 1. Project + session lifecycle ---
@@ -340,9 +348,10 @@ export async function run(I) {
       const persistedRegion = (await caos.annotations.bySession(session.id)).find((a) => a.kind === 'region');
       check('region annotation persisted', !!persistedRegion, persistedRegion && persistedRegion.note);
       // A second drag right after saving must work too (mode stays on).
-      wv.sendInputEvent({ type: 'mouseDown', x: 420, y: 180, button: 'left', clickCount: 1 });
-      for (let i = 1; i <= 6; i++) { wv.sendInputEvent({ type: 'mouseMove', x: 420 + i * 10, y: 180 + i * 10 }); await sleep(10); }
-      wv.sendInputEvent({ type: 'mouseUp', x: 480, y: 240, button: 'left', clickCount: 1 });
+      // Keep the new drag clear of the saved region and its note bubble.
+      wv.sendInputEvent({ type: 'mouseDown', x: 80, y: 400, button: 'left', clickCount: 1 });
+      for (let i = 1; i <= 6; i++) { wv.sendInputEvent({ type: 'mouseMove', x: 80 + i * 10, y: 400 + i * 10 }); await sleep(10); }
+      wv.sendInputEvent({ type: 'mouseUp', x: 140, y: 460, button: 'left', clickCount: 1 });
       await sleep(250);
       const secondPopup = await guest("!!document.querySelector('[data-caos] textarea')");
       check('second draw after save works', secondPopup);
@@ -1433,6 +1442,7 @@ export async function run(I) {
       I.state.settings.theme = 'light';
       I.applyTheme();
       check('light theme is applied to the document', document.documentElement.dataset.theme === 'light');
+      await until(() => getComputedStyle(document.body).backgroundColor !== 'rgb(14, 15, 19)');
       const lightBg = getComputedStyle(document.body).backgroundColor;
       I.state.settings.theme = 'dark';
       I.applyTheme();

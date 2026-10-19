@@ -7,9 +7,14 @@ const path = require('path');
 const { writeRequest, runCommand, projectDirectory, cwdFor } = require('../../src/main/services/agent/handoff');
 const { classifyCommand, tokenize, buildSpawnPlan, scriptWithEnvRefs, pickExecutable } = require('../../src/main/services/agent/command');
 const { AGENT_PRESETS } = require('../../src/main/services/agent/templates');
+const { whichAll } = require('../../src/main/services/agent/command');
 const { createRepositories } = require('../../src/main/store/repositories');
 
 function tmp() { return fs.mkdtempSync(path.join(os.tmpdir(), 'braiwser-ho-')); }
+
+test('PATH resolution accepts the standard Unix handoff reader', { skip: process.platform === 'win32' }, () => {
+  assert.ok(whichAll('cat').some((candidate) => path.basename(candidate) === 'cat'));
+});
 
 // A stand-in agent: prints its argv, cwd and the env hand-off variables as JSON.
 function writeFakeAgent(dir) {
