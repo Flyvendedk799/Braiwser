@@ -97,7 +97,12 @@ function isPrivateHost(rawHost) {
 
 // ---- origin grammar ----------------------------------------------------------------
 const WILDCARD = /^(https?):\/\/\*\.([a-z0-9.-]+)(?::(\d{1,5}))?$/i;
+// `https://*` names every PUBLIC host of that scheme. Private, loopback and bare intranet hosts stay
+// reachable only through an exact entry, exactly as with any other wildcard.
+const ANY_PUBLIC = /^(https?):\/\/\*$/i;
 function normalizeOrigin(entry) {
+  const any = ANY_PUBLIC.exec(entry);
+  if (any) return { wildcard: true, any: true, protocol: `${any[1].toLowerCase()}:`, host: '*', port: '' };
   const w = WILDCARD.exec(entry);
   if (w) {
     const host = w[2].toLowerCase();
@@ -112,8 +117,9 @@ function normalizeOrigin(entry) {
 function originCovered(entry, request) {
   // `entry` is a normalised ceiling/grant origin, `request` a normalised requested one.
   if (!entry.wildcard) return !request.wildcard && entry.origin === request.origin;
-  if (request.wildcard) return entry.protocol === request.protocol && entry.host === request.host && entry.port === request.port;
+  if (request.wildcard) return entry.protocol === request.protocol && (entry.any || (entry.host === request.host && entry.port === request.port));
   const u = new URL(request.origin);
+  if (entry.any) return u.protocol === entry.protocol && !isPrivateHost(u.hostname);
   return u.protocol === entry.protocol && u.hostname.endsWith('.' + entry.host) && (entry.port ? u.port === entry.port : true);
 }
 

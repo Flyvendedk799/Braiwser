@@ -122,3 +122,23 @@ test('the heartbeat releases human control when the relay stops polling', async 
   const session = h.broker._internals.sessions.get(s.sessionId);
   assert.equal(session.lease.owner, 'paused', 'idle relay leaves the browser paused, never silently agent-controlled');
 });
+
+test('a principal ceiling of https://* lets a session browse any public site and still refuses private hosts', async (t) => {
+  const { boot: rawBoot, mcp } = require('./harness');
+  const h = rawBoot();
+  t.after(() => h.broker.close());
+  const wide = h.broker.forPrincipal(mcp('wide', ['class:observe', 'class:navigate', 'class:interact', 'origin:https://*']));
+  const s = await wide.openSession({ driver: 'playwright', mode: 'headless', grant: { allowedOrigins: ['https://*'], toolClasses: ['observe', 'navigate'] } });
+  const session = h.broker._internals.sessions.get(s.sessionId);
+  const policy = h.broker._internals.policy;
+  assert.equal(policy.checkDestination(session.grant, 'https://news.example.org/a').allowed, true);
+  assert.equal(policy.checkDestination(session.grant, 'https://192.168.1.10/').allowed, false);
+  assert.equal(policy.checkDestination(session.grant, 'http://news.example.org/').allowed, false);
+  // Asking for everything under a narrower ceiling is still refused.
+  const narrow = h.broker.forPrincipal(mcp('narrow', ['class:observe', 'origin:https://app.test']));
+  await assert.rejects(() => narrow.openSession({ driver: 'playwright', mode: 'headless', grant: { allowedOrigins: ['https://*'], toolClasses: ['observe'] } }).then((x) => {
+    const g = h.broker._internals.sessions.get(x.sessionId).grant;
+    if (g.allowedOrigins.length) throw new Error('narrow ceiling was widened');
+    throw new Error('empty grant');
+  }));
+});

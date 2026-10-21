@@ -50,6 +50,17 @@ test('wildcards never cover the apex, other schemes, or private hosts', () => {
   assert.throws(() => uiGrant(p, { allowedOrigins: ['http://*.localhost'] }), (e) => e.publicError.code === 'DENIED');
 });
 
+test('https://* covers any public https host but never private hosts, other schemes or the plain-http twin', () => {
+  const p = mk();
+  const g = uiGrant(p, { allowedOrigins: ['https://*'] });
+  assert.equal(p.checkDestination(g, 'https://example.com/').allowed, true);
+  assert.equal(p.checkDestination(g, 'https://a.b.example.org:8443/').allowed, true);
+  assert.equal(p.checkDestination(g, 'http://example.com/').allowed, false);
+  for (const target of ['https://localhost/', 'https://127.0.0.1/', 'https://10.0.0.5/', 'https://intranet/', 'https://printer.local/', 'https://metadata.google.internal/']) {
+    assert.equal(p.checkDestination(g, target).allowed, false, target);
+  }
+});
+
 test('file: only inside a canonical granted root; traversal and symlinks fail', (t) => {
   const p = mk();
   const root = fs.realpathSync(tmp()); const outside = fs.realpathSync(tmp());
