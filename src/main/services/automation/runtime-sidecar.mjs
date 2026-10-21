@@ -15,6 +15,14 @@ if (expectedRevision) {
 }
 const config = JSON.parse(process.env.BRAIWSER_RUNTIME_CONFIG || '{}');
 if (!config.dataDir || !config.principal) throw new Error('Trusted runtime config required');
+// A supervisor in another namespace (the OpenBot server outside a desk container) cannot see this
+// runtime's browser path; the installer recorded it beside the checkout.
+if (!config.driverOptions?.executablePath) {
+  try {
+    const installed = JSON.parse(fs.readFileSync(new URL('../../../../runtime-browser.json', import.meta.url), 'utf8'));
+    if (typeof installed.executablePath === 'string' && installed.executablePath) config.driverOptions = { ...config.driverOptions, executablePath: installed.executablePath };
+  } catch { /* the driver falls back to its own discovery */ }
+}
 const dir = path.resolve(config.dataDir);
 fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 const info = path.join(dir, 'agent-bridge.json');

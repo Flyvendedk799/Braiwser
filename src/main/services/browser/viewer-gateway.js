@@ -16,9 +16,15 @@ function readBody(req, limit = 16 * 1024) {
     req.on('error', reject);
   });
 }
-function createViewerGateway({ broker, auth, owner = null, host = '127.0.0.1', port = 0,
+// `proxy` enables the trusted-server mode: the OpenBot server presents the owner token as a bearer
+// credential and relays a signed-in human. Bearer requests carry no ambient browser credential, so
+// they need no cookie or CSRF. Only then may the gateway bind a private (non-loopback) interface.
+function createViewerGateway({ broker, auth, owner = null, host = '127.0.0.1', port = 0, proxy = null,
   clock = { now: () => Date.now() }, frameStaleMs = FRAME_STALE_MS, heartbeatMs = 15000 } = {}) {
-  if (!broker || host !== '127.0.0.1') throw new TypeError('owning broker and loopback host required');
+  if (proxy && (!owner || typeof owner.token !== 'string' || owner.token.length < 32)) throw new TypeError('proxy mode requires a strong owner token');
+  if (!broker || (host !== '127.0.0.1' && !proxy)) throw new TypeError('owning broker and loopback host required');
+  const allowedHosts = new Set((proxy?.allowedHosts || []).filter((h) => typeof h === 'string' && /^[A-Za-z0-9.-]{1,120}:\d{1,5}$/.test(h)));
+  const proxyViews = new Map();
   const tokens = auth || createViewerAuth({ clock });
   const frames = new Map();
   let frameSequence = 0;
@@ -106,10 +112,99 @@ function createViewerGateway({ broker, auth, owner = null, host = '127.0.0.1', p
     frames.delete(view.id);
     return { accepted: true, dispatched: true };
   }
+  function bearerOk(req) {
+    const header = String(req.headers.authorization || '');
+    if (!header.startsWith('Bearer ')) return false;
+    const supplied = crypto.createHash('sha256').update(header.slice(7)).digest();
+    return crypto.timingSafeEqual(supplied, crypto.createHash('sha256').update(owner.token).digest());
+  }
+  // One relay identity per handoff. The heartbeat still releases human control when polling stops.
+  function proxyView(handoffId) {
+    const known = proxyViews.get(handoffId);
+    const live = known && tokens.get(known.id);
+    if (live) { live.lastSeen = clock.now(); return live; }
+    const view = tokens.issue(handoffId, { mode: 'observe' });
+    view.ownerId = owner.id; view.lastSeen = clock.now(); view.proxy = true;
+    proxyViews.set(handoffId, view);
+    return view;
+  }
+  function ownedSession(sessionId) {
+    const session = broker._internals.sessions.get(sessionId);
+    // Sessions are keyed by the scoped agent principal this owner process was started for.
+    if (!session || session.closed || session.ownerId !== owner.principalId) throw H.v2Error('ACCESS_REVOKED', 'browser context lost');
+    broker._internals.policy.assertActive(session.grant, { id: session.ownerId });
+    return session;
+  }
+  // Observation without a handoff: read-only, never carries control, never accepts input.
+  async function watchFrame(session, pageId) {
+    const page = session.page(pageId);
+    const withheld = session.privateInput === true || session.privateTainted === true;
+    let shot;
+    if (!withheld && typeof page.driverPage.screenshot === 'function') {
+      try { shot = await page.driverPage.screenshot({}); } catch { /* an absent frame is reported stale */ }
+    }
+    const image = !withheld && Buffer.isBuffer(shot?.bytes) && shot.bytes.length <= 4 * 1024 * 1024 ? shot.bytes.toString('base64') : null;
+    return { sequence: ++frameSequence, capturedAt: new Date(clock.now()).toISOString(), controlEpoch: session.lease.fence,
+      controlOwner: session.lease.owner, documentEpoch: page.documentEpoch, fresh: !!image, withheld, image,
+      width: shot?.meta?.viewport?.width || 0, height: shot?.meta?.viewport?.height || 0 };
+  }
+  async function sessionRouteHandler(req, res, sessionId, action, requestUrl) {
+    const session = ownedSession(sessionId), c = coord();
+    if (req.method === 'GET' && !action) {
+      const rec = c.activeForSession(sessionId);
+      send(res, 200, { ok: true, value: { sessionId, pageIds: [...session.pages.keys()], controlOwner: session.lease.owner,
+        controlEpoch: session.lease.fence, privateInput: session.privateInput === true, handoff: rec ? c.dto(rec) : null } });
+      return;
+    }
+    if (req.method === 'GET' && action === 'frame') {
+      const pageId = requestUrl.searchParams.get('pageId') || '';
+      if (!session.pages.has(pageId)) throw H.v2Error('ACCESS_REVOKED', 'page required');
+      send(res, 200, { ok: true, value: await watchFrame(session, pageId) });
+      return;
+    }
+    if (req.method === 'POST' && action === 'takeover') {
+      const body = await readBody(req);
+      if (typeof body.viewerInstanceId !== 'string' || !/^[A-Za-z0-9_-]{16,80}$/.test(body.viewerInstanceId)) throw H.v2Error('ACCESS_REVOKED', 'viewer instance required');
+      if (typeof body.pageId !== 'string' || !session.pages.has(body.pageId)) throw H.v2Error('ACCESS_REVOKED', 'page required');
+      const value = await c.withLock(sessionId, async () => {
+        let rec = c.activeForSession(sessionId);
+        if (!rec) {
+          // The owner is a person acting through the trusted server, so a possibly dispatched action is acknowledged.
+          const principal = { id: owner.principalId, kind: 'ui', scopes: ['ui'] };
+          const made = await c.requestHandoff(session, { pageId: body.pageId, reasonCode: 'userRequested',
+            requestKey: typeof body.requestKey === 'string' ? body.requestKey : null, ttlMs: body.ttlMs }, principal);
+          rec = c.get(made.record.handoffId);
+        }
+        const view = proxyView(rec.handoffId);
+        if (rec.state === 'human' && rec.viewerInstance && rec.viewerInstance !== view.id) throw H.v2Error('CONTROL_BUSY', 'another viewer holds control');
+        if (rec.state !== 'human') {
+          c.acquire(rec.handoffId, { viewerInstance: view.id });
+          c.markAcquired(rec, session, view.id);
+          view.mode = 'control';
+        }
+        view.clientInstance = body.viewerInstanceId; view.lastSeen = clock.now();
+        return c.status(rec.handoffId, {});
+      });
+      send(res, 200, { ok: true, value });
+      return;
+    }
+    send(res, 404, { ok: false });
+  }
   async function handle(req, res) {
     try {
-      if (req.headers.host !== new URL(baseUrl).host) throw H.v2Error('ACCESS_REVOKED', 'host rejected');
-      const pathname = new URL(req.url, baseUrl).pathname;
+      if (req.headers.host !== new URL(baseUrl).host && !allowedHosts.has(req.headers.host)) throw H.v2Error('ACCESS_REVOKED', 'host rejected');
+      const requestUrl = new URL(req.url, baseUrl);
+      let pathname = requestUrl.pathname;
+      let bearerView = null;
+      if (proxy && pathname.startsWith('/proxy/')) {
+        if (!bearerOk(req)) throw H.v2Error('ACCESS_REVOKED', 'proxy authentication rejected');
+        const sessionRoute = pathname.match(/^\/proxy\/v1\/sessions\/([A-Za-z0-9_-]{1,80})(?:\/([a-z]+))?$/);
+        if (sessionRoute) { await sessionRouteHandler(req, res, sessionRoute[1], sessionRoute[2] || '', requestUrl); return; }
+        const handoffRoute = pathname.match(/^\/proxy\/(v1\/handoffs\/([A-Za-z0-9_-]{1,80})(?:\/[a-z]+)?)$/);
+        if (!handoffRoute) { send(res, 404, { ok: false }); return; }
+        pathname = `/${handoffRoute[1]}`;
+        bearerView = proxyView(handoffRoute[2]);
+      }
       if (req.method === 'GET' && (pathname === '/viewer.js' || /^\/handoff\/[A-Za-z0-9_-]{1,80}$/.test(pathname))) {
         const js = pathname === '/viewer.js';
         res.writeHead(200, { 'content-type': js ? 'text/javascript; charset=utf-8' : 'text/html; charset=utf-8',
@@ -139,7 +234,7 @@ function createViewerGateway({ broker, auth, owner = null, host = '127.0.0.1', p
         view.ownerId = owner?.id || rec.principalId; view.lastSeen = clock.now();
         send(res, 200, { ok: true, value: { handoffId, mode: 'observe' } }, { 'set-cookie': tokens.setCookieHeader(view) }); return;
       }
-      const view = req.method === 'POST' ? tokens.assertWrite(req, baseUrl) : tokens.read(req);
+      const view = bearerView || (req.method === 'POST' ? tokens.assertWrite(req, baseUrl) : tokens.read(req));
       const { rec, session } = live(view, handoffId, { allowClosed: !action || action === 'resume' });
       if (req.method === 'GET' && !action) {
         send(res, 200, { ok: true, value: c.status(handoffId, {}) }); return;
@@ -197,7 +292,9 @@ function createViewerGateway({ broker, auth, owner = null, host = '127.0.0.1', p
     return new Promise((resolve, reject) => {
       server.once('error', reject);
       server.listen(port, host, () => {
-        baseUrl = `http://${host}:${server.address().port}`;
+        // The advertised origin stays loopback even when a private interface is bound; proxy callers
+        // are admitted by their explicit allowedHosts entry instead.
+        baseUrl = `http://127.0.0.1:${server.address().port}`;
         broker.attachViewer({ enabled: true, baseUrl, deployment: 'local' });
         timer = setInterval(() => {
           for (const [id, view] of tokens.entries()) {

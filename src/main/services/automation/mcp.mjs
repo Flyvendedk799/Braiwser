@@ -137,6 +137,8 @@ export function createMcpServer(broker, options = {}) {
       workflowSchemaVersion: core.SCHEMA_VERSION,
       handoffVersion: '2.1.0',
       handoff: { native: false, deployment: 'local', cursor: 'exclusive-last-consumed', ownerAuthentication: 'protected-owner-token' },
+      // Owner-initiated takeover and session watching through a trusted proxy (see viewer-gateway.js).
+      watch: { version: 1, ownerInitiatedTakeover: true, authentication: 'proxy-bearer' },
       server: { name: 'braiwser', version: packageVersion() },
       tools: ops.tools.map((t) => ({ name: t.name, readOnly: t.readOnly })),
       actions: ['click', 'fill', 'press', 'select', 'check', 'navigate', 'setViewport'],
