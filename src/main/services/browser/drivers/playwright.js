@@ -1079,6 +1079,9 @@ class PlaywrightDriver {
     this.name = 'playwright';
     this._playwright = o.playwright || null;
     this._executablePath = o.executablePath || process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined;
+    // Only the supervisor that owns the process can turn this off (never a tool argument). Inside a locked-down
+    // container, running as root, Chromium cannot create its own sandbox; the container is the boundary there.
+    this._chromiumSandbox = o.chromiumSandbox !== false;
     this._defaults = {
       actionabilityTimeoutMs: o.actionabilityTimeoutMs || 1500,
       dispatchTimeoutMs: o.dispatchTimeoutMs || 2000,
@@ -1163,9 +1166,10 @@ class PlaywrightDriver {
     if (mode === 'visible' && o.window && Number.isInteger(o.window.x) && Number.isInteger(o.window.y)) {
       args.push(`--window-position=${o.window.x},${o.window.y}`);
     }
+    if (!this._chromiumSandbox) args.push('--disable-dev-shm-usage');
     const browser = await chromium.launch({
       headless: mode === 'headless',
-      chromiumSandbox: true,
+      chromiumSandbox: this._chromiumSandbox,
       args,
       ...(this._executablePath ? { executablePath: this._executablePath } : {}),
     });
