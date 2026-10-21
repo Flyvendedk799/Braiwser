@@ -12,6 +12,7 @@ const H = require('../../../shared/handoff-contracts');
 
 const DEFAULT_TTL_MS = 30 * 60 * 1000;
 const FRAME_STALE_MS = 2000;
+const MAX_OWNER_TTL_MS = 8 * 60 * 60 * 1000;
 
 function digestOf(value) {
   return C.sha256(value);
@@ -213,7 +214,7 @@ function createHandoffCoordinator({
       controlEpoch: paused.fence,
       eventSequence: 0,
       events: [],
-      expiresAt: clock.now() + ttlMs,
+      expiresAt: clock.now() + (Number.isFinite(input.ttlMs) ? Math.max(60000, Math.min(input.ttlMs, MAX_OWNER_TTL_MS)) : ttlMs),
       viewerUrl,
       resumeEligible: false,
       blocker: null,
@@ -235,6 +236,14 @@ function createHandoffCoordinator({
 
   function get(handoffId) {
     return records.get(handoffId) || null;
+  }
+
+  // The live episode for a session, if any. Used by the owner-authenticated takeover path.
+  function activeForSession(sessionId) {
+    for (const rec of records.values()) {
+      if (rec.sessionId === sessionId && rec.state !== 'closed' && clock.now() <= rec.expiresAt) return rec;
+    }
+    return null;
   }
 
   function status(handoffId, { afterSequence = 0, maxEvents = 30 } = {}) {
@@ -477,7 +486,7 @@ function createHandoffCoordinator({
 
   return {
     hasLiveSession: (sessionId) => [...records.values()].some((r) => r.sessionId === sessionId && (r.state !== 'closed' || r.controlOwner !== 'agent')),
-    withLock, pause, requestHandoff, status, get, redeem, acquire, markAcquired, release,
+    withLock, pause, requestHandoff, status, get, activeForSession, redeem, acquire, markAcquired, release,
     beginPrivate, endPrivate, authorizeResume, consumeResume, revoke, onSessionClosed, peekInvitation, dto, assertLive, writeOnce, pauseOnce,
     revokeRun: (runId) => { for (const rec of records.values()) if (rec.runId === runId) revoke(rec.handoffId); },
   };

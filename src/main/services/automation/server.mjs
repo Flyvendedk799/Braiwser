@@ -11,9 +11,13 @@ import bridgeModule from './bridge-server.js';
 import viewerModule from '../browser/viewer-gateway.js';
 export { createOperations } from './operations.mjs';
 
-export async function startServer({ dataDir, port = 0, deployment = 'local',
-  principal, ownerId = 'local-owner', driverOptions = {}, featureFlag = true, idleMs = 300000 } = {}) {
-  if (deployment !== 'local') throw new Error('UNSUPPORTED: hosted viewer deployment has not passed its release gates');
+// `proxy` deployment: a trusted server (OpenBot) relays an authenticated human over a private network.
+// The shared secret is supplied by the supervisor, never written to disk, and the gateway is not public.
+export async function startServer({ dataDir, port = 0, deployment = 'local', bindHost = '127.0.0.1', allowedHosts = [], proxyToken = null,
+  principal, ownerId = 'local-owner', driverOptions = {}, featureFlag = true, idleMs = 300000, keepAlive = false } = {}) {
+  if (!['local', 'proxy'].includes(deployment)) throw new Error('UNSUPPORTED: public viewer deployment has not passed its release gates');
+  if (deployment === 'proxy' && (typeof proxyToken !== 'string' || proxyToken.length < 32)) throw new TypeError('proxy deployment requires a strong shared secret');
+  if (deployment === 'proxy' && (typeof bindHost !== 'string' || !/^[0-9.]{7,15}$/.test(bindHost))) throw new TypeError('proxy deployment requires an explicit private bind address');
   if (!featureFlag) throw new Error('UNAVAILABLE: standalone runtime must be explicitly enabled');
   if (!dataDir || !principal?.id || principal.kind !== 'mcp' || !Array.isArray(principal.scopes)) {
     throw new TypeError('dataDir and an explicitly scoped MCP principal are required');
@@ -45,21 +49,25 @@ export async function startServer({ dataDir, port = 0, deployment = 'local',
       limits: { assertionWaitMs: 1000 },
       drivers: { playwright: driverModule.createPlaywrightDriver(driverOptions) },
       skills: skillsModule.createBrokerSkills(), appVersion: 'braiwser-server' });
-    const ownerToken = crypto.randomBytes(32).toString('base64url');
-    gateway = viewerModule.createViewerGateway({ broker, port,
+    const proxied = deployment === 'proxy';
+    const ownerToken = proxied ? proxyToken : crypto.randomBytes(32).toString('base64url');
+    gateway = viewerModule.createViewerGateway({ broker, port, host: proxied ? bindHost : '127.0.0.1',
+      proxy: proxied ? { allowedHosts } : null,
       owner: { token: ownerToken, id: ownerId, principalId: principal.id } });
     const baseUrl = await gateway.listen();
     bridge = await bridgeModule.startBridge({ broker, infoDir: dataDir,
       defaultClient: { principal } });
-    fs.writeFileSync(ownerFile, JSON.stringify({ version: 1, baseUrl, ownerId, token: ownerToken }), { mode: 0o600 });
+    fs.writeFileSync(ownerFile, JSON.stringify({ version: 1, baseUrl, ownerId, ...(proxied ? {} : { token: ownerToken }) }), { mode: 0o600 });
     let lastBusy = Date.now();
-    idleTimer = setInterval(() => {
-      if (broker.stats().sessions || bridge.connectionCount()) lastBusy = Date.now();
-      else if (Date.now() - lastBusy > idleMs) void close();
-    }, Math.max(100, Math.min(30000, idleMs / 3)));
-    idleTimer.unref();
+    if (!keepAlive) {
+      idleTimer = setInterval(() => {
+        if (broker.stats().sessions || bridge.connectionCount()) lastBusy = Date.now();
+        else if (Date.now() - lastBusy > idleMs) void close();
+      }, Math.max(100, Math.min(30000, idleMs / 3)));
+      idleTimer.unref();
+    }
     return { broker, bridge, gateway, baseUrl, bridgeFile, ownerFile, close,
-      readiness: { ready: true, deployment: 'local', automationSchemaMajor: 1, handoffVersion: '2.1.0' } };
+      readiness: { ready: true, deployment, automationSchemaMajor: 1, handoffVersion: '2.1.0', watchVersion: proxied ? 1 : 0 } };
   } catch (error) { await close(); throw error; }
 }
 
