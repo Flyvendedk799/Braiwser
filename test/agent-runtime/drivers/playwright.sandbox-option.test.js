@@ -30,3 +30,20 @@ test('only an explicit false disables it', async () => {
     assert.equal(seen[0].chromiumSandbox, true, String(value));
   }
 });
+
+function recordingContext(seen) {
+  return { chromium: { launch: async () => ({ version: () => '156.0.7390.12', newContext: async (options) => { seen.push(options); throw new Error('stop after context'); }, close: async () => {} }) } };
+}
+
+test('a supervisor can make the browser report the Chrome it is instead of HeadlessChrome', async () => {
+  const seen = [];
+  await open(createPlaywrightDriver({ playwright: recordingContext(seen), executablePath: '/x/chrome', standardUserAgent: true }));
+  assert.match(seen[0].userAgent, /^Mozilla\/5\.0 \(.+\) AppleWebKit\/537\.36 \(KHTML, like Gecko\) Chrome\/156\.0\.0\.0 Safari\/537\.36$/);
+  assert.ok(!seen[0].userAgent.includes('Headless'));
+});
+
+test('by default the browser keeps its own user agent', async () => {
+  const seen = [];
+  await open(createPlaywrightDriver({ playwright: recordingContext(seen), executablePath: '/x/chrome' }));
+  assert.equal(seen[0].userAgent, undefined);
+});

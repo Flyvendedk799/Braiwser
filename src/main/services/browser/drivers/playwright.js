@@ -1077,6 +1077,13 @@ class PlaywrightSession {
   }
 }
 
+/** The user agent a headed Chrome of this version on this platform sends. */
+function standardUserAgent(version) {
+  const major = String(version || '').split('.')[0] || '0';
+  const platform = process.platform === 'win32' ? 'Windows NT 10.0; Win64; x64' : process.platform === 'darwin' ? 'Macintosh; Intel Mac OS X 10_15_7' : 'X11; Linux x86_64';
+  return `Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`;
+}
+
 class PlaywrightDriver {
   constructor(options) {
     const o = options || {};
@@ -1086,6 +1093,9 @@ class PlaywrightDriver {
     // Only the supervisor that owns the process can turn this off (never a tool argument). Inside a locked-down
     // container, running as root, Chromium cannot create its own sandbox; the container is the boundary there.
     this._chromiumSandbox = o.chromiumSandbox !== false;
+    // Supervisor-only. Headless Chromium names itself "HeadlessChrome", which many sites refuse outright (x.com answers
+    // 403). With this set the browser reports the Chrome version it actually is, as a headed Chrome would.
+    this._standardUserAgent = o.standardUserAgent === true;
     this._defaults = {
       actionabilityTimeoutMs: o.actionabilityTimeoutMs || 1500,
       dispatchTimeoutMs: o.dispatchTimeoutMs || 2000,
@@ -1183,6 +1193,7 @@ class PlaywrightDriver {
       context = await browser.newContext({
         viewport: { width: viewport.width, height: viewport.height }, locale, timezoneId, deviceScaleFactor: opts.deviceScaleFactor, colorScheme: 'light',
         acceptDownloads: !!grant, permissions: [], javaScriptEnabled: true,
+        ...(this._standardUserAgent ? { userAgent: standardUserAgent(browser.version()) } : {}),
       });
       context.setDefaultTimeout(10000);
       context.setDefaultNavigationTimeout(opts.navigationTimeoutMs);
