@@ -117,6 +117,12 @@ function createFakeDriver({ name = 'playwright', modes = ['headless', 'visible']
       return { outcome: 'ready', url: this._url };
     }
     _visible() { return this.doc.elements.filter((e) => e.visible !== false); }
+    async readText({ maxChars = 400000 } = {}) {
+      await wait(ctl.delays.observe);
+      if (this.crashed) throw Object.assign(new Error('crashed'), { code: 'PAGE_CRASHED' });
+      const all = this._visible().map((e) => e.name).filter(Boolean).join('\n');
+      return { title: this.doc.title || '', text: all.slice(0, maxChars), total: all.length, url: this._url, documentEpoch: this.documentEpoch };
+    }
     async observe({ maxNodes = 200, focus, cursor } = {}) {
       await wait(ctl.delays.observe);
       if (this.crashed) throw Object.assign(new Error('crashed'), { code: 'PAGE_CRASHED' });

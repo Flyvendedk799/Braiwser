@@ -45,6 +45,16 @@ test('an owner watches, takes over, types and clicks, then returns the same live
   const first = await must('browser_observe', ids);
   await must('browser_act', { ...ids, observationId: first.observationId, documentEpoch: first.documentEpoch, operationId: 'go-site', action: { kind: 'navigate', url: origin } });
 
+  // One step from an address to the page as text, on the real browser.
+  const visited = await must('browser_visit', { ...ids, url: `${origin}/visit`, operationId: 'visit-real' });
+  assert.ok(['verified', 'dispatched'].includes(visited.receipt.status), JSON.stringify(visited.receipt));
+  assert.ok(visited.page.url.endsWith('/visit'));
+  assert.ok(visited.page.text.includes('Name') && visited.page.text.includes('Go'), visited.page.text);
+  const reread = await must('browser_read', { ...ids, maxChars: 200 });
+  assert.equal(reread.text, visited.page.text.slice(0, 200));
+  await must('browser_act', { ...ids, observationId: (await must('browser_observe', ids)).observationId,
+    documentEpoch: (await must('browser_observe', ids)).documentEpoch, operationId: 'back-home', action: { kind: 'navigate', url: origin } });
+
   // Watching needs no handoff and gives the agent no reason to pause.
   const watched = await ask('GET', `/proxy/v1/sessions/${ids.sessionId}/frame?pageId=${ids.pageId}`);
   assert.equal(watched.status, 200, JSON.stringify(watched.body));

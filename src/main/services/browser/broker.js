@@ -51,7 +51,7 @@ function createBroker(options = {}) {
   const emit = (name, payload) => { try { events.emit(name, payload); } catch { /* listener errors never break the broker */ } };
 
   // ---- disabled broker: every call is UNAVAILABLE, nothing touches disk -------------
-  const methodNames = ['openSession', 'closeSession', 'observe', 'act', 'startRun', 'getRun', 'cancelRun', 'retryRun', 'handoff', 'resume', 'approve', 'listApprovals', 'listRuns', 'getManifest', 'readResource', 'requestHandoff', 'pauseRun', 'handoffStatus', 'resumeRun', 'startTask'];
+  const methodNames = ['openSession', 'closeSession', 'observe', 'act', 'startRun', 'getRun', 'cancelRun', 'retryRun', 'handoff', 'resume', 'approve', 'listApprovals', 'listRuns', 'getManifest', 'readResource', 'requestHandoff', 'pauseRun', 'handoffStatus', 'resumeRun', 'startTask', 'readPage', 'visit'];
   function bindFacade(broker, principal) {
     const out = {};
     for (const m of methodNames) out[m] = (input, extra) => broker[m](input, { ...(extra || {}), principal });
@@ -449,6 +449,71 @@ function createBroker(options = {}) {
     try { return await finishing; } finally { inflight.delete(key); }
   }
   const act = (input, ctx) => guard(() => doAct(input, ctx));
+
+  // ======================================================================
+  // read / visit: the page as text, like a web fetch, but on the session the owner can watch
+  // ======================================================================
+  const READ_MAX = 40000;
+  // A visit retried with the same operationId must replay the recorded navigation, not issue a new one; the document it
+  // started from is part of the command, so remember it per operation.
+  const visitEpochs = new Map();
+  function readArgs(i) {
+    const offset = i.offset === undefined ? 0 : i.offset;
+    const maxChars = i.maxChars === undefined ? 12000 : i.maxChars;
+    if (!Number.isSafeInteger(offset) || offset < 0) throw C.brokerError('DENIED', 'INVALID_INPUT: offset must be a whole number >= 0');
+    if (!Number.isSafeInteger(maxChars) || maxChars < 200 || maxChars > READ_MAX) throw C.brokerError('DENIED', `INVALID_INPUT: maxChars must be between 200 and ${READ_MAX}`);
+    return { offset, maxChars };
+  }
+  async function readCore(session, rec, { offset, maxChars }, principal) {
+    if (session.privateInput || session.privateReadBlocked) throw dtoError('DENIED', 'PRIVATE_INPUT_ACTIVE: private content must be safely reconciled before reading', { detail: 'PRIVATE_INPUT_ACTIVE' });
+    policy.assertActive(session.grant, principal);
+    policy.assertClass(session.grant, 'observe');
+    policy.spend(session.grant, 'observations');
+    if (typeof rec.driverPage.readText !== 'function') throw dtoError('UNSUPPORTED', 'this driver cannot read page text', { detail: 'READ_UNSUPPORTED' });
+    let read;
+    try {
+      read = await rec.owned.read(() => withTimeout(Promise.resolve().then(() => rec.driverPage.readText({ maxChars: offset + maxChars })), limits.observeTimeoutMs));
+    } catch (e) {
+      if (e.publicError) throw e;
+      if (e.code === 'OWNERSHIP_LOST') throw dtoError('DENIED', 'the page is under human control or not available to the agent', { retry: 'refresh', detail: 'OWNERSHIP_LOST' });
+      if (e.code === 'STALE_DOCUMENT') throw dtoError('STALE_REF', 'the document changed while reading; read again', { retry: 'refresh', detail: 'STALE_DOCUMENT' });
+      throw dtoError('UNAVAILABLE', 'driver could not read the page', { retry: 'safe-read', detail: 'READ_FAILED' });
+    }
+    const value = read.value || {};
+    if (session.privateInput || session.privateReadBlocked) throw dtoError('DENIED', 'PRIVATE_INPUT_ACTIVE: reading was fenced');
+    const total = Number.isSafeInteger(value.total) ? value.total : String(value.text || '').length;
+    const text = redactText(String(value.text || '').slice(offset, offset + maxChars), maxChars);
+    const end = Math.min(total, offset + maxChars);
+    return {
+      sessionId: session.sessionId, pageId: rec.pageId, url: redactUrl(String(value.url || '')) || '', title: redactText(clip(String(value.title || ''), 300), 300),
+      documentEpoch: rec.documentEpoch, offset, nextOffset: end < total ? end : null, totalChars: total, text, trust: 'untrusted-page',
+    };
+  }
+  async function readPage(input, ctx) {
+    return guard(async () => {
+      const principal = principalOf(ctx);
+      const v = C.validateSessionPage({ sessionId: input && input.sessionId, pageId: input && input.pageId });
+      const session = ownedSession(v.sessionId, principal);
+      const rec = session.page(v.pageId);
+      return readCore(session, rec, readArgs(input || {}), principal);
+    });
+  }
+  async function visit(input, ctx) {
+    return guard(async () => {
+      const principal = principalOf(ctx);
+      const v = C.validateSessionPage({ sessionId: input && input.sessionId, pageId: input && input.pageId });
+      const opts = readArgs(input || {});
+      const session = ownedSession(v.sessionId, principal);
+      const rec = session.page(v.pageId);
+      // The navigation is an ordinary act: same destination policy, budgets, approvals, ledger and evidence.
+      const key = `${session.sessionId} ${input.operationId}`;
+      if (!visitEpochs.has(key)) { visitEpochs.set(key, rec.documentEpoch); if (visitEpochs.size > 5000) visitEpochs.delete(visitEpochs.keys().next().value); }
+      const receipt = await doAct({ sessionId: v.sessionId, pageId: v.pageId, documentEpoch: visitEpochs.get(key),
+        operationId: input.operationId, action: { kind: 'navigate', url: input.url } }, ctx, { afterObserve: false });
+      if (!['verified', 'dispatched'].includes(receipt.status)) return { receipt, page: null };
+      return { receipt, page: await readCore(session, rec, opts, principal) };
+    });
+  }
 
   // ======================================================================
   // sessions
@@ -1037,7 +1102,7 @@ function createBroker(options = {}) {
   const broker = {
     enabled: true, events, limits,
     openSession, closeSession, observe, act, startRun, getRun, cancelRun, retryRun, handoff, resume, approve, listApprovals, listRuns, getManifest, readResource,
-    requestHandoff, pauseRun, handoffStatus, resumeRun, startTask, attachViewer,
+    requestHandoff, pauseRun, handoffStatus, resumeRun, startTask, attachViewer, readPage, visit,
     forPrincipal: (principal) => bindFacade(broker, C.validatePrincipal(principal)),
     close, stats: () => ({ enabled: true, sessions: sessions.size, runs: runStore.list().length, ledger: ledger.stats(), evidence: evidence.usage() }),
     // internals exposed for tests / the app shell only
