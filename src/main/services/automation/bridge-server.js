@@ -76,6 +76,15 @@ function createBridgeServer({
     return token;
   }
 
+  // A kept-alive owner extends its own client's credential instead of letting it lapse under a live
+  // connection. Only an existing, unexpired token can be extended; a revoked one stays revoked.
+  function extend(token, { ttlMs = 8 * 60 * 60 * 1000 } = {}) {
+    const entry = tokens.get(hashToken(token));
+    if (!entry || entry.expiresAt <= now()) return false;
+    entry.expiresAt = now() + ttlMs;
+    return true;
+  }
+
   function revoke(token) {
     const entry = tokens.get(hashToken(token));
     if (!entry) return false;
@@ -195,8 +204,19 @@ function createBridgeServer({
     return { file, token };
   }
 
+  // Rewrites the client file for an extended token: same token, new expiry. Nothing else changes.
+  function renewClientFile(file, token, { ttlMs = 8 * 60 * 60 * 1000 } = {}) {
+    if (!extend(token, { ttlMs })) return false;
+    const current = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const body = JSON.stringify({ ...current, token, expiresAt: new Date(now() + ttlMs).toISOString() });
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, body, { mode: 0o600 });
+    fs.renameSync(tmp, file);
+    return true;
+  }
+
   return {
-    listen, close, issueToken, revoke, writeClientFile,
+    listen, close, issueToken, revoke, extend, writeClientFile, renewClientFile,
     get endpoint() { return resolvedEndpoint; },
     connectionCount: () => sockets.size,
   };
