@@ -100,6 +100,20 @@ class PlaywrightPage extends EventEmitter {
     return u.startsWith('chrome-error:') ? 'about:blank' : u;
   }
 
+  // The page's visible text, as a person reading it would see it (no markup, no hidden nodes). Bounded in the page.
+  async readText({ maxChars = 400000 } = {}) {
+    this._assertUsable();
+    if (this._barrier) await this._awaitBarrier();
+    const epoch = this.documentEpoch;
+    const read = await this._raw.mainFrame().evaluate((max) => {
+      const body = document.body;
+      const all = body ? body.innerText || '' : '';
+      return { title: document.title || '', text: all.slice(0, max), total: all.length };
+    }, Math.max(1, Math.min(400000, maxChars)));
+    if (epoch !== this.documentEpoch) throw Object.assign(new Error('document changed while reading'), { code: 'STALE_DOCUMENT' });
+    return { ...read, url: this.url(), documentEpoch: epoch };
+  }
+
   // The broker subscribes to `driverPage.events` (navigated | crashed | closed | popup | download | dialog).
   get events() { return this; }
 

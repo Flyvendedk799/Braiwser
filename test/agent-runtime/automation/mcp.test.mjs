@@ -28,7 +28,8 @@ test('registers the broker tools with strict inputs, typed outputs and honest an
   const { tools } = await h.client.listTools();
   assert.deepEqual(tools.map((t) => t.name).sort(), [
     'browser_act', 'browser_extract', 'browser_handoff', 'browser_handoff_status', 'browser_observe', 'browser_run',
-    'browser_run_cancel', 'browser_run_pause', 'browser_run_resume', 'browser_run_status', 'browser_session_close', 'browser_session_open'].sort());
+    'browser_read', 'browser_run_cancel', 'browser_run_pause', 'browser_run_resume', 'browser_run_status', 'browser_session_close', 'browser_session_open',
+    'browser_visit'].sort());
   for (const t of tools) {
     assert.equal(t.inputSchema.additionalProperties, false, `${t.name} input must reject unknown keys`);
     assert.ok(t.outputSchema, `${t.name} has an output schema`);
@@ -452,7 +453,7 @@ test('resources: capabilities and catalog are readable; manifest redacts sensiti
   const run = await startRun(h, page);
   const caps = JSON.parse((await h.client.readResource({ uri: 'braiwser://capabilities' })).contents[0].text);
   assert.equal(caps.schemaVersion, 1);
-  assert.equal(caps.tools.length, 12);
+  assert.equal(caps.tools.length, 14);
   assert.ok(caps.skills.some((s) => s.id === 'verify-journey' && /^sha256:/.test(s.digest)));
   assert.ok(caps.guarantees.length >= 3);
   const catalog = JSON.parse((await h.client.readResource({ uri: 'braiwser://skills/catalog' })).contents[0].text);

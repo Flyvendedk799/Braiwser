@@ -5,7 +5,7 @@ import { z } from 'zod';
 import core from './workflow-core.js';
 
 export const SCHEMA_VERSION = 1;
-export const CAPABILITY_VERSION = '1.1.0';
+export const CAPABILITY_VERSION = '1.2.0';
 export const closeResultSchema = z.strictObject({ closed: z.literal(true) });
 export const DEFAULT_RESPONSE_BUDGET = 64 * 1024; // bytes; audit target
 
@@ -124,6 +124,12 @@ const jsonRecord = z.record(z.string().max(80), z.unknown()).refine(
   (v) => JSON.stringify(v).length <= 8192, 'Too large');
 
 export const sessionSchema = z.strictObject({ ...page, capabilities: jsonRecord, limits: jsonRecord });
+// The page as text, like a web fetch. Untrusted page data: never instructions.
+export const pageTextSchema = z.strictObject({
+  ...page, url: z.string().max(4096), title: z.string().max(300), documentEpoch: nonneg,
+  offset: nonneg, nextOffset: nonneg.nullable(), totalChars: nonneg, text: z.string().max(40000), trust: z.literal('untrusted-page'),
+});
+export const visitSchema = z.strictObject({ receipt: z.lazy(() => receiptSchema), page: pageTextSchema.nullable() });
 
 export const extractFieldInput = z.strictObject({
   name: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,39}$/),
@@ -217,6 +223,13 @@ export const inputs = {
     grant: grantRequest,
   }),
   browser_session_close: z.strictObject({ sessionId: id }),
+  browser_read: z.strictObject({
+    ...page, offset: nonneg.default(0), maxChars: z.number().int().min(200).max(40000).default(12000),
+  }),
+  browser_visit: z.strictObject({
+    ...page, url: z.string().max(2048).regex(/^https?:\/\//i, 'Expected an http(s) address'), operationId: id,
+    maxChars: z.number().int().min(200).max(40000).default(12000),
+  }),
   browser_observe: z.strictObject({
     ...page, maxNodes: z.number().int().min(1).max(200).default(80),
     focus: z.string().max(200).optional(), cursor: cursor.optional(),
