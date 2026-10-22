@@ -864,6 +864,10 @@ class PlaywrightPage extends EventEmitter {
     } else if (kind === 'scroll') {
       if (![deltaX, deltaY].every((n) => Number.isFinite(n) && Math.abs(n) <= 4096)) bad();
       await this._raw.mouse.wheel(deltaX, deltaY);
+    } else if (kind === 'back') {
+      await this._raw.goBack({ waitUntil: 'load', timeout: this._opts.navigationTimeoutMs }).catch(() => null);
+    } else if (kind === 'reload') {
+      await this._raw.reload({ waitUntil: 'load', timeout: this._opts.navigationTimeoutMs }).catch(() => null);
     } else bad();
     await capturePrivate();
     return { dispatched: true, ...(input.privateInput ? { privateValues, privateCaptureComplete } : {}) };

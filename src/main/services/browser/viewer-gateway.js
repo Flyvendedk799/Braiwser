@@ -68,6 +68,7 @@ function createViewerGateway({ broker, auth, owner = null, host = '127.0.0.1', p
     const frame = { sequence: ++frameSequence, capturedAt: new Date(clock.now()).toISOString(),
       controlEpoch: epoch, documentEpoch, driverEpoch, privacyEpoch: privacy,
       fresh: !!image, withheld: !!withheld || changed, image,
+      url: withheld || changed || typeof page.driverPage.url !== 'function' ? null : page.driverPage.url(),
       width: shot?.meta?.viewport?.width || 0, height: shot?.meta?.viewport?.height || 0, scale: 1, at: clock.now() };
     frames.set(view.id, frame);
     return frame;
@@ -79,6 +80,16 @@ function createViewerGateway({ broker, auth, owner = null, host = '127.0.0.1', p
       || frame.documentEpoch !== page.documentEpoch || body.documentEpoch !== page.documentEpoch
       || frame.driverEpoch !== page.driverPage.documentEpoch || frame.privacyEpoch !== (session.privacyEpoch || 0)
       || clock.now() - frame.at > frameStaleMs) throw H.v2Error('STALE_CONTROL_EPOCH', 'fresh frame required');
+    // A person in control may type an address. It goes through the same destination policy as the agent's
+    // navigation, so a person cannot use the computer to reach a private or ungranted address either.
+    if (body.kind === 'navigate') {
+      if (typeof body.url !== 'string' || body.url.length > 2048) throw H.v2Error('ACCESS_REVOKED', 'invalid address');
+      if (!broker._internals.policy.checkDestination(session.grant, body.url).allowed) throw H.v2Error('ACCESS_REVOKED', 'that address is not allowed for this computer');
+      view.lastSeen = clock.now();
+      const result = await page.driverPage.navigate(body.url, {});
+      frames.delete(view.id);
+      return { accepted: true, dispatched: true, outcome: result?.outcome || null };
+    }
     if (typeof page.driverPage.humanInput !== 'function') throw H.v2Error('UNSUPPORTED_HANDOFF', 'driver does not implement human input');
     if (['click', 'move'].includes(body.kind) && (![body.x, body.y].every(Number.isFinite)
       || body.x < 0 || body.y < 0 || body.x >= frame.width || body.y >= frame.height)) throw H.v2Error('STALE_CONTROL_EPOCH', 'coordinates outside captured viewport');
@@ -146,6 +157,7 @@ function createViewerGateway({ broker, auth, owner = null, host = '127.0.0.1', p
     const image = !withheld && Buffer.isBuffer(shot?.bytes) && shot.bytes.length <= 4 * 1024 * 1024 ? shot.bytes.toString('base64') : null;
     return { sequence: ++frameSequence, capturedAt: new Date(clock.now()).toISOString(), controlEpoch: session.lease.fence,
       controlOwner: session.lease.owner, documentEpoch: page.documentEpoch, fresh: !!image, withheld, image,
+      url: withheld || typeof page.driverPage.url !== 'function' ? null : page.driverPage.url(),
       width: shot?.meta?.viewport?.width || 0, height: shot?.meta?.viewport?.height || 0 };
   }
   async function sessionRouteHandler(req, res, sessionId, action, requestUrl) {

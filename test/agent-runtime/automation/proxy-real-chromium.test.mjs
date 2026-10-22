@@ -69,6 +69,16 @@ test('an owner watches, takes over, types and clicks, then returns the same live
       expectedControlEpoch: frame.controlEpoch, controlEpoch: frame.controlEpoch, frameSequence: frame.sequence, documentEpoch: frame.documentEpoch });
     assert.equal(result.status, 200, JSON.stringify(result.body));
   };
+  // The owner can type an address, within the same destination policy as the agent, and go back.
+  await input({ kind: 'navigate', url: `${origin}/second` });
+  assert.ok((await ask('GET', `/proxy/v1/handoffs/${handoffId}/frame`)).body.value.url.endsWith('/second'));
+  const refusedFrame = (await ask('GET', `/proxy/v1/handoffs/${handoffId}/frame`)).body.value;
+  const refused = await ask('POST', `/proxy/v1/handoffs/${handoffId}/input`, { kind: 'navigate', url: 'https://not-granted.example/', viewerInstanceId,
+    requestKey: 'refused-nav', expectedControlEpoch: refusedFrame.controlEpoch, controlEpoch: refusedFrame.controlEpoch,
+    frameSequence: refusedFrame.sequence, documentEpoch: refusedFrame.documentEpoch });
+  assert.equal(refused.status, 401, JSON.stringify(refused.body));
+  await input({ kind: 'back' });
+  assert.equal(new URL((await ask('GET', `/proxy/v1/handoffs/${handoffId}/frame`)).body.value.url).pathname, '/');
   await input({ kind: 'click', x: 50, y: 25 });
   await input({ kind: 'text', text: 'Typed by owner' });
   await input({ kind: 'click', x: 50, y: 85 });
