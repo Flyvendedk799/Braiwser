@@ -14,7 +14,7 @@ export { createOperations } from './operations.mjs';
 // `proxy` deployment: a trusted server (OpenBot) relays an authenticated human over a private network.
 // The shared secret is supplied by the supervisor, never written to disk, and the gateway is not public.
 export async function startServer({ dataDir, port = 0, deployment = 'local', bindHost = '127.0.0.1', allowedHosts = [], proxyToken = null,
-  principal, ownerId = 'local-owner', driverOptions = {}, featureFlag = true, idleMs = 300000, keepAlive = false } = {}) {
+  principal, ownerId = 'local-owner', driverOptions = {}, featureFlag = true, idleMs = 300000, keepAlive = false, renewMs = 60 * 60 * 1000 } = {}) {
   if (!['local', 'proxy'].includes(deployment)) throw new Error('UNSUPPORTED: public viewer deployment has not passed its release gates');
   if (deployment === 'proxy' && (typeof proxyToken !== 'string' || proxyToken.length < 32)) throw new TypeError('proxy deployment requires a strong shared secret');
   if (deployment === 'proxy' && (typeof bindHost !== 'string' || !/^[0-9.]{7,15}$/.test(bindHost))) throw new TypeError('proxy deployment requires an explicit private bind address');
@@ -27,13 +27,14 @@ export async function startServer({ dataDir, port = 0, deployment = 'local', bin
   const lockPath = path.join(dataDir, 'owner.lock');
   const lock = fs.openSync(lockPath, 'wx', 0o600);
   fs.writeFileSync(lock, JSON.stringify({ pid: process.pid }));
-  let broker, bridge, gateway, closed = false, idleTimer;
+  let broker, bridge, gateway, closed = false, idleTimer, renewTimer;
   const bridgeFile = path.join(dataDir, 'agent-bridge.json');
   const ownerFile = path.join(dataDir, 'viewer-owner.json');
   async function close() {
     if (closed) return;
     closed = true;
     clearInterval(idleTimer);
+    clearInterval(renewTimer);
     try { await bridge?.close(); } finally {
       try { await gateway?.close(); } finally {
         try { await broker?.close(); } finally {
@@ -59,6 +60,14 @@ export async function startServer({ dataDir, port = 0, deployment = 'local', bin
       defaultClient: { principal } });
     fs.writeFileSync(ownerFile, JSON.stringify({ version: 1, baseUrl, ownerId, ...(proxied ? {} : { token: ownerToken }) }), { mode: 0o600 });
     let lastBusy = Date.now();
+    // A standing owner outlives its client's 8-hour credential: renew it well before it lapses so the
+    // connected sidecar is never cut off. The token itself never changes or leaves the protected file.
+    if (keepAlive && bridge.info) {
+      renewTimer = setInterval(() => {
+        try { bridge.renewClientFile(bridgeFile, bridge.info.token, { ttlMs: 8 * 60 * 60 * 1000 }); } catch { /* retried next interval */ }
+      }, renewMs);
+      renewTimer.unref();
+    }
     if (!keepAlive) {
       idleTimer = setInterval(() => {
         if (broker.stats().sessions || bridge.connectionCount()) lastBusy = Date.now();
