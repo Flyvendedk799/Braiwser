@@ -1029,6 +1029,41 @@ export async function run(I) {
     const inputSteps = buf ? buf.steps.filter((s) => s.type === 'input').length : 0;
     check('recorder captured click', clickSteps >= 1, 'clicks=' + clickSteps);
     check('recorder captured input', inputSteps >= 1, 'inputs=' + inputSteps);
+    // Each step also carries a durable semantic name, computed by the same probe the agent runtime observes with.
+    const ctaStep = buf ? buf.steps.find((s) => s.type === 'click' && /cta/.test(s.selector || '')) : null;
+    check('a recorded click carries a role + name locator', !!(ctaStep && ctaStep.locator && ctaStep.locator.by === 'role' && ctaStep.locator.role === 'button' && ctaStep.locator.name === 'Click me'), JSON.stringify(ctaStep && ctaStep.locator));
+    const emailStep = buf ? buf.steps.find((s) => s.type === 'input') : null;
+    check('a recorded input carries a locator and never its value', !!(emailStep && emailStep.locator && emailStep.locator.role === 'textbox' && !JSON.stringify(emailStep.locator).includes('hi@test.com')), JSON.stringify(emailStep && emailStep.locator));
+
+    // The page grades notes that carry an exact change (the Verify run's per-note verdicts).
+    const askNotes = (notes) => new Promise((resolve) => {
+      const requestId = 'e2e-nc-' + Math.random().toString(36).slice(2);
+      const timer = setTimeout(() => { wv.removeEventListener('ipc-message', onMsg); resolve(null); }, 5000);
+      function onMsg(e) {
+        if (e.channel !== 'caos:note-checks' || !e.args[0] || e.args[0].requestId !== requestId) return;
+        clearTimeout(timer); wv.removeEventListener('ipc-message', onMsg); resolve(e.args[0]);
+      }
+      wv.addEventListener('ipc-message', onMsg);
+      wv.send('caos:check-notes', { requestId, notes });
+    });
+    const styleEdit = (css, props) => ({ type: 'style', css, details: { props, original: {} } });
+    const NOTE_IDS = ['n-fixed', 'n-open', 'n-regressed', 'n-gone', 'n-written', 'n-copy'];
+    const sampleNotes = (ctaColor) => [
+      { id: 'n-fixed', kind: 'edit', status: 'open', target: { selector: '#cta', tag: 'button' }, edit: styleEdit('color: ' + ctaColor + ';', { color: ctaColor }) },
+      { id: 'n-open', kind: 'edit', status: 'open', target: { selector: '#cta', tag: 'button' }, edit: styleEdit('letter-spacing: 9px;', { 'letter-spacing': '9px' }) },
+      { id: 'n-regressed', kind: 'edit', status: 'resolved', target: { selector: '#cta', tag: 'button' }, edit: styleEdit('letter-spacing: 9px;', { 'letter-spacing': '9px' }) },
+      { id: 'n-gone', kind: 'edit', status: 'open', target: { selector: '#no-such-element', tag: 'button' }, edit: styleEdit('color: red;', { color: 'red' }) },
+      { id: 'n-written', kind: 'element', action: 'fix', status: 'open', target: { selector: '#cta', tag: 'button' } },
+      { id: 'n-copy', kind: 'edit', status: 'open', target: { selector: '#cta', tag: 'button' }, edit: { type: 'text', css: '', details: { before: 'x', after: 'Click me' } } },
+    ];
+    const verdictsOf = (graded) => NOTE_IDS.map((id) => { const it = graded && (graded.items || []).find((x) => x.id === id); return it ? it.verdict : 'none'; }).join(',');
+    {
+      // Earlier sections left live edit previews on this document: the page then shows the PREVIEW of a
+      // fix, so nothing may be graded as fixed or not fixed.
+      const ctaColor = await guest(`getComputedStyle(document.getElementById('cta')).color`);
+      const graded = await askNotes(sampleNotes(ctaColor));
+      check('with a live preview applied, no note is graded', !!(graded && graded.previewActive) && verdictsOf(graded) === 'unknown,unknown,unknown,unknown,unverifiable,unknown', verdictsOf(graded) + ' preview=' + (graded && graded.previewActive));
+    }
     // Save the recording directly (the interactive name prompt is bypassed in e2e).
     const recSteps = buf ? buf.steps.slice() : [];
     I.state.recordingBuffer = null;
@@ -1253,6 +1288,15 @@ export async function run(I) {
       I.navigateTo(fixtureUrl);
       await ready11;
       await sleep(250);
+      {
+        // A freshly loaded document has no previews: the same notes now get real verdicts.
+        const ctaColor = await guest(`getComputedStyle(document.getElementById('cta')).color`);
+        const styleBefore = await guest(`document.getElementById('cta').getAttribute('style')`);
+        const graded = await askNotes(sampleNotes(ctaColor));
+        check('the page grades notes: fixed, not fixed, regressed, missing, written, copy', !!graded && !graded.previewActive && verdictsOf(graded) === 'fixed,not-fixed,regressed,unknown,unverifiable,fixed', verdictsOf(graded) + (graded && graded.error ? ' ' + graded.error : ''));
+        const styleAfter = await guest(`document.getElementById('cta').getAttribute('style')`);
+        check('grading a note leaves the element\'s inline style as it was', styleBefore === styleAfter, String(styleBefore) + ' -> ' + String(styleAfter));
+      }
       const scrollH = await guest('document.body.scrollHeight');
       check('fixture taller than viewport', scrollH > wv.clientHeight, `scrollH=${scrollH} vp=${wv.clientHeight}`);
       const cap = await caos.fs.captureFullPage(wv.getWebContentsId());
