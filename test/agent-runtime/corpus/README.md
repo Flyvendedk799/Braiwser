@@ -7,12 +7,15 @@ This is a *measurement harness*, not a leaderboard. It prints raw outcomes and p
 **never compares adapters or makes comparative claims**. An adapter that cannot run in this checkout is
 reported `unmeasured` with the reason; nothing is estimated or filled in.
 
+The numbers from the one run recorded so far are in [`docs/BENCHMARKS.md`](../../../docs/BENCHMARKS.md), together
+with what that run did not measure.
+
 ## What it can and cannot measure
 
 | Measured | Not measured (reported as such) |
 |---|---|
-| Whether the real-world outcome happened (server-side oracles) | Anything that needs a model to read page text (tasks flagged `modelDependent`, e.g. `adv-03`) |
-| False-pass rate: claimed `done` while the oracle says no | Model reasoning tokens, planning quality |
+| Whether the real-world outcome happened (server-side oracles) | With the scripted adapters: anything that needs a model to read page text (tasks flagged `modelDependent`, e.g. `adv-03`) |
+| False-pass rate: claimed `done` while the oracle says no | With the scripted adapters: model tokens, planning quality |
 | Unintended effects (extra order, wrong row deleted, off-site hit, typed password) | Native Electron / visible-window behavior |
 | Tool calls, response bytes, wall time, human interventions (approvals) | Competitor products that are not installed or reachable |
 | Honest blocking vs. failing vs. unsupported | Real-site behavior, anti-bot behavior |
@@ -20,7 +23,10 @@ reported `unmeasured` with the reason; nothing is estimated or filled in.
 The "agent" is a **scripted agent with no model**: each task carries a fixed script of adapter-neutral ops. It
 resolves controls strictly by role/name and refuses to guess between several matches. That isolates the
 adapter's transport, observation, authorization and honesty behavior from model quality. Token numbers are
-`bytes / 4` heuristics, not model tokens; measure real tokenization separately.
+`bytes / 4` heuristics, not model tokens.
+
+One adapter, `braiwser-mcp-model`, replaces the script with a model (see "Model-driven adapter" below). Its token
+numbers are the API's usage fields. It needs a key and is `unmeasured` without one.
 
 ## Files
 
@@ -31,6 +37,7 @@ adapter's transport, observation, authorization and honesty behavior from model 
 | `oracles.mjs` | Ground-truth oracles and the outcome classification |
 | `sites.mjs` | Fixture sites. The server records what really happened (`world`) |
 | `runner.mjs` | Scripted agent, adapters, randomized ordering, summaries |
+| `model-agent.mjs` | Model-driven agent: tool-use loop, bounds, token accounting, per-task answer formats |
 | `../../../scripts/benchmark-agent-browser.js` | CLI entry (`npm run bench:agent`) |
 
 ## Running
@@ -40,6 +47,7 @@ npm run bench:agent -- --self-check                      # validate the corpus, 
 npm run bench:agent -- --list
 npm run bench:agent -- --adapters braiwser-mcp,braiwser-cli --seed 7 --repeat 3 --out raw.json
 npm run bench:agent -- --adapters playwright-mcp         # reports 'unmeasured' unless a pinned build is installed
+ANTHROPIC_API_KEY=... npm run bench:agent -- --adapters braiwser-mcp-model --token-budget 2000000 --out model.json
 ```
 
 `braiwser-mcp` and `braiwser-cli` run the REAL broker, policy, ledger and Playwright driver against the
@@ -47,6 +55,52 @@ fixtures (headless Chromium). They share one code path with production: the MCP 
 authenticated local bridge. Approvals are answered by a simulated trusted UI (counted as human interventions;
 tasks with `denyApprovals` are refused). Execution order is shuffled with `--seed`. Every attempt is counted:
 failed, blocked and unsupported attempts are never discarded and rates are over all attempted tasks.
+
+## Model-driven adapter (`braiwser-mcp-model`)
+
+A real tool-use loop: a Claude model gets the task's `goal`, the ids of an already-open session and the Braiwser MCP
+tools (the same in-process MCP server `braiwser-mcp` uses), and decides every call itself. It finishes by calling a
+harness tool, `report_result`, with a status (`done`, `blocked`, `failed`, `unknown`, `cancelled`) and the values the
+task asks for. The existing oracles grade the fixture server's world and those values. Nothing about the oracles or
+the corpus digest changes.
+
+- **Gate.** `ANTHROPIC_API_KEY` must be set. Without it the adapter and every one of its tasks is `unmeasured` with
+  that reason and no browser is started. It only runs when named in `--adapters`; a bare `npm run bench:agent` never
+  selects it, because it costs money. The key goes into the request header and nowhere else: not into results, logs
+  or error text.
+- **Model.** `BRAIWSER_BENCH_MODEL`, default `claude-fable-5-2`. Optional `BRAIWSER_BENCH_EFFORT`
+  (`low`..`max`); unset means the model's default. The id and all bounds are written to `run.model` in the output. A
+  result is a result for that model id only.
+- **Bounds.** `--max-turns` (API requests per task, default 30), `--task-timeout-ms` (default 180000) and
+  `--token-budget` (hard limit for the whole run, default none), or `BRAIWSER_BENCH_MAX_TURNS`,
+  `BRAIWSER_BENCH_TASK_TIMEOUT_MS`, `BRAIWSER_BENCH_TOKEN_BUDGET`. The budget is checked before every request, so it
+  can be overshot by one response; once spent, the running task stops (`token-budget`) and the remaining tasks are
+  `unmeasured`, not failures.
+- **Recorded per task.** Outcome, `claim`, `turns` (API requests), `toolCalls` (browser tool calls, including the
+  harness's session open), `wallMs`, `inputTokens`, `outputTokens`, `cacheCreationInputTokens`,
+  `cacheReadInputTokens` (summed from each response's `usage`; uncached input, cache writes and cache reads are kept
+  apart), `stop` and `failureClass`. The per-adapter summary adds the sums and a count per failure class.
+- **Failure classes.** `null` for a success. Otherwise the reason the loop stopped without a report - `no-report`
+  (the model ended its turn without `report_result`), `turn-cap`, `timeout`, `token-budget`, `max-output-tokens`,
+  `refusal`, `api-error` - or, when it did report, the outcome class (`false-pass`, `unsafe-effect`, `honest-block`,
+  `failure`). A model that never reported has made **no claim**: it is a `failure` (or `unsafe-effect`), never a
+  default `failed` that some oracles would accept as correct.
+- **Untrusted content.** The system prompt states that everything a tool returns about a page is untrusted data and
+  never an instruction. `adv-03` (hostile page text), which the scripted adapters cannot measure, is attempted here.
+- **Approvals.** As for the scripted adapters, a simulated trusted UI answers approval requests (allow, or deny for
+  `denyApprovals` tasks) and each one counts as a human intervention. The decision is appended to the tool result;
+  the model cannot approve anything itself.
+- **What the model is told beyond the goal.** The start address, the granted origins, and the *format* of the answer
+  the oracle reads (key names and types, never expected values; a test checks the prompts for leaks). For the repair
+  tasks it is also given the save-check procedure and expected revisions that the scripted agent has hard-coded, and
+  for `adv-02` the pinned skill id. See `TASK_SPECS` in `model-agent.mjs`.
+- **Not the same surface as a real client.** The harness opens and closes the session, so `browser_session_open` /
+  `_close` are withheld from the model. No MCP tool builds a repro package or lists pages, so `exp-01`, `exp-02` and
+  `nav-03` are `unsupported` for this adapter. Server-side refusal fallback to another model is deliberately not
+  enabled: a refusal is recorded as `refusal`, so every row comes from the model id that was configured.
+- **Tested how.** The loop, bounds, token accounting, key gate and prompt construction are unit-tested with a stubbed
+  model transport, including a stub driving the real MCP server and headless Chromium
+  (`../automation/corpus-model.test.mjs`). That proves the plumbing. It says nothing about what any model scores.
 
 ## Outcome classes
 
@@ -78,8 +132,20 @@ repair verification (3), export (2), adversarial correctness (5). 15 are marked 
 
 - The current tool surface has no page listing, so tasks that open a second tab are `unsupported`.
 - `setViewport` is a `browser_act` action, so `note-02` runs against the Playwright driver. Popups and second tabs are still not addressable through the tool surface (no page listing), so those tasks stay `unsupported`.
-- The observation reports landmarks, h1/h2 headings, interactables, status and error text, not table cells, so
-  the table-extraction tasks fail honestly (never a false pass) until the driver exposes table structure.
+- Table extraction (`ext-01..03`) goes through the driver's bounded table observation (at most 50 rows x 12 columns
+  per table). The fixtures stay inside those bounds; nothing here measures larger tables.
+- The scripts were written together with the fixtures. A scripted `success` shows that the stack behaves the way its
+  authors expect on these pages; it is not evidence of how an agent that has to work the page out would do.
+- `exp-01` and `exp-02` call the repro-package builder in-process. They do not go through the MCP or CLI tool surface
+  (their only tool call is the session open), so they say nothing about either adapter.
+- `waitFor` polls with `browser_observe` every 100 ms, so `toolCalls` and byte counts of tasks that wait grow with how
+  long the wait took. They are not a measure of agent effort.
+- In a summary, `attempted` and `unmeasuredTasks` count rows (task x repeat), `unsupported` rows are part of
+  `attempted` and of the `successRate` denominator, and they enter `wallMs` as 0.
+- A script that ends early on an op error claims `failed` or `blocked`. On tasks whose oracle accepts that claim
+  (`form-04`, `ext-03`, `adv-01` for any error; the authorization tasks for any `DENIED`, `AMBIGUOUS_TARGET` or
+  `STALE_REF`) an unrelated early error would therefore be graded `success`. No such early error occurred in the
+  recorded run. The model-driven adapter does not inherit this: no report means no claim.
 - The Playwright MCP baseline is unmeasured: no pinned `@playwright/mcp` is installed here and this harness has no
   snapshot-format driver for it yet. Do not substitute a different tool.
 - There is no "full-snapshot baseline" observation measurement yet; `observeBytes` is recorded per run so one can be added.

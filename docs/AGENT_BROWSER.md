@@ -244,4 +244,14 @@ What the MCP/CLI surface adds on top (verified against the real broker unless no
 node --test "test/agent-runtime/automation/*.test.mjs"      # adapters, bridge, skills, corpus, real-broker integration
 npm run bench:agent -- --self-check                        # validate the 30-task corpus
 npm run bench:agent -- --adapters braiwser-mcp,braiwser-cli
+ANTHROPIC_API_KEY=... npm run bench:agent -- --adapters braiwser-mcp-model --token-budget 2000000   # a model drives the tools
 ```
+
+`braiwser-mcp` and `braiwser-cli` use a scripted agent (no model). `braiwser-mcp-model` hands the task goal and the
+MCP tools to a Claude model (`BRAIWSER_BENCH_MODEL`, default `claude-fable-5-2`) and lets it drive; the same oracles
+grade it and its token counts are the API's usage fields. It needs `ANTHROPIC_API_KEY`, runs only when named, and is
+reported `unmeasured` without a key. Its loop is unit-tested against a stubbed model
+(`test/agent-runtime/automation/corpus-model.test.mjs`); **it has not been run against a real model yet.**
+
+The one scripted run that has been recorded, with its raw counts, the machine it ran on and the list of what was not
+measured, is in [`BENCHMARKS.md`](BENCHMARKS.md). It is a record of one run, not a claim about other machines.

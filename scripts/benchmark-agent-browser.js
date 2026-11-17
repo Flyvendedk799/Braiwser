@@ -9,6 +9,12 @@
 //   npm run bench:agent -- --self-check
 //   npm run bench:agent -- --adapters braiwser-mcp,braiwser-cli --seed 7 --repeat 3 --out bench.json
 //   npm run bench:agent -- --tasks form-01-save-display-name --adapters braiwser-mcp
+//
+// The model-driven adapter (a Claude model drives the MCP tools itself) only runs
+// when it is named, needs ANTHROPIC_API_KEY and is "unmeasured" without it:
+//   ANTHROPIC_API_KEY=... npm run bench:agent -- --adapters braiwser-mcp-model --token-budget 2000000 --out model.json
+// Model id: BRAIWSER_BENCH_MODEL. Bounds: --max-turns, --task-timeout-ms, --token-budget
+// (or BRAIWSER_BENCH_MAX_TURNS / _TASK_TIMEOUT_MS / _TOKEN_BUDGET). The key is never printed.
 const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
@@ -17,7 +23,12 @@ const corpusDir = path.join(__dirname, '..', 'test', 'agent-runtime', 'corpus');
 const load = (name) => import(pathToFileURL(path.join(corpusDir, name)).href);
 
 function parse(argv) {
-  const out = { adapters: null, tasks: null, seed: 1, repeat: 1, out: null, selfCheck: false, list: false };
+  const out = { adapters: null, tasks: null, seed: 1, repeat: 1, out: null, selfCheck: false, list: false, model: {} };
+  const positive = (flag, text) => {
+    const n = Number(text);
+    if (!Number.isInteger(n) || n < 1) throw new Error(`${flag} must be a positive integer`);
+    return n;
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     const next = () => {
@@ -29,6 +40,9 @@ function parse(argv) {
     else if (a === '--seed') out.seed = Number(next());
     else if (a === '--repeat') out.repeat = Number(next());
     else if (a === '--out') out.out = next();
+    else if (a === '--max-turns') out.model.maxTurns = positive(a, next());
+    else if (a === '--task-timeout-ms') out.model.taskTimeoutMs = positive(a, next());
+    else if (a === '--token-budget') out.model.tokenBudget = positive(a, next());
     else if (a === '--self-check') out.selfCheck = true;
     else if (a === '--list') out.list = true;
     else throw new Error(`unknown argument ${a}`);
@@ -53,7 +67,7 @@ async function main() {
   }
   const runner = await load('runner.mjs');
   const report = await runner.runCorpus({
-    adapterNames: args.adapters, taskIds: args.tasks, seed: args.seed, repeat: args.repeat,
+    adapterNames: args.adapters, taskIds: args.tasks, seed: args.seed, repeat: args.repeat, modelOptions: args.model,
     log: (line) => process.stderr.write(`${line}\n`),
   });
   const text = `${JSON.stringify(report, null, 2)}\n`;
