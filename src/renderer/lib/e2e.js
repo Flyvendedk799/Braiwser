@@ -1380,6 +1380,222 @@ export async function run(I) {
     };
 
 
+    // --- 17b. The reload restored exactly this page's notes ---
+    {
+      const saved = (await caos.annotations.bySession(session.id)).filter((a) => a.url === fixtureUrl);
+      const pins = await guest(pinsJs);
+      check('restored pins account for every saved note on this page', saved.length >= 1 && pins === saved.length, `pinned=${pins} notes=${saved.length}`);
+    }
+
+    // --- 17c. Note lifecycle through the real Notes panel (priority / edit / status / delete) ---
+    {
+      await closeModals();
+      I.runCommand('panel.notes');
+      const probe = await caos.annotations.create({ sessionId: session.id, kind: 'element', action: 'comment', note: 'lifecycle probe', url: fixtureUrl, title: 'E2E', target: { selector: '#email' } });
+      await syncNotes();
+      I.refreshPins();
+      await sleep(250);
+      const pinsWith = await guest(pinsJs);
+      const saved = async () => (await caos.annotations.bySession(session.id)).find((a) => a.id === probe.id) || null;
+      const card = () => Array.from(document.querySelectorAll('.notes-list .note')).find((n) => /lifecycle probe|edited in the panel/.test(n.textContent || '')) || null;
+      const act = (title) => { const c = card(); const b = c && c.querySelector(`.note-act[title="${title}"]`); if (b) b.click(); return !!b; };
+      check('a saved note shows as a card in the Notes panel', !!card());
+
+      const othersCritical = I.state.annotations.some((a) => a.id !== probe.id && a.priority === 'critical');
+      const prio = card() && card().querySelector('.prio-select');
+      if (prio) { prio.value = 'critical'; prio.dispatchEvent(new Event('change', { bubbles: true })); }
+      await until(async () => ((await saved()) || {}).priority === 'critical', 3000);
+      const afterPrio = await saved();
+      check('priority set on the card persists', !!afterPrio && afterPrio.priority === 'critical', afterPrio && afterPrio.priority);
+      check('…and the re-rendered card shows it', !!card() && card().querySelector('.prio-select').value === 'critical');
+      const promptOut = await caos.export.build('prompt', session.id);
+      const firstItem = ((promptOut && promptOut.content) || '').match(/^1\. .*$/m);
+      check('…and the prompt export leads with the critical note', othersCritical || (!!firstItem && /lifecycle probe/.test(firstItem[0]) && /priority: critical/.test(firstItem[0])), firstItem ? firstItem[0].slice(0, 90) : 'no numbered items');
+
+      act('Edit note');
+      await sleep(60);
+      let ta = document.querySelector('.notes-list textarea.note-edit');
+      check('Edit opens the note text in place', !!ta && ta.value === 'lifecycle probe');
+      if (ta) {
+        ta.value = 'abandoned edit';
+        ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      }
+      await sleep(200);
+      const afterEsc = await saved();
+      check('Escape abandons the edit', !!afterEsc && afterEsc.note === 'lifecycle probe' && !document.querySelector('.notes-list textarea.note-edit'), afterEsc && afterEsc.note);
+      act('Edit note');
+      await sleep(60);
+      ta = document.querySelector('.notes-list textarea.note-edit');
+      if (ta) {
+        ta.value = '  edited in the panel  ';
+        ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }));
+      }
+      await until(async () => ((await saved()) || {}).note === 'edited in the panel', 3000);
+      const afterEdit = await saved();
+      check('Ctrl+Enter saves the edited note text', !!afterEdit && afterEdit.note === 'edited in the panel', afterEdit && JSON.stringify(afterEdit.note));
+      check('…without losing the priority', !!afterEdit && afterEdit.priority === 'critical');
+
+      act('Mark resolved');
+      await until(async () => ((await saved()) || {}).status === 'resolved', 3000);
+      const afterResolve = await saved();
+      check('Mark resolved persists', !!afterResolve && afterResolve.status === 'resolved', afterResolve && afterResolve.status);
+      check('…and the card is shown as resolved', !!card() && card().classList.contains('resolved') && !!card().querySelector('.note-act[title="Reopen"]'));
+      act('Reopen');
+      await until(async () => ((await saved()) || {}).status === 'open', 3000);
+      const afterReopen = await saved();
+      check('Reopen puts it back to open', !!afterReopen && afterReopen.status === 'open' && !!card() && !card().classList.contains('resolved'), afterReopen && afterReopen.status);
+
+      act('Delete');
+      await sleep(150);
+      let dlg = topModal();
+      check('deleting a note asks first', !!dlg && /Delete note/.test(dlg.textContent || ''));
+      const cancelBtn = dlg && dlg.querySelector('.modal-footer .btn-ghost');
+      if (cancelBtn) cancelBtn.click();
+      await sleep(320);
+      check('cancelling the confirmation keeps the note', !!(await saved()) && !!card());
+      act('Delete');
+      await sleep(150);
+      dlg = topModal();
+      const confirmBtn = dlg && dlg.querySelector('.modal-footer .btn-danger');
+      if (confirmBtn) confirmBtn.click();
+      await until(async () => !(await saved()), 3000);
+      await sleep(320);
+      check('confirming deletes the note', !(await saved()) && !card() && !I.state.annotations.some((a) => a.id === probe.id));
+      const pinsWithout = await guest(pinsJs);
+      check('…and its pin leaves the page', pinsWithout === pinsWith - 1, `${pinsWith}->${pinsWithout}`);
+      if (await saved()) { await caos.annotations.remove(probe.id); await syncNotes(); I.refreshPins(); }
+    }
+
+    // --- 17d. Recording editor, driven through the real dialog (reorder / delete / cancel / save) ---
+    {
+      await closeModals();
+      const er = await caos.recordings.create({ projectId: project.id, name: 'E2E Editor UI', startUrl: fixtureUrl, steps: [
+        { type: 'navigate', url: fixtureUrl, ts: 1 },
+        { type: 'click', selector: '#cta', ts: 2 },
+        { type: 'input', selector: '#email', value: 'edited@order.test', ts: 3 },
+        { type: 'click', selector: '#login-btn', ts: 4 },
+      ] });
+      await I.refreshRecordings();
+      const rowsOf = (d) => (d ? Array.from(d.querySelectorAll('.step-row')) : []);
+      const descs = (d) => rowsOf(d).map((r) => (r.querySelector('.step-desc') || {}).textContent || '');
+      const press = (d, i, title) => { const b = rowsOf(d)[i] && rowsOf(d)[i].querySelector(`.sr-act[title="${title}"]`); if (b) b.click(); return !!b; };
+      const shape = (steps) => (steps || []).map((s) => s.type + (s.selector || '')).join(',');
+
+      await I.editRecording(er);
+      await sleep(150);
+      let dlg = topModal();
+      check('recording editor lists every step', !!dlg && /Edit recording/.test(dlg.textContent || '') && rowsOf(dlg).length === 4, 'rows=' + rowsOf(dlg).length);
+      press(dlg, 1, 'Delete');
+      check('deleting a step updates the editor', rowsOf(dlg).length === 3 && !descs(dlg).some((t) => /#cta/.test(t)), descs(dlg).join(' | '));
+      const cancel = dlg && dlg.querySelector('.modal-footer .btn-ghost');
+      if (cancel) cancel.click();
+      await sleep(320);
+      const untouched = await caos.recordings.get(er.id);
+      check('Cancel discards the edits', shape(untouched.steps) === 'navigate,click#cta,input#email,click#login-btn', shape(untouched.steps));
+
+      await I.editRecording(er);
+      await sleep(150);
+      dlg = topModal();
+      press(dlg, 1, 'Move down'); // navigate, input, click #cta, click #login-btn
+      press(dlg, 3, 'Delete'); //    navigate, input, click #cta
+      press(dlg, 0, 'Move up'); //   already first: must not wrap or throw
+      press(dlg, 2, 'Move down'); // already last: likewise
+      const d = descs(dlg);
+      check('the editor shows the new order', d.length === 3 && /^navigate/.test(d[0]) && /^input #email/.test(d[1]) && /^click #cta/.test(d[2]), d.join(' | '));
+      const save = dlg && dlg.querySelector('.modal-footer .btn-primary');
+      if (save) save.click();
+      await until(async () => ((await caos.recordings.get(er.id)).steps || []).length === 3, 3000);
+      const after = await caos.recordings.get(er.id);
+      check('Save persists the reorder and the delete', shape(after.steps) === 'navigate,input#email,click#cta', shape(after.steps));
+      check('…and leaves the surviving steps intact', after.steps[1].value === 'edited@order.test' && after.steps[0].url === fixtureUrl);
+      await sleep(320);
+
+      // The edited journey is what replays.
+      const fresh = I.state.recordings.find((r) => r.id === er.id) || after;
+      I.selectRecording(fresh);
+      I.state.settings.replayDelayMs = 20;
+      const rep = await I.replaySelected();
+      const typed = await guest("document.getElementById('email').value");
+      check('the edited recording replays in its new order', !!rep && rep.status === 'passed' && rep.total === 3 && typed === 'edited@order.test', rep && `${rep.status} ${rep.passed}/${rep.total} email=${typed}`);
+      await caos.recordings.remove(er.id);
+      await I.refreshRecordings();
+    }
+
+    // --- 17e. Replay guards and error paths (nothing selected / empty / page will not load / busy / cancel) ---
+    {
+      await closeModals();
+      I.state.settings.replayDelayMs = 20;
+      const mkRec = (name, steps) => caos.recordings.create({ projectId: project.id, name, startUrl: fixtureUrl, steps });
+
+      I.selectRecording(null);
+      const none = await I.replaySelected();
+      check('Replay with no recording selected does nothing', none === undefined && !I.state.replaying);
+
+      const emptyRec = await mkRec('E2E Empty', []);
+      await I.refreshRecordings();
+      I.selectRecording(emptyRec);
+      const emptyRun = await I.replaySelected();
+      check('an empty recording is refused with a message', emptyRun === undefined && !I.state.replaying && toastSeen(/no steps/i));
+      check('…and no run is recorded against it', !(await caos.recordings.get(emptyRec.id)).lastRun);
+
+      const missingUrl = fixtureUrl.replace('fixture.html', 'no-such-page.html');
+      const navRec = await mkRec('E2E Nav Fail', [
+        { type: 'navigate', url: missingUrl, ts: 1 },
+        { type: 'click', selector: '#cta', ts: 2 },
+        { type: 'assert', kind: 'exists', selector: '#cta', ts: 3 },
+      ]);
+      await I.refreshRecordings();
+      I.selectRecording(navRec);
+      const navRun = await I.replaySelected();
+      const navStep = navRun && navRun.steps[0];
+      check('replay stops at a page that will not load', !!navRun && navRun.status === 'failed' && !!navStep && navStep.status === 'failed' && !!navStep.error,
+        navRun && `${navRun.status} :: ${navStep && navStep.status} :: ${navStep && navStep.error}`);
+      check('…and the steps after it are never reported as passed', !!navRun && navRun.passed === 0 && navRun.total === 3 && navRun.steps.slice(1).every((s) => s.status === 'skipped' && !s.ok),
+        navRun && navRun.steps.map((s) => s.status).join(','));
+      const navStored = await caos.recordings.get(navRec.id);
+      check('…and the failed run is what gets saved', !!navStored.lastRun && navStored.lastRun.status === 'failed', navStored.lastRun && navStored.lastRun.status);
+      check('…and the replay overlay is gone', !I.state.replaying && !document.querySelector('.stage-overlay.show'));
+      await closeModals();
+
+      const goodRec = await mkRec('E2E Busy', [
+        { type: 'navigate', url: fixtureUrl, ts: 1 },
+        { type: 'click', selector: '#cta', ts: 2 },
+      ]);
+      await I.refreshRecordings();
+      I.selectRecording(goodRec);
+      const [first, second] = await Promise.all([I.replaySelected(), I.replaySelected()]);
+      check('a second Replay while one is running is refused', !!first && first.status === 'passed' && second === undefined && !I.state.replaying, first && first.status);
+      check('…and the page recovered from the failed load', await guest(`location.href === ${JSON.stringify(fixtureUrl)} && !!document.getElementById('cta')`));
+
+      const slowRec = await mkRec('E2E Cancel', [
+        { type: 'navigate', url: fixtureUrl, ts: 1 },
+        { type: 'click', selector: '#cta', ts: 2 },
+        { type: 'click', selector: '#cta', ts: 3 },
+        { type: 'click', selector: '#cta', ts: 4 },
+        { type: 'click', selector: '#cta', ts: 5 },
+        { type: 'click', selector: '#cta', ts: 6 },
+      ]);
+      await I.refreshRecordings();
+      I.selectRecording(slowRec);
+      I.state.settings.replayDelayMs = 700; // slow enough to cancel mid-run
+      const pending = I.replaySelected();
+      await until(() => I.state.replaying && !!document.querySelector('.stage-overlay.show'), 4000);
+      await sleep(300);
+      const cancelBtn = document.querySelector('.stage-overlay .btn');
+      if (cancelBtn) cancelBtn.click();
+      const cancelled = await pending;
+      I.state.settings.replayDelayMs = 20;
+      check('cancelling a replay reports it as cancelled', !!cancelled && cancelled.status === 'cancelled' && !I.state.replaying, cancelled && `${cancelled.status} ${cancelled.passed}/${cancelled.total}`);
+      check('…with the steps that never ran not counted as passed', !!cancelled && cancelled.passed < cancelled.total && cancelled.steps.length === 6 && cancelled.steps.slice(-1)[0].status !== 'passed',
+        cancelled && cancelled.steps.map((s) => s.status).join(','));
+      const cancelStored = await caos.recordings.get(slowRec.id);
+      check('…and saved as cancelled, never as passed', !!cancelStored.lastRun && cancelStored.lastRun.status === 'cancelled', cancelStored.lastRun && cancelStored.lastRun.status);
+
+      for (const r of [emptyRec, navRec, goodRec, slowRec]) await caos.recordings.remove(r.id);
+      await I.refreshRecordings();
+      await closeModals();
+    }
+
     // --- 17f. Console capture is redacted and bounded on its way out ---
     {
       const noisy = [
