@@ -359,6 +359,12 @@ function recordingToWorkflow(recording, options = {}) {
         return;
       }
       case 'click': {
+        // The browser forwards a label click to its control, and the recorder captured that
+        // control's own click as the next step. Dropping the label click loses no action.
+        if (raw.via === 'label' && !raw.locator) {
+          dropped.push({ stepIndex: index, type: 'click', reason: 'Click on a label; the control it activates is recorded as its own step.' });
+          return;
+        }
         const t = needLocator(); if (!t) return;
         out.push({ id: nextId(), type: 'click', target: t });
         return;

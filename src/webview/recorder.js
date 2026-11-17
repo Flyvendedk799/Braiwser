@@ -15,6 +15,11 @@
 //   { type:'input', control:'secret', secret:true, placeholder:'{{secret}}',
 //     selector, tag, text, ... }          // NO `value` key at all
 //
+// Semantic locators. Click / input / key steps also carry `locator` when the
+// element has a unique test id or a unique role + accessible name
+// (semantic-locator.js). `selector` stays the in-app replay anchor; `locator` is
+// what lets a journey become a verified agent run. It is omitted, never guessed.
+//
 // Replay supplies the real credential at run time (see replay.js `secrets`).
 // The coalescing/replace path produces the same value-free shape; for a secret
 // field it emits nothing after the first step, since there is nothing to update.
@@ -45,6 +50,7 @@
 const anchor = require('./anchor');
 const cursor = require('./cursor');
 const { isSecretField } = require('./secret-field');
+const semantic = require('./semantic-locator');
 
 let redact = null;
 try {
@@ -130,6 +136,27 @@ function describeTarget(el) {
   return out;
 }
 
+// `locator` only when one exists: a missing key means "no durable name", which the
+// workflow migration reports per step instead of falling back to a CSS path.
+function withLocator(step, el) {
+  const locator = semantic.locatorFor(el, { action: true });
+  if (locator) step.locator = locator;
+  else if (step.type === 'click' && viaLabel(el)) step.via = 'label';
+  return step;
+}
+
+// A click on a <label> is forwarded by the browser to its control, which the
+// recorder captures as its own click. The label click is kept for in-app replay
+// and marked so a workflow migration can drop it instead of refusing the journey.
+function viaLabel(el) {
+  try {
+    const label = el.closest && el.closest('label');
+    return !!(label && label.control);
+  } catch (_e) {
+    return false;
+  }
+}
+
 function add(target, type, fn) {
   const opts = true; // capture phase
   target.addEventListener(type, fn, opts);
@@ -139,12 +166,12 @@ function add(target, type, fn) {
 function onClick(e) {
   if (isOwnUI(e.target)) return;
   flushInput();
-  emit({
+  emit(withLocator({
     type: 'click',
     selector: anchor.cssPath(e.target),
     position: { x: e.clientX, y: e.clientY },
     ...describeTarget(e.target),
-  });
+  }, e.target));
 }
 
 function controlOf(t, tag) {
@@ -169,6 +196,14 @@ function onInputEvt(e) {
     control,
     ...describeTarget(t),
   };
+
+  // Typing fires per keystroke; the field's name does not change while it is
+  // being typed into, so the coalesced step keeps the locator it started with.
+  if (control === 'text' && lastInput && lastInput.selector === selector) {
+    if (lastInput.step.locator) step.locator = lastInput.step.locator;
+  } else {
+    withLocator(step, t);
+  }
 
   // Classify BEFORE touching `.value`: attributes first, then whatever the
   // shared redactor can tell from the step's own hints. Booleans/fixed choices
@@ -228,12 +263,12 @@ function onKeyDown(e) {
   if (isOwnUI(e.target)) return;
   if (e.key !== 'Enter') return;
   flushInput();
-  emit({
+  emit(withLocator({
     type: 'key',
     selector: anchor.cssPath(e.target),
     key: 'Enter',
     ...describeTarget(e.target),
-  });
+  }, e.target));
 }
 
 function emitScroll() {

@@ -83,6 +83,7 @@ const { ipcRenderer } = require('electron');
 const anchor = require('./anchor');
 const elementExport = require('./element-export');
 const recorder = require('./recorder');
+const semanticLocator = require('./semantic-locator');
 const replay = require('./replay');
 const audit = require('./audit');
 const dom = require('./inspector.dom');
@@ -322,7 +323,11 @@ const history = require('./inspector.history');
       // Point at an element; the host opens the assertion editor pre-filled.
       try {
         anchor.highlight(el, { duration: 700, color: '#c792ea' });
-        ipcRenderer.sendToHost('caos:assert-pick', anchor.describe(el));
+        const picked = anchor.describe(el);
+        // Durable name for the assertion target, when one exists (see semantic-locator.js).
+        const locator = semanticLocator.locatorFor(el, { action: false });
+        if (locator) picked.locator = locator;
+        ipcRenderer.sendToHost('caos:assert-pick', picked);
       } catch (_e) {
         /* ignore */
       }

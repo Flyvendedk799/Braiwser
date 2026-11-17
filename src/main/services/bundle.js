@@ -272,6 +272,20 @@ function validateAnnotation(a, i, sessionIds, dropped, warnings) {
 
 const STEP_STRING_FIELDS = { selector: LIMITS.selector, tag: 40, text: LIMITS.stepText, key: 40, title: LIMITS.name, label: LIMITS.name, name: LIMITS.name };
 
+// A semantic locator survives an import only in its exact closed shape; anything else is
+// dropped (the step keeps its selector), never repaired.
+function cleanLocator(l) {
+  if (!isObj(l)) return null;
+  const ok = (v) => typeof v === 'string' && v.length >= 1 && v.length <= 200;
+  if ((l.by === 'testId' || l.by === 'label') && ok(l.value) && Object.keys(l).length === 2) return { by: l.by, value: l.value };
+  if (l.by === 'role' && ok(l.role)) {
+    const keys = Object.keys(l).length;
+    if (l.name === undefined && keys === 2) return { by: 'role', role: l.role };
+    if (ok(l.name) && keys === 3) return { by: 'role', role: l.role, name: l.name };
+  }
+  return null;
+}
+
 function validateStep(step) {
   if (!isObj(step)) return { error: 'not an object' };
   if (typeof step.type !== 'string' || !STEP_TYPES.includes(step.type)) return { error: 'unsupported step type' };
@@ -293,6 +307,9 @@ function validateStep(step) {
     const url = cleanUrl(step.url);
     if (url) out.url = url;
   }
+  if (step.via === 'label') out.via = 'label';
+  const locator = cleanLocator(step.locator);
+  if (locator) out.locator = locator;
   const v = step.value;
   if (typeof v === 'string') out.value = v.slice(0, LIMITS.value);
   else if (typeof v === 'boolean' || finiteIn(v, -1e15, 1e15)) out.value = v;

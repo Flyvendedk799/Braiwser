@@ -89,6 +89,16 @@
               "properties": {
                 "type": { "enum": ["navigate", "click", "input", "key", "scroll", "assert"] },
                 "selector": { "type": "string", "maxLength": 2000 },
+                "locator": {
+                  "description": "Durable semantic name for the step's element (test id, or role + accessible name). Present only when it matched exactly one element at capture time.",
+                  "anyOf": [
+                    { "type": "object", "required": ["by", "value"],
+                      "properties": { "by": { "enum": ["testId", "label"] }, "value": { "type": "string", "minLength": 1, "maxLength": 200 } } },
+                    { "type": "object", "required": ["by", "role"],
+                      "properties": { "by": { "const": "role" }, "role": { "type": "string", "minLength": 1, "maxLength": 200 }, "name": { "type": "string", "minLength": 1, "maxLength": 200 } } }
+                  ]
+                },
+                "via": { "enum": ["label"], "description": "A click on a <label>; the control it activates is recorded as its own step." },
                 "control": { "enum": ["text", "select", "multiselect", "checkbox", "radio", "secret"] },
                 "secret": { "type": "boolean" },
                 "placeholder": { "type": "string", "maxLength": 40 },

@@ -2078,7 +2078,7 @@ function onAssertPick(picked) {
     toast('Start recording first, then add assertions', 'warn');
     return;
   }
-  openAssertEditor({ selector: picked && picked.selector, sampleText: picked && picked.text }, (step) => {
+  openAssertEditor({ selector: picked && picked.selector, sampleText: picked && picked.text, locator: picked && picked.locator }, (step) => {
     state.recordingBuffer.steps.push(step);
     toast(`Assertion added — ${step.kind}`, 'success');
   });
@@ -2120,14 +2120,19 @@ function openAssertEditor(prefill, onSave) {
           const k = kinds.find((x) => x.id === kindId) || {};
           if (k.selector && !selInput.value.trim()) { toast('A selector is required', 'warn'); return true; }
           if (k.expected && !expInput.value.trim()) { toast('An expected value is required', 'warn'); return true; }
-          onSave({
+          const selector = k.selector ? selInput.value.trim() : undefined;
+          const step = {
             type: 'assert',
             kind: kindId,
-            selector: k.selector ? selInput.value.trim() : undefined,
+            selector,
             op: k.ops && k.ops.length ? opSel.value : undefined,
             expected: k.expected ? expInput.value.trim() : undefined,
             ts: Date.now(),
-          });
+          };
+          // The picked element's durable name travels with the step only while the
+          // selector still points at that element; an edited selector drops it.
+          if (prefill && prefill.locator && selector && selector === prefill.selector) step.locator = prefill.locator;
+          onSave(step);
         },
       },
     ],
