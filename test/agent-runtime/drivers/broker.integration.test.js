@@ -129,13 +129,18 @@ integ('request-level policy: a cross-origin frame outside the grant never reache
   assert.ok(o.nodes.some((n) => n.name === 'Inner action'), 'the granted same-origin frame is observed');
 });
 
-integ('a redirect to a foreign origin is not reported as success (arrival check), even though hops are not intercepted', async (s) => {
+integ('a redirect to a foreign origin is stopped at the hop: the foreign server is never contacted and nothing is reported as success', async (s) => {
   const o = await observe(s);
-  const r = await ui.act({ sessionId: s.sessionId, pageId: s.pageId, documentEpoch: o.documentEpoch, operationId: `op-${++op}`, action: { kind: 'navigate', url: `${origin.origin}/redirect?to=${encodeURIComponent(`${other.origin}/task.html`)}` } });
-  // KNOWN LIMITATION (capabilities.notes.requestInterception): Playwright does not route redirect hops, so the
-  // foreign server IS contacted. What must hold is that the broker never reports the destination as a success.
-  assert.notEqual(r.status, 'verified', JSON.stringify(r));
-  assert.equal(r.code, 'DESTINATION_DENIED');
+  const before = other.requests.length;
+  const r = await ui.act({ sessionId: s.sessionId, pageId: s.pageId, documentEpoch: o.documentEpoch, operationId: `op-${++op}`, action: { kind: 'navigate', url: `${origin.origin}/redirect?to=${encodeURIComponent(`${other.origin}/task.html`)}` } })
+;
+  // The grant's request filter is asked about the hop itself (capabilities.notes.requestInterception).
+  assert.equal(other.requests.length, before, 'the redirect hop never reached the foreign origin');
+  // The first, granted hop WAS sent, so the receipt is an honest "uncertain", never a verified arrival.
+  assert.equal(r.status, 'uncertain', JSON.stringify(r));
+  assert.equal(r.dispatched, true);
+  const after = await observe(s);
+  assert.ok(!String(after.url || '').startsWith(other.origin), 'the page is not at the foreign origin');
 });
 
 integ('popups opened by the page are registered in the SAME broker session with an opener', async (s) => {

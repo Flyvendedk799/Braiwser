@@ -706,11 +706,11 @@ test('session.close() closes every page and the browser', async (t) => {
 });
 
 // ---- request-level policy hook -------------------------------------------------------------------------------
-test('requestFilter: the initial request of every fetch is decided by the filter; a throwing filter blocks (fail closed)', async (t) => {
+test('requestFilter: every request and every redirect hop is decided by the filter; a throwing filter blocks (fail closed)', async (t) => {
   if (!avail.ok) { t.skip(avail.reason); return; }
   let g;
   const seen = [];
-  g = await openFixtureSession({ open: { requestFilter: (url, ctx) => { seen.push([url, ctx.navigation]); return url.startsWith(g.origin.origin) ? 'allow' : 'block'; } } });
+  g = await openFixtureSession({ open: { requestFilter: (url, ctx) => { seen.push([url, ctx.navigation, ctx.redirect]); return url.startsWith(g.origin.origin) ? 'allow' : 'block'; } } });
   try {
     const page = g.page;
     const before = g.other.requests.length;
@@ -727,14 +727,15 @@ test('requestFilter: the initial request of every fetch is decided by the filter
     assert.equal(foreign.error, 'ERR_BLOCKED_BY_CLIENT');
     assert.equal(g.other.requests.length, before);
 
-    // KNOWN LIMITATION (capabilities.notes.requestInterception): Playwright does not route redirect hops,
-    // so an allowed origin can redirect the browser to a foreign one. If this ever starts failing, the
-    // limitation was lifted: tighten the capability note and the broker's policyEnforcement claim.
+    // A redirect hop is a request like any other: an allowed origin cannot redirect the browser to a foreign
+    // one (more cases in playwright.redirects.real.test.js).
     const fresh = await g.session.newPage();
     const hop = await fresh.navigate(`${g.url('redirect')}?to=${encodeURIComponent(`${g.other.origin}/task.html`)}`);
-    assert.equal(hop.outcome, 'ready');
-    assert.ok(g.other.requests.length > before, 'redirect hop reached the foreign origin (documented gap)');
-    assert.ok(fresh.url().startsWith(g.other.origin), 'the broker arrival check is what catches this');
+    assert.equal(hop.outcome, 'failed');
+    assert.equal(hop.error, 'ERR_BLOCKED_BY_CLIENT');
+    assert.equal(g.other.requests.length, before, 'the redirect hop never reached the foreign origin');
+    assert.ok(!fresh.url().startsWith(g.other.origin));
+    assert.ok(seen.some(([u, , isHop]) => u === `${g.other.origin}/task.html` && isHop === true), 'the hop itself was put to the filter');
   } finally { await g.close(); }
 
   const failClosed = await openFixtureSession({ open: { requestFilter: () => { throw new Error('boom'); } } });

@@ -8,7 +8,9 @@ meant to be used with a human nearby. This page says what exists, how to connect
 > Status: pre-release. The adapter layer (MCP server, CLI, authenticated bridge, skills, verification script) is
 > covered by automated tests against the real broker and a fake driver, and the Playwright driver was exercised
 > against local fixtures. It has **not** been tested with Claude Code or Cursor themselves (only with the
-> official MCP SDK client over stdio), not against the visible Electron driver, and not on macOS/Linux.
+> official MCP SDK client over stdio). The Electron-embedded driver has only been run inside real Electron for a
+> slice of its surface (observe, click, select, screenshots, open shadow roots; Linux under Xvfb), not through the
+> desktop shell with a person at the window, and not on macOS or Windows.
 
 ## How it fits together
 
@@ -183,13 +185,13 @@ Driver capabilities as reported by the drivers in this repository:
 |---|---|---|
 | DOM actions | yes | yes |
 | Frames | yes | main frame only |
-| Shadow DOM | open roots only | no |
+| Shadow DOM | open roots only | open roots only |
 | Canvas | reported as a limitation | reported as a limitation |
 | Popups | yes (see limits) | no |
 | Downloads / uploads | no | no |
-| Select | yes | **unsupported** |
-| Screenshots | yes | no |
-| Request-level destination check | yes (initial requests; redirect hops are not re-checked) | navigation only |
+| Select | yes | yes: native single `<select>` (see limits) |
+| Screenshots | yes | yes: viewport, a clip, or one element that fits in the viewport (see limits) |
+| Request-level destination check | yes: every http(s) request and every redirect hop, before it is sent (see limits) | navigation only |
 | Human takeover | visible: native in the desktop shell; headless: remote-view only while the supervised loopback viewer is attached. The Playwright driver itself still reports `humanHandoff: unsupported` | native, needs native confirmation |
 | Live headless/visible switch | no | no |
 
@@ -201,11 +203,32 @@ What the MCP/CLI surface adds on top (verified against the real broker unless no
 | Pinned runs, `requestKey` recovery, cancellation, owner-scoped manifest | verified (tests, fake driver) |
 | Real headless Chromium against local fixtures | exercised by the benchmark harness; one machine, one build |
 | Claude Code / Cursor clients | **untested** |
-| Visible Electron driver, native takeover | **untested** here |
+| Electron-embedded driver in real Electron: observe, click, `select`, screenshots, open shadow roots | verified (`electron.native.test.js`: a `WebContentsView` and a `<webview>`, Electron 44, Linux under Xvfb, device scale 1 / 1.5 / 2) |
+| Electron-embedded driver: everything else, the desktop shell end to end, native takeover, macOS / Windows | **untested** here |
 
 ## Honest limits
 
 - The desktop shell starts the bridge and the loopback viewer when the agent runtime is on. Connection management for scopes still lives in the Agent Runs drawer. Packaged builds keep sources inside `app.asar`, which plain Node cannot execute; run the sidecar and CLI from a checkout or an unpacked copy.
+- Request-level destination check (Playwright driver): each request and each redirect hop is checked against the
+  grant before it leaves the browser, for pages, popups, frames (also out-of-process ones), subresources and
+  dedicated, shared and service workers. A redirect to an origin outside the grant fails in the browser
+  (`ERR_BLOCKED_BY_CLIENT`) and that origin's server is never contacted; the hop before it, on a granted origin, was
+  already sent, so the action is reported as uncertain, not as "nothing happened". Verified with headless Chromium
+  against local servers only. **Not covered**: WebSocket and WebRTC traffic, `data:`/`blob:` documents, and DNS
+  lookups themselves. The Electron-embedded driver still checks navigations only.
+- Electron-embedded driver, `select`: only a native single `<select>`. The option is picked by exact value, or by
+  exact label when no value matches; no match, a disabled option, or more than one match is refused before anything
+  is dispatched (never "the first one"). The driver sets the option and fires `input` and `change` itself when the
+  selection changed, as Playwright's `selectOption` does, so those two events are not browser-trusted events; the
+  native popup is never opened. A `<select multiple>` gets no ref from the observer on either driver and cannot
+  be targeted.
+- Electron-embedded driver, screenshots: the pixels Electron's `capturePage` returns, at the device scale (a 2x
+  display gives a 2x image; nothing is resized). One element can be captured only if it fits inside the viewport
+  after scrolling to it; a larger one is refused, not cropped. A main-owned page that has not been given a rectangle
+  yet (zero size) or is hidden has no pixels and is refused. There is still no emulated viewport on this driver, so
+  `review-responsive` stays Playwright-only.
+- Electron-embedded driver, shadow DOM: open roots only, like Playwright. Frames are still main-frame only, so a
+  shadow root inside a child frame is not reached.
 - No tool lists the pages of a session, so a popup/new tab cannot be switched to; popup and second-tab tasks stay
   `unsupported`.
 - `setViewport` (240..4096) exists on the Playwright driver only. It is a state change: refs and observations die
