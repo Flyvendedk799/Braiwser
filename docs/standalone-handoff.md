@@ -33,6 +33,11 @@ Create a protected configuration file outside a model workspace:
 }
 ```
 
+Optional `"reviewDir"` (absolute path) names a directory of project bundles exported from the desktop app. With it,
+and with `review:read` / `review:write` among the principal's scopes, the review tools and the `verify-journey` and
+`verify-notes` skills work against those bundles; without it they answer `UNAVAILABLE`. The directory is only read.
+`braiwser mcp --origin ... --review DIR` builds this configuration for you.
+
 Set `BRAIWSER_SERVER_CONFIG` to that file and run `npm run server`. The first
 JSON line is the transport readiness receipt and names two protected files:
 `agent-bridge.json` for the stdio sidecar and `viewer-owner.json` for the human

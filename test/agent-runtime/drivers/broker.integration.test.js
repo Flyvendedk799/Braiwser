@@ -153,6 +153,11 @@ integ('popups opened by the page are registered in the SAME broker session with 
   assert.equal(second.opener, first.pageId);
   const popObs = await observe({ sessionId: s.sessionId, pageId: second.pageId });
   assert.ok(popObs.nodes.some((n) => n.name === 'Close popup'));
+  // The same thing through the public surface: an agent can find the popup without internals.
+  const listed = await ui.listPages({ sessionId: s.sessionId });
+  assert.deepEqual(listed.pages.map((p) => [p.pageId, p.openerPageId]), [[first.pageId, null], [second.pageId, first.pageId]]);
+  assert.ok(listed.pages[1].url.includes('popup'), listed.pages[1].url);
+  assert.ok(await ui.listPages({ sessionId: 'bs_not_mine' }).then(() => false, (e) => e.publicError.code === 'DENIED'));
 });
 
 integ('headless handoff is honestly unsupported (no remote view); visible would be native via capabilities({mode})', async (s) => {

@@ -51,7 +51,7 @@ function createBroker(options = {}) {
   const emit = (name, payload) => { try { events.emit(name, payload); } catch { /* listener errors never break the broker */ } };
 
   // ---- disabled broker: every call is UNAVAILABLE, nothing touches disk -------------
-  const methodNames = ['openSession', 'closeSession', 'observe', 'act', 'startRun', 'getRun', 'cancelRun', 'retryRun', 'handoff', 'resume', 'approve', 'listApprovals', 'listRuns', 'getManifest', 'readResource', 'requestHandoff', 'pauseRun', 'handoffStatus', 'resumeRun', 'startTask', 'readPage', 'visit', 'reviewNotes', 'reviewNote', 'reviewJourneys', 'reviewClaim', 'reviewPropose', 'reviewReport'];
+  const methodNames = ['openSession', 'closeSession', 'observe', 'act', 'startRun', 'getRun', 'cancelRun', 'retryRun', 'handoff', 'resume', 'approve', 'listApprovals', 'listRuns', 'getManifest', 'readResource', 'requestHandoff', 'pauseRun', 'handoffStatus', 'resumeRun', 'startTask', 'readPage', 'visit', 'reviewNotes', 'reviewNote', 'reviewJourneys', 'reviewClaim', 'reviewPropose', 'reviewReport', 'listPages'];
   function bindFacade(broker, principal) {
     const out = {};
     for (const m of methodNames) out[m] = (input, extra) => broker[m](input, { ...(extra || {}), principal });
@@ -512,6 +512,24 @@ function createBroker(options = {}) {
         operationId: input.operationId, action: { kind: 'navigate', url: input.url } }, ctx, { afterObserve: false });
       if (!['verified', 'dispatched'].includes(receipt.status)) return { receipt, page: null };
       return { receipt, page: await readCore(session, rec, opts, principal) };
+    });
+  }
+
+  // The pages of an owned session: the first page plus every popup or new tab the page
+  // opened, each already registered under the same grant. Read-only; a page id from here
+  // is used with the ordinary tools, which re-check ownership and destination every time.
+  async function listPages(input, ctx) {
+    return guard(async () => {
+      const principal = principalOf(ctx);
+      const v = C.validateSessionPage({ sessionId: input && input.sessionId, pageId: 'pg_any' });
+      const session = ownedSession(v.sessionId, principal);
+      const pages = [...session.pages.values()].slice(0, 50).map((rec) => {
+        let url = '';
+        try { url = String((rec.driverPage.url && rec.driverPage.url()) || rec.currentUrl || ''); } catch { url = String(rec.currentUrl || ''); }
+        return { pageId: rec.pageId, url: redactUrl(url) || '', openerPageId: rec.opener || null, documentEpoch: rec.documentEpoch,
+          blocked: !!rec.violation };
+      });
+      return { sessionId: session.sessionId, pages };
     });
   }
 
@@ -1195,7 +1213,7 @@ function createBroker(options = {}) {
     enabled: true, events, limits,
     openSession, closeSession, observe, act, startRun, getRun, cancelRun, retryRun, handoff, resume, approve, listApprovals, listRuns, getManifest, readResource,
     requestHandoff, pauseRun, handoffStatus, resumeRun, startTask, attachViewer, readPage, visit,
-    reviewNotes, reviewNote, reviewJourneys, reviewClaim, reviewPropose, reviewReport,
+    reviewNotes, reviewNote, reviewJourneys, reviewClaim, reviewPropose, reviewReport, listPages,
     forPrincipal: (principal) => bindFacade(broker, C.validatePrincipal(principal)),
     close, stats: () => ({ enabled: true, sessions: sessions.size, runs: runStore.list().length, ledger: ledger.stats(), evidence: evidence.usage() }),
     // internals exposed for tests / the app shell only

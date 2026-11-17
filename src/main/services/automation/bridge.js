@@ -21,8 +21,8 @@ const PROTOCOL = 1;
 const MAX_FRAME = 2 * 1024 * 1024;
 const METHODS = Object.freeze(['openSession', 'closeSession', 'observe', 'act', 'startRun', 'getRun',
   'cancelRun', 'handoff', 'requestHandoff', 'pauseRun', 'handoffStatus', 'resumeRun', 'listRuns', 'getManifest', 'readResource', 'readPage', 'visit',
-  'reviewNotes', 'reviewNote', 'reviewJourneys', 'reviewClaim', 'reviewPropose', 'reviewReport']);
-const READ_ONLY = new Set(['observe', 'getRun', 'listRuns', 'getManifest', 'readResource', 'handoffStatus', 'readPage', 'reviewNotes', 'reviewNote', 'reviewJourneys']);
+  'reviewNotes', 'reviewNote', 'reviewJourneys', 'reviewClaim', 'reviewPropose', 'reviewReport', 'listPages']);
+const READ_ONLY = new Set(['observe', 'getRun', 'listRuns', 'getManifest', 'readResource', 'handoffStatus', 'readPage', 'reviewNotes', 'reviewNote', 'reviewJourneys', 'listPages']);
 
 class BridgeError extends Error {
   constructor(code, message, extra = {}) {

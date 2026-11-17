@@ -28,6 +28,7 @@ const USAGE = `braiwser-agent <command> [flags]   (JSON on stdout)
   handoff-status --handoff ID [--after N] [--max-events N]
   resume    --handoff ID --request-key KEY --epoch N [--run ID]
   close     --session ID
+  pages     --session ID                       (the session's pages, including popups it opened)
   notes     [--status open|resolved] [--review-session ID] [--limit N]   (review notes; needs the review:read scope)
   note      --note ID
   journeys  (recorded journeys and whether each can run as verify-journey)
@@ -88,6 +89,7 @@ const COMMANDS = {
     requestKey: f['request-key'], reasonCode: f['reason-code'] })],
   pause: (f) => ['browser_run_pause', drop({ runId: f.run, requestKey: f['request-key'], expectedControlEpoch: num(f, 'epoch'), reason: f.reason })],
   'handoff-status': (f) => ['browser_handoff_status', drop({ handoffId: f.handoff, afterSequence: num(f, 'after'), maxEvents: num(f, 'max-events') })],
+  pages: (f) => ['browser_pages', drop({ sessionId: f.session })],
   notes: (f) => ['review_notes', drop({ status: f.status, sessionId: f['review-session'], limit: num(f, 'limit') })],
   note: (f) => ['review_note', drop({ noteId: f.note })],
   journeys: () => ['review_journeys', {}],

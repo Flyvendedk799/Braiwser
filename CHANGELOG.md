@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Closing the loop: notes an agent can prove fixed
+
+- **Recorder.** Click, input, key and picked-assertion steps carry a semantic locator (a test id, or a role and
+  accessible name) whenever it names exactly one element. It is computed by the same in-page probe the agent runtime
+  observes with, so journeys recorded without test ids now migrate into `verify-journey`. Label clicks are marked and
+  dropped by the migration; ambiguous or unnamed elements still get no locator and are refused per step. Bundle import
+  keeps valid locators and the Playwright export prefers them over positional CSS paths.
+- **Notes as checks.** Notes that carry an exact change (Edit, Rearrange, "remove") derive checks
+  (`src/shared/note-checks.js`). In-app Verify grades each note of the page as fixed, not fixed, regressed, could not
+  check or needs a person, and a run fails when an exact change is demonstrably missing. Nothing is graded while a live
+  edit preview is still applied to the page. Note targets now record a semantic locator too.
+- **`style` assertion** in the shared assertion language, plans and in-app replay: one computed property compared with
+  what the browser computes for the declared value on the same element. Declarations that could fetch are refused. Not
+  emitted by the Playwright export.
+- **Review over MCP and the CLI.** `review_notes`, `review_note`, `review_journeys`, `review_note_claim`,
+  `review_note_propose`, `review_note_report`, and the `verify-notes` skill. Only a verdict the broker reads from a
+  finished run can resolve a note; a failed proof re-opens one. New scopes `review:read` and `review:write`, separate
+  from browsing.
+- **Same tools in every deployment.** The desktop app serves its own store; the standalone owner (local, proxy/OpenBot,
+  container) serves a read-only directory of exported bundles (`reviewDir`) and keeps agent reports in its data
+  directory. `verify-journey` therefore works on the standalone owner for the first time.
+- **`browser_pages`** lists a session's pages, so popups and new tabs can be reached.
+- **`braiwser mcp`**: one command starts a headless owner and serves MCP on stdio, granting only the origins named on
+  the command line. The desktop app accepts `BRAIWSER_AGENT_SCOPES` for its default client file.
+- An assertion whose element is missing now reports `TARGET_MISSING` instead of a plain failure code.
+- The built-in skill lock was regenerated (`workflow-core.js` changed; `verify-notes@1.0.0` added). Skill versions were
+  not bumped because none has been released.
+
+Not done: `compare-fix` is still a library orchestration, not a `browser_run` skill. Delta observations are still not
+exposed. Downloads and uploads are still unsupported. The desktop review source has unit coverage only; no external MCP
+client has driven it against the running app.
+
 ### Agent runtime: driver capability gaps
 
 - Playwright driver: redirect hops are now checked against the destination policy before they are sent. Until now

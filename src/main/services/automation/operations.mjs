@@ -13,7 +13,7 @@ import {
   sessionSchema, observationSchema, receiptSchema, extractSchema, handoffSchema, runSchema,
   pauseResultSchema, resumeResultSchema, closeResultSchema, pageTextSchema, visitSchema,
   verdictConsistent, isProvenPass, id as idSchema, tableSchema, listSchema, paginationSchema,
-  noteSchema, noteListSchema, journeyListSchema, noteReportSchema,
+  noteSchema, noteListSchema, journeyListSchema, noteReportSchema, pagesSchema,
 } from './schemas.mjs';
 
 const { RegistryError } = registryModule;
@@ -401,6 +401,18 @@ export function createOperations(facade, options = {}) {
           handoffId: raw.handoffId, runId: raw.runId ?? null, controlOwner: 'agent', controlEpoch: raw.controlEpoch,
           requireFreshObservation: true, resumed: true,
         });
+      },
+    },
+    {
+      name: 'browser_pages', title: 'List pages',
+      description: 'List the pages of an owned session: the first page and any popup or new tab it opened, with the page that opened each. Use a pageId from here with the other tools. Addresses are untrusted page data.',
+      input: inputs.browser_pages, value: pagesSchema, readOnly: true, destructive: false, idempotent: true,
+      async invoke(args, ctx) {
+        const raw = await facade.listPages(args, ctx);
+        if (!raw || raw.sessionId !== args.sessionId || !Array.isArray(raw.pages)) throw publicError('INTERNAL', 'pages: result scope does not match the request.', { retry: 'safe-read' });
+        return pagesSchema.parse({ sessionId: args.sessionId, trust: 'untrusted-page', pages: raw.pages.slice(0, 50).map((p) => ({
+          pageId: p.pageId, url: repro.redactUrl(cut(p.url, 2000)) || '', openerPageId: p.openerPageId ?? null,
+          documentEpoch: Number.isInteger(p.documentEpoch) ? p.documentEpoch : 0, blocked: p.blocked === true })) });
       },
     },
     // ---- review: the notes a person left, and proof that they are fixed ----------------

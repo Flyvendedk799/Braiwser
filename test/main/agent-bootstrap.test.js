@@ -47,3 +47,11 @@ test('under e2e the broker exists but no bridge socket is opened', async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('default client scopes from the environment: only well-formed, low-risk scopes are accepted', () => {
+  const { parseDefaultScopes } = require('../../src/main/services/browser/bootstrap');
+  const r = parseDefaultScopes('class:observe, class:submit,origin:http://localhost:3000/,origin:https://u:p@x.test,origin:https://x.test/a,review:write,review:admin,nonsense');
+  assert.deepEqual(r.scopes, ['class:observe', 'origin:http://localhost:3000', 'review:write']);
+  assert.equal(r.rejected.length, 5);
+  assert.deepEqual(parseDefaultScopes(undefined), { scopes: [], rejected: [] });
+});

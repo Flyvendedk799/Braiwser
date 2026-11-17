@@ -157,6 +157,10 @@ export const journeyListSchema = z.strictObject({
 });
 export const noteReportSchema = z.strictObject({ note: noteSchema, verdict: noteVerdict, runId: id, runState: z.string().max(40), checksPlanned: nonneg, checksRun: nonneg });
 
+export const pagesSchema = z.strictObject({ sessionId: id,
+  pages: z.array(z.strictObject({ pageId: id, url: z.string().max(4096), openerPageId: id.nullable(), documentEpoch: nonneg, blocked: z.boolean() })).max(50),
+  trust: z.literal('untrusted-page') });
+
 export const pageTextSchema = z.strictObject({
   ...page, url: z.string().max(4096), title: z.string().max(300), documentEpoch: nonneg,
   offset: nonneg, nextOffset: nonneg.nullable(), totalChars: nonneg, text: z.string().max(40000), trust: z.literal('untrusted-page'),
@@ -255,6 +259,7 @@ export const inputs = {
     grant: grantRequest,
   }),
   browser_session_close: z.strictObject({ sessionId: id }),
+  browser_pages: z.strictObject({ sessionId: id }),
   review_notes: z.strictObject({ status: z.enum(['open', 'resolved']).optional(), sessionId: id.optional(), limit: z.number().int().min(1).max(200).default(50) }),
   review_note: z.strictObject({ noteId: id }),
   review_journeys: z.strictObject({}),

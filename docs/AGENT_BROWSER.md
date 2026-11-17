@@ -29,6 +29,24 @@ Everything goes through one broker. The sidecar and CLI own no browser, no store
 speak to the running app over a local pipe (named pipe on Windows, a socket in a private directory elsewhere)
 with a random token. There is no network listener.
 
+## Fastest start: one command, no desktop app
+
+For a coding agent that should check a site you are developing, one command starts a headless supervised browser
+and serves MCP on stdio. It grants exactly the sites you name and nothing else:
+
+```
+claude mcp add braiwser -- npx -y github:Flyvendedk799/Braiwser braiwser mcp --origin http://localhost:3000 --review ./review
+```
+
+From a checkout the same thing is `node src/main/services/automation/up.mjs mcp --origin ...`. `--review DIR` is a
+directory of project bundles exported from the desktop app (`.braiwser.json`); it is what lets the agent read your
+notes and journeys (see "The review loop"). `braiwser mcp --help` lists the options, including
+`--review-read-only`, `--classes`, `--data`, `--chromium` and `--no-browser-sandbox` (containers only).
+
+Verified here by a real MCP SDK client over stdio against real headless Chromium (`up.test.mjs`). The `npx` form of
+the command has **not** been run against the published repository, and Claude Code / Cursor themselves are still
+untested clients.
+
 ## Turn it on
 
 1. Start Braiwser with the agent runtime enabled: set `BRAIWSER_AGENT_RUNTIME=1` (or the `agentRuntime`
@@ -83,6 +101,13 @@ stderr. Set `BRAIWSER_MCP_DEBUG=1` for tool-name/result-code logging (never argu
 | `browser_run_pause` | Fences agent dispatch on a run and leaves the session paused | yes |
 | `browser_handoff_status` | Reads handoff state. It has no side effect and does not resume the agent | no |
 | `browser_run_resume` | Returns the session to the agent only when the broker holds a one-use grant | yes |
+| `browser_pages` | Lists the session's pages, including popups and new tabs the page opened, with the page that opened each | no |
+| `review_notes` | Lists the review notes a person left; each says whether a run can prove it and which exact checks that run makes | no |
+| `review_note` | One note with its exact change, checks and what has been reported about it | no |
+| `review_journeys` | Recorded journeys and whether each can run as `verify-journey`, with reason codes for steps that cannot | no |
+| `review_note_claim` | Marks a note as being worked on by this client | yes |
+| `review_note_propose` | Says a note is ready for a person to look at, with a message. Never resolves it | yes |
+| `review_note_report` | Attaches a finished `verify-notes` run to a note. The verdict is read from the run, not from the caller | yes |
 
 Every result is `{ ok, value, error }`. Errors are one of `STALE_REF`, `AMBIGUOUS_TARGET`, `DENIED`, `TIMEOUT`,
 `CANCELLED`, `UNSUPPORTED`, `UNAVAILABLE`, `INTERNAL`, each with `dispatched`, `effectUnknown` and a `retry`
@@ -126,6 +151,49 @@ It prints one JSON envelope on stdout and exits `0` (ok), `1` (usage error), `2`
 broker, same validation and projection as MCP. It takes an executable and arguments only and never invokes a
 shell. `npm run agent -- <command>` runs it from the repo.
 
+## The review loop
+
+The point of the review tools is that a note stops being a message and becomes a contract an agent can prove.
+
+1. A person reviews a page in the desktop app. Notes made in **Edit** or **Rearrange** mode, and "remove this" notes,
+   carry the exact change: the CSS, the new copy, the removal.
+2. The agent reads them with `review_notes`. Each note lists its `checks` (`style`, `text`, `absent`) and whether it is
+   `verifiable`. It may `review_note_claim` the ones it takes.
+3. The agent changes the source, then starts `browser_run` with skill `verify-notes` and `inputs: { noteIds: [...] }`.
+4. When the run has finished, `review_note_report { noteId, runId }` attaches it. The broker reads the verdict from the
+   stored run: `fixed` resolves the note, `not-fixed` leaves it open, `regressed` re-opens a note that had been resolved,
+   and a missing element or unfinished run is `unknown`.
+
+What an agent cannot do: set a verdict, resolve a note without a passing run, or edit a note. A note with nothing
+exact to check (a written remark, a reorder) is `verifiable: false`; the agent can only `review_note_propose` it for a
+person. A note whose element has no unique test id or role + name is also not verifiable by a run, with the reason.
+
+A `style` check compares the element's computed value with what the browser computes for the declared value on that
+same element, so `color: red` matches `rgb(255, 0, 0)` and `padding: 0.5rem` matches `8px`. Declarations that could
+fetch something (`url()`, `image-set()`) are refused. Evaluating it sets the property on the element and restores it
+in the same task; a page watching its own `style` attribute with a MutationObserver can see that.
+
+A run stops at the first failing step, so in a run over several notes, notes after the first failure are not reached
+and report `unknown`. Verify notes one at a time when you need an independent verdict for each.
+
+Access is its own scope: `review:read` to list and read, `review:write` to claim, propose and report (it implies
+read). It is separate from browsing: a client that may browse cannot read the review, and the reverse.
+
+Where the review comes from:
+
+| Deployment | Source | Notes resolved by a run are written to |
+|---|---|---|
+| Desktop app | the app's own project store | the store (the note shows as resolved in the app) |
+| Standalone owner (`braiwser mcp`, `server.mjs`, proxy/OpenBot, containers) | `reviewDir`: a read-only directory of exported `.braiwser.json` bundles | `review-state.json` in the owner's data directory; the bundles are never written |
+
+In the standalone source, ids are namespaced by bundle file (`<file>_<n>` for notes, `<file>_j<n>` for journeys). There
+is no path yet that sends a standalone verdict back into a desktop store; re-export or verify in the app for that.
+
+Verified: the whole loop (read, prove not fixed, fix, prove fixed, regress, re-open) runs in
+`review-loop.test.mjs` through the real stdio sidecar and real headless Chromium against the standalone owner. The
+desktop store source is covered by unit tests against the real repositories; it has not been driven by an external MCP
+client against the running Electron app.
+
 ## Skills and runs
 
 | Skill | Runs through `browser_run` | What it does |
@@ -135,6 +203,7 @@ shell. `npm run agent -- <command>` runs it from the repo.
 | `compare-fix` 1.0.0 | no (library / CLI orchestration) | Same frozen assertions on a baseline and a candidate; reports fixed / regressed / not-fixed / not-reproduced, or why the comparison is unavailable |
 | `extract-table` 1.0.0 | no (library) | Typed records with source refs (table, row, column, page) and missing-value markers; bounded pagination; never "complete" unless the end of the table was seen |
 | `handoff-repro` 1.0.0 | no (library) | Builds a redacted issue/repro package; sending it elsewhere is a separate approved action |
+| `verify-notes` 1.0.0 | yes | Compiles review notes that carry an exact change into assertions and proves them on the page; refuses notes with nothing checkable or no unique semantic target |
 
 Versions are pinned exactly and each resolves to one digest (`skill-lock.json`). Changed bytes under the same
 version are blocked. A recording is migrated into a plan only if every step has a semantic locator (role + name,
@@ -229,8 +298,8 @@ What the MCP/CLI surface adds on top (verified against the real broker unless no
   `review-responsive` stays Playwright-only.
 - Electron-embedded driver, shadow DOM: open roots only, like Playwright. Frames are still main-frame only, so a
   shadow root inside a child frame is not reached.
-- No tool lists the pages of a session, so a popup/new tab cannot be switched to; popup and second-tab tasks stay
-  `unsupported`.
+- `browser_pages` lists a session's pages, so a popup or new tab can be observed and acted on by its page id. A popup
+  that is already somewhere outside the grant is listed as `blocked`.
 - `setViewport` (240..4096) exists on the Playwright driver only. It is a state change: refs and observations die
   with the document epoch, it needs the `interact` class and is ledgered like any action.
 - Tables are observed as one bounded payload per table/grid node: at most 50 rows x 12 columns, 80 characters per
@@ -241,8 +310,11 @@ What the MCP/CLI surface adds on top (verified against the real broker unless no
 - Pagination hints (`pagination.next` / `prev`) are found by accessible name only (Next, Next page, Older, Previous,
   Newer, arrows...). Two candidates for one direction yield no ref and an `ambiguous` marker.
 - Delta observations (`sinceObservationId`) are not exposed.
-- Recordings made today only carry CSS selectors; unless a step has a `data-testid`, an `aria-label` on a button or
-  form field, or a button's own text, migration refuses it. Re-record with test ids, or add semantic locators.
+- Recordings made from this version on carry a semantic locator per step (a test id, or a role and accessible name)
+  whenever it names exactly one element, so ordinary journeys migrate. A step is still refused when its element has no
+  unique name (two buttons called "Delete", a click on a bare `div`); older recordings without locators fall back to the
+  previous rule (`data-testid`, an `aria-label` on a button or field, or a button's own text). Re-record those.
+- The `style` assertion kind exists in plans and in-app replay. The Playwright export does not emit it.
 - Recording-derived typed values come from the resolver's `inputs` result; the broker merges them itself, only for keys
   the plan declares in `inputKeys`, only strings, at most 10000 characters. Structured skill arguments (for example
   `review-responsive`'s `landmarks`) are accepted only for keys the resolver reports in `argumentKeys`.
@@ -259,6 +331,7 @@ What the MCP/CLI surface adds on top (verified against the real broker unless no
 | `BRAIWSER_BRIDGE_INFO` | sidecar, CLI, `run.mjs` | Path of the connection file |
 | `BRAIWSER_MCP_ENTRY` | `run.mjs` | Absolute path of the sidecar to launch |
 | `BRAIWSER_MCP_DEBUG=1` | sidecar | Log tool names and result codes to stderr |
+| `BRAIWSER_AGENT_SCOPES` | desktop app | Comma-separated scopes for the default client file, e.g. `class:observe,class:navigate,origin:http://localhost:3000,review:read,review:write`. Only `observe`, `navigate`, `interact`, exact http(s) origins and the two review scopes are accepted; anything else is dropped |
 | `BRAIWSER_POLL_MS`, `BRAIWSER_WAIT_MS` | `run.mjs` | Poll interval (default 750 ms) and client wait budget (default 5 min) |
 
 ## Tests and benchmark
