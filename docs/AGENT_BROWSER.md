@@ -189,7 +189,7 @@ Driver capabilities as reported by the drivers in this repository:
 | Downloads / uploads | no | no |
 | Select | yes | **unsupported** |
 | Screenshots | yes | no |
-| Request-level destination check | yes (initial requests; redirect hops are not re-checked) | navigation only |
+| Request-level destination check | yes: every http(s) request and every redirect hop, before it is sent (see limits) | navigation only |
 | Human takeover | visible: native in the desktop shell; headless: remote-view only while the supervised loopback viewer is attached. The Playwright driver itself still reports `humanHandoff: unsupported` | native, needs native confirmation |
 | Live headless/visible switch | no | no |
 
@@ -206,6 +206,13 @@ What the MCP/CLI surface adds on top (verified against the real broker unless no
 ## Honest limits
 
 - The desktop shell starts the bridge and the loopback viewer when the agent runtime is on. Connection management for scopes still lives in the Agent Runs drawer. Packaged builds keep sources inside `app.asar`, which plain Node cannot execute; run the sidecar and CLI from a checkout or an unpacked copy.
+- Request-level destination check (Playwright driver): each request and each redirect hop is checked against the
+  grant before it leaves the browser, for pages, popups, frames (also out-of-process ones), subresources and
+  dedicated, shared and service workers. A redirect to an origin outside the grant fails in the browser
+  (`ERR_BLOCKED_BY_CLIENT`) and that origin's server is never contacted; the hop before it, on a granted origin, was
+  already sent, so the action is reported as uncertain, not as "nothing happened". Verified with headless Chromium
+  against local servers only. **Not covered**: WebSocket and WebRTC traffic, `data:`/`blob:` documents, and DNS
+  lookups themselves. The Electron-embedded driver still checks navigations only.
 - No tool lists the pages of a session, so a popup/new tab cannot be switched to; popup and second-tab tasks stay
   `unsupported`.
 - `setViewport` (240..4096) exists on the Playwright driver only. It is a state change: refs and observations die

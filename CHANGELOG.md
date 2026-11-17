@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Agent runtime: driver capability gaps
+
+- Playwright driver: redirect hops are now checked against the destination policy before they are sent. Until now
+  only the first URL of a request was checked and a redirect to an origin outside the grant was noticed on arrival,
+  after that origin's server had already been contacted. A browser-level request interception (CDP `Fetch` on the
+  browser target, request stage only) now asks the same `requestFilter` about every hop of navigations, popups,
+  frames (also out-of-process), subresources and dedicated/shared/service workers; a denied hop fails with
+  `ERR_BLOCKED_BY_CLIENT`. The filter receives `{ navigation, redirect }`. Redirects inside the grant are unchanged
+  (cookies set on the redirect response, `307` POST bodies, one request per hop). Verified with headless Chromium
+  against local servers. Still not covered: WebSocket/WebRTC, `data:`/`blob:` documents.
+
 ### Audit remediation: AI, licensing, release, product truthfulness
 
 AI

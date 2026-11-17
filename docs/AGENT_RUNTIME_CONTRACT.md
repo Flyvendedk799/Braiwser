@@ -161,6 +161,10 @@ every emitted input and external effect). `test/agent-runtime/harness.js` boots 
 - Destination checks are **navigation-only** (before dispatch and again on arrival via the `navigated` event; a
   forbidden arrival quarantines the page and sends it to `about:blank`). Request-level enforcement exists only if a
   driver reports `capabilities.requestInterception:true` and installs `open({ requestFilter })` -> `'allow'|'block'`.
+  The filter is called as `requestFilter(url, { navigation, redirect })`. On the Playwright driver it is asked about
+  every http(s) request **and every redirect hop** (`redirect:true`) before the hop is sent, for pages, popups, frames
+  (in- and out-of-process), subresources and dedicated/shared/service workers; a denied or throwing verdict fails the
+  request (`ERR_BLOCKED_BY_CLIENT`). WebSocket/WebRTC traffic and `data:`/`blob:` documents are not covered.
 - Classification: `navigate`; `interact` (click/fill/press/select/check); **write-like => class `submit` + one-use approval**:
   node `traits` contain `submit|destructive|write`, or the node name matches a write verb (pay/send/delete/save/...),
   or `press Enter`. `file-input` => `UNSUPPORTED`. `fill` into password/OTP/payment (trait or name heuristic) => `DENIED`.
