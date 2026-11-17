@@ -101,6 +101,12 @@ silently diverge.
 - `npm run test:unit` - `node --test` over `test/**` and `src/**/*.test.js`.
 - `npm run e2e` - `scripts/e2e.js` launches the app (or `--app <packaged binary>`) and
   passes only on a complete `ok: true` report; the app side is `e2e-finalizer.js`.
+  On a headless Linux box it needs a display and a non-root user (the launcher passes
+  `--no-sandbox` to the app itself, but Chromium still refuses to start as root):
+  `xvfb-run -a --server-args="-screen 0 1600x1200x24" npm run e2e`, the same line CI
+  uses. From a root shell: `su <user> -c 'cd <checkout> && xvfb-run -a
+  --server-args="-screen 0 1600x1200x24" node scripts/e2e.js'`. A run takes about a
+  minute; each check prints as `[e2e] PASS|FAIL — name :: detail`.
 - CI runs those on Linux, Windows and macOS, runs the suite against each packaged
   artifact, and runs an intentional renderer crash (`BRAIWSER_E2E_CRASH=1`) that must
   make the launcher exit 1, for the dev tree and the packaged app.
