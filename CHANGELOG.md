@@ -28,6 +28,29 @@
   - Not changed and still unconfirmed natively: frames, popups, dialogs, downloads, uploads, viewport emulation,
     human takeover, macOS and Windows.
 
+### Hand-off hygiene, Locate across pages, e2e coverage
+
+- Guest console output and load errors are now redacted before they leave the app. The
+  capture reaches the prompt and Markdown exports, the agent hand-off file and prompt
+  templates through one formatter, which drops query-string values, bearer tokens, JWTs,
+  `password=`/`token=`-style pairs and key-like strings, keeps script URLs and line numbers
+  readable, and keeps only the 50 most recent entries whatever the renderer sends.
+- "Locate on page" for a note on another page: if that page is open in another tab, that
+  tab comes to the front; otherwise the current tab opens the page. A tab that is replaying
+  is left alone. When it cannot locate, it says why: the page would not load (with the
+  error), or the page opened and the element is no longer there.
+- Fixed: pressing Escape while editing a note's text saved the edit instead of abandoning
+  it. A Ctrl+Enter save was also written twice.
+- e2e suite: 354 → 401 checks. New checks drive the Notes panel (priority, edit, resolve,
+  reopen, delete), the recording editor dialog (reorder, delete, cancel, save), replay
+  guards and failures (nothing selected, empty recording, page that will not load, second
+  replay while one runs, cancel), cross-page and cross-tab Locate, and console redaction.
+  How to run the suite on a headless Linux machine is in `docs/ARCHITECTURE.md`.
+- Internal: the storage-health dialog, the shortcut sheet / About, and the import /
+  Playwright export reports moved out of `app.js` into `components/`; Locate moved into
+  `controllers/locate.js`. No behaviour change from the moves.
+- `docs/IMPROVEMENT_BACKLOG.md` statuses corrected, with what is still open.
+
 ### Audit remediation: AI, licensing, release, product truthfulness
 
 AI
