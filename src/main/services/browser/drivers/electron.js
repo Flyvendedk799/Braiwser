@@ -634,7 +634,7 @@ class ElectronPage extends EventEmitter {
         this._assertUsable();
         const facts = { url: this.url() };
         if (a.kind !== 'url') {
-          const raw = await this._probe('assertFacts', locator ? { target: locator } : { selector: a.selector });
+          const raw = await this._probe('assertFacts', { ...(locator ? { target: locator } : { selector: a.selector }), ...(a.kind === 'style' ? { style: a.style } : {}) });
           if (raw.error) { result = { status: 'failed', actual: '', evidence: evidenceOf(a, 'failed', '', { error: raw.error }) }; break; }
           Object.assign(facts, raw);
         }

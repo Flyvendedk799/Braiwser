@@ -258,8 +258,10 @@ async function executeStep(step, ctx) {
     }
     const ids = await record('assertion', { assertion, status: a.status, actual: a.actual });
     const status = a.status === 'passed' ? 'passed' : a.status === 'failed' ? 'failed' : 'unknown';
+    // TARGET_MISSING tells "the element is not there" apart from "it is there and wrong":
+    // a consumer grading a note must not call the first one a failed fix.
     // Read-only: no dispatch. Only counts as proof if its evidence was recorded.
-    return result(status, status === 'unknown' ? 'unknown' : 'notDispatched', { evidenceIds: ids, code: a.status === 'passed' ? 'OK' : String(a.code || a.status).toUpperCase(), summary: `assert ${a.status}` });
+    return result(status, status === 'unknown' ? 'unknown' : 'notDispatched', { evidenceIds: ids, code: a.status === 'passed' ? 'OK' : (status === 'failed' && a.actual === '(no element)') ? 'TARGET_MISSING' : String(a.code || a.status).toUpperCase(), summary: `assert ${a.status}` });
   }
   if (step.type === 'setViewport') {
     let r;

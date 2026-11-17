@@ -638,7 +638,10 @@ function run(cmd, args) {
     case 'assertFacts': {
       let list;
       const t = args.target;
-      if (t && typeof t === 'object') {
+      if (args.el && args.el.nodeType === 1) {
+        // An element the caller already resolved (the guest's own anchor, a driver handle).
+        list = args.el.isConnected && !isOwn(args.el) ? [args.el] : [];
+      } else if (t && typeof t === 'object') {
         // Semantic locator ({ by: role|label|testId }), the same vocabulary plans use. Exact, normalised
         // name equality: a locator never "best-guesses" a match.
         const nn = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
@@ -669,11 +672,51 @@ function run(cmd, args) {
         }
       }
       const first = list[0] || null;
-      return {
+      const out = {
         matchCount: list.length,
         firstText: first ? String(first.innerText || first.textContent || '').slice(0, 20000) : null,
         firstVisible: first ? boxVisible(first) : null,
       };
+      // Closed style query: ONE property, compared with what the browser computes for a
+      // declared value on this very element. The declaration is validated by the caller's
+      // assertion parser and re-checked here; nothing that can fetch is ever applied.
+      const st = args.style;
+      if (first && st && typeof st === 'object') {
+        const prop = String(st.property || '');
+        const val = String(st.value == null ? '' : st.value);
+        const okProp = /^(?:--[A-Za-z0-9_-]{1,60}|-?[a-z][a-z-]{0,59})$/.test(prop);
+        const badVal = !val || val.length > 200 || /[;{}<>\\]|url\s*\(|image-set\s*\(|image\s*\(|element\s*\(|src\s*\(|expression\s*\(|@import|!\s*important/i.test(val);
+        if (!okProp || badVal) {
+          out.style = { supported: false, actual: '', expected: null, error: 'invalid-style' };
+        } else {
+          const cs = () => win.getComputedStyle(first).getPropertyValue(prop).trim();
+          const inline = first.style;
+          const hadAttr = first.hasAttribute('style');
+          const saved = [prop, 'transition'].map((p) => [p, inline.getPropertyValue(p), inline.getPropertyPriority(p)]);
+          const restore = (entry) => {
+            if (entry[1]) inline.setProperty(entry[0], entry[1], entry[2]); else inline.removeProperty(entry[0]);
+          };
+          let actual = '';
+          let expected = null;
+          let supported = false;
+          try {
+            // A transition would make the browser report the OLD value right after the
+            // declaration is applied; switch it off for the two reads and the restore.
+            inline.setProperty('transition', 'none', 'important');
+            actual = cs();
+            inline.setProperty(prop, val, 'important');
+            supported = inline.getPropertyValue(prop) !== '';
+            if (supported) expected = cs();
+          } finally {
+            restore(saved[0]);
+            cs(); // settle the restore while transitions are still off
+            restore(saved[1]);
+            if (!hadAttr && first.getAttribute('style') === '') first.removeAttribute('style');
+          }
+          out.style = { supported, actual: clip(actual, 400), expected: expected === null ? null : clip(expected, 400) };
+        }
+      }
+      return out;
     }
 
     case 'viewportInfo':

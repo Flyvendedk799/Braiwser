@@ -446,7 +446,10 @@ function buildShell() {
     ]),
   ]);
 
-  verifyPanel = createVerifyPanel({ run: () => verifySession() });
+  verifyPanel = createVerifyPanel({
+    run: () => verifySession(),
+    locateNote: (id) => { const a = state.annotations.find((x) => x.id === id); if (a) { switchTab('notes'); locateAnnotation(a); } },
+  });
   [notesPanel, stylePanel, auditPanel, aiPanel, verifyPanel].forEach((p, i) => {
     const id = ['notes', 'style', 'audit', 'ai', 'verify'][i];
     if (!p || !p.root) return;
@@ -2895,11 +2898,38 @@ const verifyRunner = createVerifyRunner({
   captureShot: (ctx) => captureViewportShot(ctx),
   runAudit: async (ctx) => (await runAuditFor(ctx)).outcome,
   replay: (ctx, rec) => replayRecording(rec, { ctx }),
+  checkNotes: (ctx, annotations) => checkNotesOnPage(ctx, annotations),
   save: (sessionId, payload) => caos.review.verifySave(sessionId, payload),
   showRun: (run) => { if (verifyPanel) verifyPanel.setRun(run); },
   currentUrlOf: (ctx) => { const t = tabById(ctx.tabId); return (t && t.url) || ctx.url; },
   toast: (m, k) => toast(m, k),
 });
+
+// Ask the guest to grade the notes that belong to the page it is showing. Notes
+// of other pages are reported as not checked, never as fixed.
+async function checkNotesOnPage(ctx, annotations) {
+  const here = String(ctx.url || '').split('#')[0];
+  const onPage = [];
+  const elsewhere = [];
+  for (const a of annotations) {
+    if (String(a.url || '').split('#')[0] === here) onPage.push({ id: a.id, kind: a.kind, action: a.action, status: a.status, target: a.target, edit: a.edit });
+    else elsewhere.push(a.id);
+  }
+  const requestId = 'nc-' + ctx.runId;
+  const reply = onPage.length
+    ? await requestFromGuest(ctx.wv, {
+      channel: 'caos:check-notes',
+      payload: { requestId, notes: onPage },
+      replyChannel: 'caos:note-checks',
+      accept: (r) => !!r && r.requestId === requestId,
+      timeoutMs: 8000,
+      fallback: null,
+    })
+    : { items: [], previewActive: false };
+  if (!reply) return { status: 'timedOut', url: here, items: [], otherPages: elsewhere.length };
+  if (reply.error) return { status: 'error', error: reply.error, url: here, items: [], otherPages: elsewhere.length };
+  return { status: 'completed', url: here, previewActive: !!reply.previewActive, items: reply.items || [], otherPages: elsewhere.length };
+}
 
 async function verifySession() {
   if (!state.currentSession) { toast('Open or start a session first', 'warn'); return null; }

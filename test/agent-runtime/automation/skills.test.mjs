@@ -20,9 +20,9 @@ const MCP = { id: 'mcp:x', kind: 'mcp', scopes: [] };
 
 // ------------------------------------------------------------------ built-ins
 
-test('catalog lists the five built-ins with pinned digests; the lock matches the shipped sources', () => {
+test('catalog lists the six built-ins with pinned digests; the lock matches the shipped sources', () => {
   const ids = registry.catalog().map((s) => `${s.id}@${s.version}`).sort();
-  assert.deepEqual(ids, ['compare-fix@1.0.0', 'extract-table@1.0.0', 'handoff-repro@1.0.0', 'review-responsive@1.0.0', 'verify-journey@1.0.0']);
+  assert.deepEqual(ids, ['compare-fix@1.0.0', 'extract-table@1.0.0', 'handoff-repro@1.0.0', 'review-responsive@1.0.0', 'verify-journey@1.0.0', 'verify-notes@1.0.0']);
   for (const s of registry.catalog()) {
     assert.match(s.digest, /^sha256:[a-f0-9]{64}$/);
     assert.equal(s.kind, 'builtin');
@@ -31,7 +31,7 @@ test('catalog lists the five built-ins with pinned digests; the lock matches the
   assert.deepEqual(lock, { ok: true, mismatches: [] },
     `skill bytes changed without updating the lock: run node src/main/services/automation/skill-registry.js --write-lock (and bump the version if released). ${JSON.stringify(lock.mismatches)}`);
   const runnable = registry.catalog().filter((s) => s.runnableViaBrokerRun).map((s) => s.id).sort();
-  assert.deepEqual(runnable, ['review-responsive', 'verify-journey']);
+  assert.deepEqual(runnable, ['review-responsive', 'verify-journey', 'verify-notes']);
 });
 
 test('a built-in whose bytes drifted from the lock is blocked before execution', () => {

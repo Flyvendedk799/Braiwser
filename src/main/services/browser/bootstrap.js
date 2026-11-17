@@ -32,16 +32,25 @@ function startAgentRuntime({ repos, userDataDir, getWindow, enabled, isE2E = fal
       createGuest: () => guestViews.create(),
     },
   });
+  // The review an agent may read and report on: this app's own project store.
+  let review = null;
+  try {
+    if (repos && repos.annotations && repos.recordings) review = require('../review/source').createStoreSource({ repos });
+  } catch (err) {
+    log('[agent-runtime] review source unavailable: ' + ((err && err.message) || err));
+  }
   const skills = createBrokerSkills({
     // Owner-scoped, synchronous lookup: only recordings the store knows, already
     // redacted by the repository's second boundary.
     loadRecording: (recordingId) => (repos && repos.recordings ? repos.recordings.get(recordingId) || null : null),
+    loadNote: (noteId) => (review ? review.loadNote(noteId) : null),
   });
   const brokerOptions = {
     featureFlag: true,
     dataDir: userDataDir,
     drivers: { playwright: drivers.playwright, 'electron-embedded': drivers['electron-embedded'] },
     skills,
+    review,
     appVersion: process.versions.electron || 'dev',
     taskRunner: null,
   };

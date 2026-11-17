@@ -367,6 +367,8 @@ function createRepositories(userDataDir, opts = {}) {
       return counts;
     },
     get: (i) => withVisibility(annotationsC.get(i)),
+    // Every note, oldest first (the review source an agent reads from).
+    all: () => annotationsC.all().map(withVisibility).sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '')),
     // Annotation + the session's updatedAt bump commit together or not at all.
     create: (a) => transact([annotationsC, sessionsC], (tx) => {
       const existing = tx(annotationsC).find((x) => x.sessionId === a.sessionId);

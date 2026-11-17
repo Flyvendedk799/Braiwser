@@ -265,7 +265,7 @@ function validateTarget(t, { nameOptional = false } = {}) {
   }
   exact(t, ['by', 'value'], 'target'); return { by: t.by, value: str(t.value, 'value', { max: 200 }) };
 }
-const ASSERT_KINDS = Object.freeze(['visible', 'text', 'exists', 'count', 'url']);
+const ASSERT_KINDS = Object.freeze(['visible', 'text', 'exists', 'count', 'url', 'style']);
 const ASSERT_OPS = Object.freeze(['equals', 'contains']);
 const PLAN_STEP_TYPES = Object.freeze(['navigate', 'click', 'fill', 'select', 'check', 'press', 'setViewport', 'capture', 'assert']);
 function validateAssertStep(s, id) {
@@ -284,6 +284,8 @@ function validateAssertStep(s, id) {
   if (s.kind === 'exists' && (s.op !== 'equals' || s.expected !== 'exists')) throw invalid('existence assertion');
   if (s.kind === 'text' && !s.expected) throw invalid('text assertion needs an expected value');
   if (s.kind === 'count' && !/^\d{1,9}$/.test(s.expected)) throw invalid('count assertion needs a non-negative integer');
+  // One plain "property: value" declaration; the shared assertion spec owns the grammar.
+  if (s.kind === 'style' && (s.op !== 'equals' || !require('./assertions').parseStyleDeclaration(s.expected))) throw invalid('style assertion needs one plain declaration');
   return out;
 }
 function validatePlan(plan) {

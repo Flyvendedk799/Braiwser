@@ -84,6 +84,21 @@ const anchor = require('./anchor');
 const elementExport = require('./element-export');
 const recorder = require('./recorder');
 const semanticLocator = require('./semantic-locator');
+const noteCheck = require('./note-check');
+
+// A note's target: the anchor descriptor plus, when one exists, the durable semantic
+// name of the element (semantic-locator.js). The locator is what lets a verified run
+// address the element; the selector stays the in-app anchor.
+function describeTarget(el) {
+  const target = anchor.describe(el);
+  try {
+    const locator = semanticLocator.locatorFor(el, { action: false });
+    if (locator && target && typeof target === 'object') target.locator = locator;
+  } catch (_e) {
+    /* optional */
+  }
+  return target;
+}
 const replay = require('./replay');
 const audit = require('./audit');
 const dom = require('./inspector.dom');
@@ -790,7 +805,7 @@ const history = require('./inspector.history');
       // A structural edit passes the element as it was BEFORE the mutation: the
       // target is the source the agent must change, not wherever the live
       // preview happens to have put it (CE-11).
-      target: entry.target || anchor.describe(el),
+      target: entry.target || describeTarget(el),
       edit: { type: entry.type, css: entry.css || '', details: entry.details || {} },
     };
     // The change is already applied, so "where the element is right now" IS the
@@ -1179,7 +1194,7 @@ const history = require('./inspector.history');
     const toDomIndex = dom.domIndex(parentNow, el);
     d.restorePos();
     const src = {
-      target: anchor.describe(el),
+      target: describeTarget(el),
       fromSel: anchor.cssPath(origParent),
       toSel: anchor.cssPath(parentNow),
       fromIndex: startIndex,
@@ -1515,7 +1530,7 @@ const history = require('./inspector.history');
     const ref = kids[delta > 0 ? to + 1 : to] || null;
     // Describe the source BEFORE touching the DOM (CE-11).
     const src = {
-      target: anchor.describe(el),
+      target: describeTarget(el),
       fromSel: anchor.cssPath(parent),
       toSel: anchor.cssPath(parent),
       fromIndex: from,
@@ -1717,7 +1732,7 @@ const history = require('./inspector.history');
 
   // ---- note popup -----------------------------------------------------------
   function openElementNote(el, opts) {
-    const meta = anchor.describe(el);
+    const meta = describeTarget(el);
     const r = el.getBoundingClientRect();
     showPopup(
       { kind: 'element', target: meta, anchor: r, existing: (opts && opts.existing) || 0 },
@@ -2409,7 +2424,7 @@ const history = require('./inspector.history');
   // describe() reads innerText/textContent, so describe the element with its old
   // words: the annotation's stored text then matches the unchanged source page.
   function textTarget(el, beforeState) {
-    const t = anchor.describe(el);
+    const t = describeTarget(el);
     try {
       t.text = String(beforeState.text).trim().replace(/\s+/g, ' ').slice(0, 120);
     } catch (_e) {
@@ -3096,7 +3111,7 @@ const history = require('./inspector.history');
     // Everything the agent will read is spelled for the page as it is NOW,
     // before the preview moves anything.
     const src = {
-      target: anchor.describe(node),
+      target: describeTarget(node),
       fromSel: anchor.cssPath(parent),
       toSel: anchor.cssPath(parent),
       fromIndex: from,
@@ -3150,7 +3165,7 @@ const history = require('./inspector.history');
 
     const startIndex = indexIn(origParent, el);
     const src = {
-      target: anchor.describe(el),
+      target: describeTarget(el),
       fromSel: anchor.cssPath(origParent),
       toSel: anchor.cssPath(parent),
       fromIndex: startIndex,
@@ -3333,6 +3348,21 @@ const history = require('./inspector.history');
       report = { error: String((err && err.message) || err), findings: [], counts: {}, total: 0 };
     }
     ipcRenderer.sendToHost('caos:audit-result', report);
+  });
+
+  // Grade the notes of this page against the live document (Verify). The shell
+  // sends only the notes that belong to this URL.
+  ipcRenderer.on('caos:check-notes', (_e, payload) => {
+    const requestId = payload && payload.requestId;
+    let items = [];
+    let error = '';
+    const previewActive = editStack.length > 0;
+    try {
+      items = noteCheck.checkNotes(payload && payload.notes, { previewActive });
+    } catch (err) {
+      error = String((err && err.message) || err);
+    }
+    ipcRenderer.sendToHost('caos:note-checks', { requestId, previewActive, items, error });
   });
 
   ipcRenderer.on('caos:request-dom-tree', () => pushTree());

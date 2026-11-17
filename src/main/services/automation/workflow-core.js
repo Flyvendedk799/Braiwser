@@ -15,7 +15,7 @@
 const crypto = require('node:crypto');
 const { z } = require('zod');
 const { isSecretStep, redactSteps, SECRET_PLACEHOLDER } = require('../../../shared/redact');
-const { normalizeAssertion, controlOfStep } = require('../../../shared/assertions');
+const { normalizeAssertion, controlOfStep, parseStyleDeclaration } = require('../../../shared/assertions');
 
 const SCHEMA_VERSION = 1;
 const SEMVER = /^\d+\.\d+\.\d+$/;
@@ -45,7 +45,7 @@ const httpUrl = z.string().max(2000).url().refine((v) => {
 }, 'Only http(s) URLs without embedded credentials');
 
 const STATE_CHANGING = new Set(['navigate', 'click', 'fill', 'select', 'check', 'press']);
-const ASSERT_KINDS = ['visible', 'exists', 'text', 'count', 'url'];
+const ASSERT_KINDS = ['visible', 'exists', 'text', 'count', 'url', 'style'];
 const step = z.discriminatedUnion('type', [
   z.strictObject({ id: stepId, type: z.literal('navigate'), url: httpUrl }),
   z.strictObject({ id: stepId, type: z.literal('click'), target }),
@@ -95,6 +95,7 @@ const Workflow = z.strictObject({
       if (s.kind === 'text' && !s.expected) invalid('text assertion needs an expected value', at);
       if (s.kind === 'url' && !s.expected) invalid('url assertion needs an expected value', at);
       if (s.kind === 'count' && !/^\d{1,9}$/.test(s.expected)) invalid('count assertion needs a non-negative integer', at);
+      if (s.kind === 'style' && (s.op !== 'equals' || !parseStyleDeclaration(s.expected))) invalid('style assertion needs one plain "property: value" declaration', at);
       if (s.target && s.target.by === 'role' && !s.target.name && !['count', 'exists', 'visible'].includes(s.kind)) {
         invalid('A role target needs a name for this assertion', at);
       }
@@ -425,6 +426,8 @@ function recordingToWorkflow(recording, options = {}) {
           out.push({ id: nextId(), type: 'assert', target: t, kind: 'visible', op: 'equals', expected: 'visible' });
         } else if (a.kind === 'exists') {
           out.push({ id: nextId(), type: 'assert', target: t, kind: 'exists', op: 'equals', expected: 'exists' });
+        } else if (a.kind === 'style') {
+          out.push({ id: nextId(), type: 'assert', target: t, kind: 'style', op: 'equals', expected: String(a.expected) });
         } else if (a.kind === 'count') {
           out.push({ id: nextId(), type: 'assert', target: t, kind: 'count', op: a.op, expected: String(a.expected) });
         } else {

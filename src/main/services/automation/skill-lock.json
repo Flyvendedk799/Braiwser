@@ -1,10 +1,11 @@
 {
   "lockVersion": 1,
   "skills": {
-    "verify-journey@1.0.0": "sha256:c76a5559ae07d8205b1a2d5d83c69471b2465e598a616bfce8c93d91adea06b7",
-    "review-responsive@1.0.0": "sha256:e84118fa494af37ee5b9d0fa58f14faf7fd6ae4af21d7434a44af5826c62c4c4",
-    "compare-fix@1.0.0": "sha256:a23187bb8f7b337f88b04be2a555c369fa9a1e4a433fd485b419ca0a93a0ae83",
-    "extract-table@1.0.0": "sha256:26c8fdbf7c2919443d541ca1c932eff9c3c39b5eb6e0ae861e5ff9d1bf5155d5",
-    "handoff-repro@1.0.0": "sha256:95dd24495d115411ecbbd30efded90f072a8eef18976dc24d2f2ec5f7ef3d80a"
+    "verify-journey@1.0.0": "sha256:56a63c0114c5a5bb9ecd76f7d50f9a7a410541f0e686b0c3de33f3277b3753b6",
+    "review-responsive@1.0.0": "sha256:f32c0fe3def4baea13dfaec3d65f496e09afaff28b18b47d061984ef44020dc7",
+    "compare-fix@1.0.0": "sha256:b0f03c53bc766da8df561cb8e9f14edfb8d6a3617d897deeb91e2e50cc7f1e4d",
+    "extract-table@1.0.0": "sha256:cbeaba4eb7c880d01e816775b8828907a1f50cb54d25850c1a11151d788efc84",
+    "handoff-repro@1.0.0": "sha256:ca5e7037bc47509815e81fb01d2c6f91bbd2dfc71f7c10ca26a202943bc6054e",
+    "verify-notes@1.0.0": "sha256:439d319dec8078ecbc8eaf59eb98f5bc28b1f9424c7c0e942cf335dedb175f74"
   }
 }

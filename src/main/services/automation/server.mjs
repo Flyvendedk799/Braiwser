@@ -9,12 +9,14 @@ import driverModule from '../browser/drivers/playwright.js';
 import skillsModule from './skill-registry.js';
 import bridgeModule from './bridge-server.js';
 import viewerModule from '../browser/viewer-gateway.js';
+import reviewModule from '../review/source.js';
 export { createOperations } from './operations.mjs';
 
 // `proxy` deployment: a trusted server (OpenBot) relays an authenticated human over a private network.
 // The shared secret is supplied by the supervisor, never written to disk, and the gateway is not public.
 export async function startServer({ dataDir, port = 0, deployment = 'local', bindHost = '127.0.0.1', allowedHosts = [], proxyToken = null,
-  principal, ownerId = 'local-owner', driverOptions = {}, featureFlag = true, idleMs = 300000, keepAlive = false, renewMs = 60 * 60 * 1000 } = {}) {
+  principal, ownerId = 'local-owner', driverOptions = {}, featureFlag = true, idleMs = 300000, keepAlive = false, renewMs = 60 * 60 * 1000,
+  reviewDir = null } = {}) {
   if (!['local', 'proxy'].includes(deployment)) throw new Error('UNSUPPORTED: public viewer deployment has not passed its release gates');
   if (deployment === 'proxy' && (typeof proxyToken !== 'string' || proxyToken.length < 32)) throw new TypeError('proxy deployment requires a strong shared secret');
   if (deployment === 'proxy' && (typeof bindHost !== 'string' || !/^[0-9.]{7,15}$/.test(bindHost))) throw new TypeError('proxy deployment requires an explicit private bind address');
@@ -46,10 +48,16 @@ export async function startServer({ dataDir, port = 0, deployment = 'local', bin
     }
   }
   try {
+    // A standalone owner has no project store. `reviewDir` is a directory of exported
+    // .braiwser.json bundles (read-only); what agents report is kept beside the broker's data.
+    // Without it the review tools answer UNAVAILABLE and the two review skills cannot resolve.
+    if (reviewDir !== null && (typeof reviewDir !== 'string' || !path.isAbsolute(reviewDir))) throw new TypeError('reviewDir must be an absolute path');
+    const review = reviewDir ? reviewModule.createFileSource({ dir: reviewDir, stateFile: path.join(dataDir, 'review-state.json') }) : null;
     broker = brokerModule.createBroker({ dataDir, featureFlag,
       limits: { assertionWaitMs: 1000 },
       drivers: { playwright: driverModule.createPlaywrightDriver(driverOptions) },
-      skills: skillsModule.createBrokerSkills(), appVersion: 'braiwser-server' });
+      skills: skillsModule.createBrokerSkills(review ? { loadRecording: (id) => review.loadRecording(id), loadNote: (id) => review.loadNote(id) } : {}),
+      review, appVersion: 'braiwser-server' });
     const proxied = deployment === 'proxy';
     const ownerToken = proxied ? proxyToken : crypto.randomBytes(32).toString('base64url');
     gateway = viewerModule.createViewerGateway({ broker, port, host: proxied ? bindHost : '127.0.0.1',
