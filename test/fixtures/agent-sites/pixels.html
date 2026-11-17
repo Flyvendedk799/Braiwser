@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Pixels</title>
+<!-- Known colours at known places, so a screenshot can be checked pixel by pixel. -->
+<style>
+  html, body { margin: 0; background: rgb(0, 128, 0); }
+  #red { position: absolute; left: 40px; top: 60px; width: 200px; height: 100px; background: rgb(255, 0, 0); border: 0; padding: 0; }
+  #blue { position: absolute; left: 300px; top: 60px; width: 120px; height: 80px; background: rgb(0, 0, 255); border: 0; padding: 0; color: rgb(0, 0, 255); }
+  #far { position: absolute; left: 40px; top: 3000px; width: 90px; height: 50px; background: rgb(255, 255, 0); border: 0; padding: 0; color: rgb(255, 255, 0); }
+  #huge { position: absolute; left: 0; top: 5000px; width: 6000px; height: 40px; background: rgb(0, 0, 0); border: 0; padding: 0; }
+</style></head>
+<body>
+  <button id="red" type="button" aria-label="Red block"></button>
+  <button id="blue" type="button" aria-label="Blue block"></button>
+  <button id="far" type="button" aria-label="Far block"></button>
+  <button id="huge" type="button" aria-label="Huge block"></button>
+</body></html>

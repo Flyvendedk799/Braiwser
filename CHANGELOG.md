@@ -12,6 +12,21 @@
   `ERR_BLOCKED_BY_CLIENT`. The filter receives `{ navigation, redirect }`. Redirects inside the grant are unchanged
   (cookies set on the redirect response, `307` POST bodies, one request per hop). Verified with headless Chromium
   against local servers. Still not covered: WebSocket/WebRTC, `data:`/`blob:` documents.
+- Electron-embedded driver: `select`, screenshots and open shadow roots are now reported as supported, each after a
+  run against real Electron (`test/agent-runtime/drivers/electron.native.test.js` starts Electron 44 with a
+  `WebContentsView` and a `<webview>` on local fixtures; Linux under Xvfb, device scale 1, 1.5 and 2).
+  - `select` works on a native single `<select>`: exactly one option by value (else by label), otherwise refused
+    before dispatch. `input`/`change` are fired by the driver, as Playwright does, and are not trusted events.
+  - Screenshots: viewport, a clip inside it, and `capture({ refId })` for one observed element that fits in the
+    viewport. `capabilities.screenshots` is what the broker checks before a plan with `capture` steps, so such plans
+    are no longer refused up front on this driver; that path through the broker was not run against real Electron.
+    A zero-sized or hidden view is refused instead of
+    returning an empty image.
+  - Fixed while verifying: the owner badge was still in Electron screenshots, because `capturePage` copies the last
+    presented frame. The driver now waits for a frame without the badge before taking pixels.
+  - Open shadow roots were already walked by the shared probe; the flag was off only for lack of a native run.
+  - Not changed and still unconfirmed natively: frames, popups, dialogs, downloads, uploads, viewport emulation,
+    human takeover, macOS and Windows.
 
 ### Audit remediation: AI, licensing, release, product truthfulness
 

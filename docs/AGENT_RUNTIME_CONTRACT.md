@@ -297,7 +297,7 @@ control; input values are never read); `list{ ordered, itemCount, itemsExact, it
 and the 64 KiB / 200 node caps still apply to the whole observation. The payload is part of the state signature used by delta observations.
 `observation.pagination = { next?, prev?, ambiguous? }`: `{ref,name,enabled}` of the single link/button whose accessible name is a known
 Next/Previous label; two candidates yield no ref and `ambiguous`. Role locators in assertions may omit the name ("any name"); an empty name means
-"no accessible name". The Electron driver shares the probe and observation builder (tables and lists included); it has no `setViewport`/`capture`.
+"no accessible name". The Electron driver shares the probe and observation builder (tables and lists included); it has `capture` (viewport, or one observed element that fits in it) and no `setViewport`.
 
 ## Not supported
 Popups and second tabs cannot be addressed through the broker API (no page listing), so popup corpus tasks stay `unsupported`.

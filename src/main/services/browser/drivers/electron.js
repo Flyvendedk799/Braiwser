@@ -4,9 +4,11 @@ const IDLE_RELEASE_MS = 750; // how long an idle page keeps its debugger lease
 //
 // STATUS: implemented against the contract and unit-tested with fake
 // webContents / fake debugger leases (a jsdom-backed CDP shim runs the real probe).
-// It has NOT been run inside Electron. Capability flags are deliberately
-// conservative; anything marked "needs native confirmation" below must be proven
-// by an Electron-native test before the flag is raised.
+// Only a slice has been run inside real Electron (electron.native.test.js: observe,
+// click, select, screenshots and open shadow roots on a WebContentsView and a
+// <webview>, Linux under Xvfb). Capability flags are deliberately conservative;
+// anything marked "needs native confirmation" below must be proven by an
+// Electron-native test before the flag is raised.
 //
 // Ownership model (audit "Embedded browser migration"):
 //   * Shell tabs are still <webview> elements. The main process registers each
@@ -32,7 +34,7 @@ const { CdpPointer } = require('./cdp-pointer');
 const { driverError, clipText, fingerprintOf, parseKey, validateNavigationUrl, normalizeFocus } = obs;
 
 const DRIVER_VERSION = '0.1.0';
-const ACTIONS = Object.freeze(['click', 'fill', 'press', 'check', 'navigate']);
+const ACTIONS = Object.freeze(['click', 'fill', 'press', 'select', 'check', 'navigate']);
 const OWNERS = Object.freeze(['agent', 'human', 'quarantined', 'none']);
 const REF_TTL_MS = 60000;
 const MAX_REFS = 600;
@@ -496,12 +498,23 @@ class ElectronPage extends EventEmitter {
     if (action.kind === 'check' && typeof action.checked !== 'boolean') {
       throw driverError('UNSUPPORTED', 'check needs a boolean.', { detail: 'CHECKED_INVALID' });
     }
+    if (action.kind === 'select' && (typeof action.value !== 'string' || action.value.length > 500)) {
+      throw driverError('UNSUPPORTED', 'select needs a value.', { detail: 'VALUE_INVALID' });
+    }
     let printable = false;
     if (action.kind === 'press') {
       printable = parseKey(action.key).printable;
     }
     const { ref, live } = await this._prepare(cmd, action, control, printable);
     const evidence = [];
+    // select: decide WHICH option before anything is dispatched. Zero or several matches are refused, never guessed.
+    let option = null;
+    if (action.kind === 'select') {
+      await this._actionablePoint(ref, control);
+      option = await this._onNode(ref, SELECT_PLAN, action.value);
+      control.check(); this._sameEpoch(ref);
+      if (!option || option.ok !== true) throw selectRefusal(option && option.reason, option && option.matches);
+    }
     // Attest delivery for plain clicks: a listener (isolated world) counts trusted clicks reaching the target.
     const watchId = action.kind === 'click' ? await this._probeHandle('watchClick', {}, ref).catch(() => null) : null;
     let dispatched = false;
@@ -525,6 +538,15 @@ class ElectronPage extends EventEmitter {
           await pointer.insertText(action.text, guarded);
           const matches = await this._onNode(ref, 'return this.value === a;', action.text);
           evidence.push(obs.evidence.value(matches === true, action.text.length, this.documentEpoch));
+        } else if (action.kind === 'select') {
+          // No pointer or key input: a native <select> popup is an OS widget outside the page. The option is set on
+          // the element and `input` + `change` are fired when the selection actually changed (what Playwright's
+          // selectOption does); those events are script-made (isTrusted:false).
+          guarded.beforeDispatch();
+          const done = await this._onNode(ref, SELECT_APPLY, { index: option.index, value: option.value, label: option.label });
+          if (!done || done.ok !== true) throw driverError('STALE_REF', 'The options changed before the selection; observe again.', { detail: 'TARGET_CHANGED' });
+          const chosen = Array.isArray(done.values) ? done.values : [];
+          evidence.push(obs.evidence.selected(chosen.length === 1 && chosen[0] === action.value, chosen.length, this.documentEpoch));
         } else {
           guarded.beforeDispatch();
           await this._onNode(ref, 'this.focus(); return true;');
@@ -588,11 +610,21 @@ class ElectronPage extends EventEmitter {
     if (action.kind === 'check' && !['checkbox', 'radio', 'switch'].includes(live.role)) {
       throw driverError('UNSUPPORTED', 'The target is not a checkable control.', { detail: 'CHECK_UNSUPPORTED' });
     }
+    if (action.kind === 'select' && live.tag !== 'select') {
+      throw driverError('UNSUPPORTED', 'Only native <select> elements are supported.', { detail: 'SELECT_UNSUPPORTED' });
+    }
     return { ref, live };
   }
 
   // Scroll into view, hit-test, re-verify identity, then ONE real CDP click.
   async _clickRef(pointer, ref, control) {
+    const point = await this._actionablePoint(ref, control);
+    return pointer.clickCssPoint({ x: point.x, y: point.y, viewportWidth: point.viewportWidth, viewportHeight: point.viewportHeight }, control);
+  }
+
+  // Scroll into view and hit-test: the target must be in the viewport, have a box and not be covered, and still be
+  // the node that was observed. Dispatches nothing.
+  async _actionablePoint(ref, control) {
     let point = null;
     for (let i = 0; i < 4; i += 1) {
       point = await this._probe('clickPoint', {}, ref);
@@ -607,7 +639,7 @@ class ElectronPage extends EventEmitter {
     const live = await this._describe(ref);
     control.check(); this._sameEpoch(ref);
     this._assertLive(ref, live);
-    return pointer.clickCssPoint({ x: point.x, y: point.y, viewportWidth: point.viewportWidth, viewportHeight: point.viewportHeight }, control);
+    return point;
   }
 
   // ---- assertions (closed DSL) ------------------------------------------------------------------------------------
@@ -651,33 +683,99 @@ class ElectronPage extends EventEmitter {
   }
 
   // ---- screenshots / presentation ---------------------------------------------------------------------------------------
-  // needs native confirmation: wc.capturePage on a <webview> guest.
+  // Unmodified pixels of the guest's viewport (wc.capturePage), of a rectangle inside it, or of the single element
+  // behind an observed ref (never a selector). The agent badge is Braiwser UI and is hidden for the shot. The image
+  // is what Electron returns, at the device scale: nothing is masked, annotated or resized (meta.transformed false).
   async screenshot({ clip } = {}) {
     this._assertUsable();
-    if (clip) throw driverError('UNSUPPORTED', 'Clipped screenshots are not supported by the embedded driver yet.', { detail: 'CLIP_UNSUPPORTED' });
-    const view = await this._probe('viewportInfo', {}).catch(() => ({ scrollX: 0, scrollY: 0, width: 0, height: 0, scale: 1 }));
+    const view = await this._viewport();
+    let region = null;
+    if (clip) {
+      const ok = ['x', 'y', 'width', 'height'].every((k) => Number.isFinite(clip[k]))
+        && clip.x >= 0 && clip.y >= 0 && clip.width > 0 && clip.height > 0
+        && clip.x + clip.width <= view.width && clip.y + clip.height <= view.height;
+      if (!ok) throw driverError('UNSUPPORTED', 'clip must lie inside the viewport.', { detail: 'CLIP_INVALID' });
+      region = roundRect(clip);
+    }
+    return this._shoot(view, region);
+  }
+
+  // Evidence capture: the whole viewport, or the single element behind an observed ref.
+  async capture({ refId } = {}) {
+    this._assertUsable();
+    if (!refId) return this._shoot(await this._viewport(), null);
+    if (this.state === 'paused') throw driverError('UNAVAILABLE', 'The page debugger was lost; observe again.', { detail: 'DRIVER_PAUSED', retry: true });
+    this.resolve(refId); // unknown / dead / expired -> STALE_REF
+    const ref = this._refs.get(refId);
+    this._sameEpoch(ref);
+    const live = await this._describe(ref);
+    this._sameEpoch(ref);
+    this._assertLive(ref, live);
+    // Scrolls the element to the centre of the viewport first (same probe command a click uses).
+    const point = await this._probe('clickPoint', {}, ref);
+    if (!point || !point.connected) throw driverError('STALE_REF', 'The target is gone.', { detail: 'NODE_DETACHED' });
+    const box = await this._onNode(ref, 'var r = this.getBoundingClientRect(); return { x: r.left, y: r.top, width: r.width, height: r.height };');
+    this._sameEpoch(ref);
+    if (!box || !(box.width > 0 && box.height > 0)) throw driverError('UNAVAILABLE', 'The target has no visible box to capture.', { detail: 'NOT_CAPTURABLE' });
+    const view = await this._viewport();
+    const region = roundRect(box);
+    // A partial picture would be passed off as the element: refuse instead of cropping silently.
+    if (region.x < 0 || region.y < 0 || region.x + region.width > view.width || region.y + region.height > view.height) {
+      throw driverError('UNAVAILABLE', 'The target does not fit inside the viewport; it cannot be captured whole.', { detail: 'NOT_CAPTURABLE' });
+    }
+    const shot = await this._shoot(view, region);
+    this._sameEpoch(ref);
+    return shot;
+  }
+
+  async _viewport() {
+    const view = await this._probe('viewportInfo', {});
+    if (!view || !(view.width > 0 && view.height > 0)) {
+      // A main-owned view is kept at zero size until the shell places it: there is nothing to photograph.
+      throw driverError('UNAVAILABLE', 'The page has no visible viewport to capture.', { detail: 'NOT_CAPTURABLE' });
+    }
+    return view;
+  }
+
+  async _shoot(view, region) {
+    const epoch = this.documentEpoch;
     let hidden = false;
     if (this.owner !== 'none') hidden = await this._setBadgeVisibility(false);
     try {
-      const image = await this._wc.capturePage();
-      const size = image.getSize();
+      const image = await (region ? this._wc.capturePage(region) : this._wc.capturePage());
+      const bytes = image && !(typeof image.isEmpty === 'function' && image.isEmpty()) ? image.toPNG() : null;
+      if (!bytes || !bytes.length) throw driverError('UNAVAILABLE', 'The page returned no pixels (hidden or zero-sized view).', { detail: 'CAPTURE_EMPTY' });
+      if (this.documentEpoch !== epoch) throw driverError('STALE_REF', 'The document changed during the capture.', { detail: 'STALE_DOCUMENT' });
       return {
-        bytes: image.toPNG(),
+        bytes,
         meta: {
           url: clipText(this.url(), obs.LIMITS.urlChars), documentEpoch: this.documentEpoch,
-          viewport: { width: view.width || size.width, height: view.height || size.height },
-          scale: view.scale || 1, scroll: { x: view.scrollX, y: view.scrollY }, clip: null,
+          viewport: { width: view.width, height: view.height },
+          scale: view.scale || 1, scroll: { x: view.scrollX, y: view.scrollY }, clip: region,
           capturedAt: new Date().toISOString(), transformed: false,
         },
       };
     } finally { if (hidden) await this._setBadgeVisibility(true); }
   }
 
+  // capturePage copies the last frame the compositor PRESENTED, so after hiding the badge the driver waits until a
+  // frame without it has been produced (two animation frames, bounded) before any pixels are taken.
   async _setBadgeVisibility(visible) {
     try {
       const ctx = await this._world();
-      const r = await this._send('Runtime.callFunctionOn', { executionContextId: ctx, returnByValue: true,
-        functionDeclaration: `function(){ var b = document.querySelector('[data-caos="agent-badge"]'); if (!b) return false; b.style.visibility = ${visible ? "''" : "'hidden'"}; return true; }` });
+      const r = await this._send('Runtime.callFunctionOn', { executionContextId: ctx, returnByValue: true, awaitPromise: true,
+        functionDeclaration: `function(){
+          var b = document.querySelector('[data-caos="agent-badge"]');
+          if (!b) return false;
+          b.style.visibility = ${visible ? "''" : "'hidden'"};
+          if (${visible ? 'true' : 'false'}) return true;
+          return new Promise(function (resolve) {
+            var done = false;
+            var finish = function () { if (!done) { done = true; resolve(true); } };
+            setTimeout(finish, 500);
+            requestAnimationFrame(function () { requestAnimationFrame(finish); });
+          });
+        }` });
       return this._unwrap(r) === true;
     } catch (_e) { return false; }
   }
@@ -727,6 +825,53 @@ class ElectronPage extends EventEmitter {
     // The guest belongs to Electron / the renderer: the driver only lets go of it.
     this.dispose();
   }
+}
+
+const roundRect = (r) => ({ x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) });
+
+// Driver-authored bodies for Runtime.callFunctionOn on a ref'd <select> (`this`); `a` is the only argument.
+// PLAN reads only. An option matches by exact value; if no value matches, by exact label. Anything but exactly one
+// enabled match is reported, never resolved by picking the first.
+const SELECT_PLAN = `
+  if (this.multiple) return { ok: false, reason: 'multiple' };
+  var opts = Array.prototype.slice.call(this.options || []);
+  if (opts.length > 5000) return { ok: false, reason: 'too-many-options' };
+  var hit = [];
+  for (var i = 0; i < opts.length; i++) if (opts[i].value === a) hit.push(i);
+  if (!hit.length) for (var j = 0; j < opts.length; j++) if (String(opts[j].label) === a) hit.push(j);
+  if (hit.length !== 1) return { ok: false, reason: hit.length ? 'ambiguous' : 'not-found', matches: hit.length };
+  var o = opts[hit[0]];
+  var group = o.parentElement && o.parentElement.tagName === 'OPTGROUP' ? o.parentElement : null;
+  if (o.disabled || (group && group.disabled)) return { ok: false, reason: 'disabled' };
+  return { ok: true, index: hit[0], value: String(o.value), label: String(o.label) };`;
+// APPLY re-checks that the planned option is still the same one, selects exactly it, and reads the selection back.
+const SELECT_APPLY = `
+  var opts = Array.prototype.slice.call(this.options || []);
+  var o = opts[a.index];
+  var group = o && o.parentElement && o.parentElement.tagName === 'OPTGROUP' ? o.parentElement : null;
+  if (!o || String(o.value) !== a.value || String(o.label) !== a.label || o.disabled || (group && group.disabled) || this.disabled) return { ok: false };
+  var before = opts.map(function (x) { return x.selected === true; });
+  if (typeof this.focus === 'function') this.focus();
+  for (var i = 0; i < opts.length; i++) { var want = i === a.index; if (opts[i].selected !== want) opts[i].selected = want; }
+  var changed = false;
+  for (var k = 0; k < opts.length; k++) if ((opts[k].selected === true) !== before[k]) changed = true;
+  if (changed) {
+    var E = this.ownerDocument.defaultView.Event;
+    this.dispatchEvent(new E('input', { bubbles: true, composed: true }));
+    this.dispatchEvent(new E('change', { bubbles: true }));
+  }
+  var values = [];
+  for (var m = 0; m < opts.length; m++) if (opts[m].selected === true) values.push(String(opts[m].value));
+  return { ok: true, changed: changed, values: values };`;
+
+function selectRefusal(reason, matches) {
+  if (reason === 'ambiguous') {
+    return driverError('AMBIGUOUS_TARGET', `${Number(matches) || 'Several'} options match that value; refusing to guess.`, { detail: 'OPTION_AMBIGUOUS' });
+  }
+  if (reason === 'disabled') return driverError('UNAVAILABLE', 'That option is disabled.', { detail: 'OPTION_DISABLED' });
+  if (reason === 'too-many-options') return driverError('UNSUPPORTED', 'The list has too many options.', { detail: 'SELECT_UNSUPPORTED' });
+  if (reason === 'multiple') return driverError('UNSUPPORTED', 'Multiple-selection lists are not supported.', { detail: 'SELECT_UNSUPPORTED' });
+  return driverError('UNAVAILABLE', 'No option has that value or label.', { detail: 'OPTION_NOT_FOUND' });
 }
 
 function countFrames(tree) {
@@ -779,29 +924,36 @@ class ElectronDriver {
     this.clampViewBounds = clampViewBounds;
   }
 
-  // Conservative until Electron-native conformance tests exist. "needs native confirmation"
-  // applies to EVERY true flag here (unit tests use fakes).
+  // Conservative. Three things were confirmed against real Electron (test/agent-runtime/drivers/electron.native.test.js:
+  // a WebContentsView and a <webview>, Linux under Xvfb): open shadow roots, the `select` action and screenshots.
+  // "needs native confirmation" still applies to every OTHER true flag here (their unit tests use fakes).
   static describe() {
     return {
       driver: 'electron-embedded',
       version: DRIVER_VERSION,
       dom: true,
       frames: false, // OOPIF / child-session routing must pass its own native tests first
-      shadowDom: false,
+      shadowDom: true, // OPEN roots only (the shared probe); closed roots are reported as a limitation
       canvas: false,
       popups: false, // main denies guest popups (web-contents-created) until managed popups exist
       downloads: false,
       uploads: false,
       dialogs: false,
       permissions: false,
-      screenshots: false, // wc.capturePage path implemented, not natively confirmed
+      screenshots: true, // wc.capturePage: viewport, a clip inside it, or one observed element that fits in it
       viewport: false, // a guest <webview> is sized by the app window; no emulated viewport in this driver
       humanHandoff: 'native',
       liveModeSwitch: false,
       modes: ['visible'],
       actions: ACTIONS.slice(),
       assertions: ['visible', 'text', 'exists', 'count', 'url'],
-      notes: { status: 'needs native confirmation', frames: 'main frame only; child frames are reported as unavailable', select: 'unsupported' },
+      notes: {
+        status: 'shadowDom, select and screenshots were confirmed on real Electron (Linux, Xvfb); every other flag still needs native confirmation',
+        frames: 'main frame only; child frames are reported as unavailable',
+        shadowDom: 'open-only',
+        select: 'native single <select> only; the option is set by exact value (else exact label) and input+change are script-made events; zero or several matching options are refused',
+        screenshots: 'pixels at the device scale; an element must fit inside the viewport; a zero-sized or hidden view is refused',
+      },
     };
   }
 
