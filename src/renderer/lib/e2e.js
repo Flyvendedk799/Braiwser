@@ -1361,6 +1361,99 @@ export async function run(I) {
       check('pins restored after reload', pins >= 1, 'pins=' + pins);
     }
 
+    // Shared by the sections below: the dialog in front, visible toasts, and a
+    // clean slate (failed replays above leave their report dialogs open).
+    // A pin badge stands for every note on its element and shows how many, so the
+    // notes on the page are the SUM of the badges, not the number of badges.
+    const pinsJs = "Array.from(document.querySelectorAll('[data-caos-bubble]:not([data-caos-bubble=\"new\"])')).reduce((n, b) => n + (parseInt(b.textContent, 10) || 0), 0)";
+    const topModal = () => { const all = document.querySelectorAll('.modal-backdrop'); return all[all.length - 1] || null; };
+    const toastSeen = (re) => Array.from(document.querySelectorAll('.toast-msg')).some((t) => re.test(t.textContent || ''));
+    const closeModals = async () => {
+      for (let i = 0; i < 8 && document.querySelector('.modal-backdrop'); i++) {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        await sleep(260);
+      }
+    };
+    const syncNotes = async () => {
+      I.state.annotations = await caos.annotations.bySession(session.id);
+      I.notesPanel().setAnnotations(I.state.annotations);
+    };
+
+
+    // --- 17f. Console capture is redacted and bounded on its way out ---
+    {
+      const noisy = [
+        { level: 3, message: 'login failed token=E2ESECRETTOKEN123 for the fixture user' },
+        { kind: 'load-error', message: `ERR_FAILED (-2) ${fixtureUrl}?code=E2ESECRETCODE456` },
+      ];
+      for (const format of ['prompt', 'markdown']) {
+        const out = await caos.export.build(format, session.id, { consoleLog: noisy });
+        const text = (out && out.content) || '';
+        check(`console in the ${format} export is redacted`, /login failed/.test(text) && /\[load-error\]/.test(text) && !/E2ESECRETTOKEN123|E2ESECRETCODE456/.test(text),
+          (text.match(/^- \[(?:error|load-error)\].*$/gm) || []).join(' ¦ ').slice(0, 160));
+      }
+      const flood = Array.from({ length: 300 }, (_v, i) => ({ level: 2, message: `E2E_FLOOD line ${i}` }));
+      const flooded = await caos.export.build('prompt', session.id, { consoleLog: flood });
+      const kept = ((flooded && flooded.content) || '').match(/E2E_FLOOD line \d+/g) || [];
+      check('a flood of console entries is bounded to the most recent', kept.length > 0 && kept.length <= 50 && kept[kept.length - 1] === 'E2E_FLOOD line 299', 'kept=' + kept.length);
+    }
+
+    // --- 17g. Locate a note that lives on another page / in another tab ---
+    {
+      await closeModals();
+      I.runCommand('panel.notes');
+      const otherUrl = fixtureUrl + '?page=two';
+      const firstTab = I.state.activeTabId;
+      const hereNow = () => guest('location.href');
+
+      // (1) Not open anywhere: clicking Locate on the card opens the note's page, then highlights.
+      const far = await caos.annotations.create({ sessionId: session.id, kind: 'element', action: 'fix', note: 'note on page two', url: otherUrl, title: 'E2E', target: { selector: '#cta', tag: 'button' } });
+      await syncNotes();
+      const farCard = Array.from(document.querySelectorAll('.notes-list .note')).find((n) => /note on page two/.test(n.textContent || ''));
+      check('a note from another page is marked as such', !!farCard && /other page/.test(farCard.textContent || ''));
+      const ack1 = onceChannel('caos:highlight-ack', 12000);
+      const locateBtn = farCard && farCard.querySelector('.note-act[title="Locate on page"]');
+      if (locateBtn) locateBtn.click();
+      const ackMsg1 = await ack1;
+      check('Locate opens the note’s page in this tab', (await hereNow()) === otherUrl && I.state.activeTabId === firstTab, await hereNow());
+      check('…and then highlights the element there', !!(ackMsg1 && ackMsg1.ok));
+
+      // (2) Open in another tab: Locate brings that tab forward instead of navigating this one.
+      const t2 = I.createTab(fixtureUrl);
+      await until(() => t2.wv.executeJavaScript(`location.href === ${JSON.stringify(fixtureUrl)} && document.readyState === 'complete'`, true), 9000);
+      await sleep(300);
+      const viaSwitch = await I.locateAnnotation(far);
+      check('Locate switches to the tab already showing the note’s page', viaSwitch === 'located' && I.state.activeTabId === firstTab, viaSwitch);
+      check('…and leaves the other tab on its own page', t2.url === fixtureUrl && (await t2.wv.executeJavaScript('location.href', true)) === fixtureUrl, t2.url);
+      I.closeTab(t2.id);
+      await sleep(150);
+      check('the first tab is in front again', I.state.activeTabId === firstTab && I.getWv() === wv);
+
+      // (3) The page opens but the element is gone: a distinct, visible message.
+      const goneRes = await I.locateAnnotation({ url: fixtureUrl, target: { selector: '#removed-since-the-review' } });
+      check('Locate says when the element is no longer on the note’s page', goneRes === 'not-found' && (await hereNow()) === fixtureUrl && toastSeen(/element is no longer there/i), goneRes);
+
+      // (4) The page cannot be opened at all: say so, do not pretend.
+      const deadUrl = fixtureUrl.replace('fixture.html', 'no-such-note-page.html');
+      const deadRes = await I.locateAnnotation({ url: deadUrl, target: { selector: '#cta' } });
+      check('Locate says when the note’s page cannot be opened', deadRes === 'open-failed' && toastSeen(/Could not open that note/i), deadRes);
+
+      // (5) Same page, nothing to do but highlight: no navigation.
+      const back = waitDomReady();
+      I.navigateTo(fixtureUrl);
+      await back;
+      await until(() => guest(`location.href === ${JSON.stringify(fixtureUrl)} && !!document.getElementById('cta')`));
+      await sleep(350);
+      const gen = (I.state.tabs.find((t) => t.id === firstTab) || {}).docGen;
+      const sameRes = await I.locateAnnotation({ url: fixtureUrl, target: { selector: '#cta' } });
+      check('Locate on the current page highlights without reloading', sameRes === 'located' && (I.state.tabs.find((t) => t.id === firstTab) || {}).docGen === gen, sameRes);
+
+      await caos.annotations.remove(far.id);
+      await syncNotes();
+      I.refreshPins();
+      await sleep(250);
+    }
+
     // --- 18. Page audit: run it, assert real rules fire, promote a finding ---
     {
       const auditMsg = onceChannel('caos:audit-result', 10000);

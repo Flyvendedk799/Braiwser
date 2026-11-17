@@ -34,6 +34,7 @@ import { createVerifyRunner } from './controllers/verify-controller.js';
 import { createSessionController } from './controllers/session-controller.js';
 import { captureScreenshot } from './controllers/screenshot-capture.js';
 import { requestFromGuest } from './controllers/guest-request.js';
+import { createLocator } from './controllers/locate.js';
 import { createTabDerived, resetForNewDocument, dropStaleAudit } from './controllers/tab-state.js';
 import { runBulk, describeBulk, toPanelResult } from './controllers/bulk.js';
 import { createAwakeHolder } from './controllers/keep-awake.js';
@@ -196,6 +197,7 @@ async function boot() {
       copyExport, verifySession, openSamplePage, exportClientPack, syncPersonaChrome,
       openOnboarding, coachmarks: () => coachmarks,
       setLeftView, setSidebarCollapsed,
+      locateAnnotation, editRecording,
     };
     import('./lib/e2e.js')
       .then((m) => m.run(internals))
@@ -1513,40 +1515,29 @@ function navigateTabAndWait(ctx, url, timeoutMs) {
   return createReplayDriver({ ctx, getUrl: () => (tab && tab.url) || '' }).navigate(url, { timeoutMs: timeoutMs || 8000 });
 }
 
-// Locate an annotation's element — navigating to its page first if the active
-// tab is showing a different URL — then highlight it and report if not found.
-async function locateAnnotation(a) {
-  if (!a || !a.target) return;
-  const ctx = ops.capture('locate');
-  if (!ctx.wv) return;
-  if (a.url && a.url !== ctx.url) {
-    const nav = await navigateTabAndWait(ctx, a.url);
-    if (nav.outcome !== 'ready') { toast('Could not open that note’s page', 'warn'); return; }
-    await sleep(150);
-  }
-  if (ops.staleReason(ctx)) return; // the tab went away while navigating
-  const ok = await highlightAndAck(ctx.wv, a.target);
-  if (!ok) toast('Could not locate that element on the page', 'warn');
-}
-
-// Highlight an arbitrary target descriptor (used by audit findings, which are
-// not annotations but carry the same anchor shape). Audit findings are only
-// located on the page they were found on.
-async function locateTarget(target, { audit = false } = {}) {
-  if (!target) { toast('This finding has no element to locate', 'warn'); return; }
-  const ctx = ops.capture('locate');
-  if (!ctx.wv) return;
-  if (audit) {
+// "Locate on page" (controllers/locate.js): highlight a note's element where it
+// lives — here, in another open tab, or after opening its page — and say why
+// when that is not possible.
+const locator = createLocator({
+  ops,
+  getTabs: () => state.tabs.map((t) => ({ id: t.id, url: t.url })),
+  setActiveTab: (id) => setActiveTab(id),
+  navigate: (ctx, url) => navigateTabAndWait(ctx, url),
+  highlight: (webview, target) => highlightAndAck(webview, target),
+  // Navigating a tab out from under its own replay would wreck the run.
+  busyReason: (tabId) => (state.replaying && replayRun && replayRun.ctx.tabId === tabId
+    ? 'That note is on another page — finish or cancel the replay to open it'
+    : null),
+  auditIsCurrent: (ctx) => {
     const tab = tabById(ctx.tabId);
     const a = tab && tab.derived.audit;
-    if (!a || !sameAuditedPage(a.source, { tabId: ctx.tabId, url: ctx.url })) {
-      toast('These findings belong to a different page — run the audit again', 'warn');
-      return;
-    }
-  }
-  const ok = await highlightAndAck(ctx.wv, target);
-  if (!ok) toast('Could not locate that element on the page', 'warn');
-}
+    return !!a && sameAuditedPage(a.source, { tabId: ctx.tabId, url: ctx.url });
+  },
+  toast,
+  sleep: (ms) => sleep(ms),
+});
+const locateAnnotation = (a) => locator.locateAnnotation(a);
+const locateTarget = (target, opts) => locator.locateTarget(target, opts);
 
 async function highlightAndAck(webview, target) {
   const reply = await requestFromGuest(webview, {
