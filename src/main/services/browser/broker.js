@@ -651,7 +651,7 @@ function createBroker(options = {}) {
         evidence.registerRun(adhocRunId, { ownerId: principal.id, sessionId, reviewSessionId: v.reviewSessionId || null, kind: 'adhoc' });
         ledger.sessionOpened({ sessionId, principalId: principal.id, driver: v.driver, mode: v.mode, reviewSessionId: v.reviewSessionId });
         const driverSession = await driver.open({ mode: v.mode, viewport: v.viewport, locale: v.locale, timezoneId: v.timezoneId, profile: v.profile,
-          onPageEvent: sessionPageEventHandler(() => session), requestFilter: caps.requestInterception ? policy.requestFilter(grant) : undefined });
+          onPageEvent: sessionPageEventHandler(() => session), requestFilter: caps.requestInterception ? policy.requestFilter(grant) : undefined, enforceRedirectHops: true });
         const publicCaps = { ...caps, liveModeSwitch: false, requestInterception: caps.requestInterception === true, policyEnforcement: caps.requestInterception ? 'request-level' : 'navigation-only', schemaVersion: C.SCHEMA_VERSION };
         session = new BrowserSession({ sessionId, ownerId: principal.id, driverName: v.driver, mode: v.mode, grant, reviewSessionId: v.reviewSessionId || null, capabilities: publicCaps, driverSession, adhocRunId });
         sessions.set(sessionId, session);

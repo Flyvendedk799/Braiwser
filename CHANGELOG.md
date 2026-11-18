@@ -30,6 +30,12 @@
 - The built-in skill lock was regenerated (`workflow-core.js` changed; `verify-notes@1.0.0` added). Skill versions were
   not bumped because none has been released.
 
+- Capability version is now **1.3.0** (seven added tools, nothing changed shape). Embedders that pin the exact tool set
+  (OpenBot) must accept it explicitly; see `docs/standalone-handoff.md`.
+- The redirect-hop guard is opt-in for direct users of the driver (`enforceRedirectHops`), and the broker always opts
+  in. Enabled unconditionally it blocked every request of an embedder that decides requests in its own route, which is
+  how SandboxOS's Browser uses the driver.
+
 Not done: `compare-fix` is still a library orchestration, not a `browser_run` skill. Delta observations are still not
 exposed. Downloads and uploads are still unsupported. The desktop review source has unit coverage only; no external MCP
 client has driven it against the running app.

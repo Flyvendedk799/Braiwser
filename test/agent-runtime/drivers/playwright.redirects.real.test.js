@@ -73,7 +73,7 @@ function guarded(name, fn) {
     const b = await startServer();
     const seen = [];
     const allowed = (url) => url.startsWith(`${a.origin}/`) || url.startsWith(`${a.alias}/`);
-    const session = await createPlaywrightDriver().open({ mode: 'headless', window: OFFSCREEN,
+    const session = await createPlaywrightDriver().open({ mode: 'headless', window: OFFSCREEN, enforceRedirectHops: true,
       requestFilter: (url, info) => { seen.push({ url, ...info }); return allowed(url) ? 'allow' : 'block'; } });
     const page = session.pages.values().next().value;
     const redirect = (to, { base = a.origin, code } = {}) => `${base}/redirect?to=${encodeURIComponent(to)}${code ? `&code=${code}` : ''}`;
@@ -206,7 +206,7 @@ test('redirect hops: a throwing filter blocks the hop (fail closed), and no filt
   const a = await startServer();
   const b = await startServer();
   const driver = createPlaywrightDriver();
-  const failing = await driver.open({ mode: 'headless', window: OFFSCREEN,
+  const failing = await driver.open({ mode: 'headless', window: OFFSCREEN, enforceRedirectHops: true,
     requestFilter: (url) => { if (url.startsWith(b.origin)) throw new Error('boom'); return 'allow'; } });
   try {
     const nav = await failing.pages.values().next().value.navigate(`${a.origin}/redirect?to=${encodeURIComponent(`${b.origin}/x`)}`);
@@ -221,4 +221,35 @@ test('redirect hops: a throwing filter blocks the hop (fail closed), and no filt
     assert.equal(nav.outcome, 'ready');
     assert.equal(b.requests.length, 1);
   } finally { await unguarded.close(); await a.close(); await b.close(); }
+});
+
+// An embedder that drives this driver directly (SandboxOS's Browser does) passes a block-everything filter as a
+// default and then decides every request in its OWN route on the session's context, including sending a request
+// somewhere else. The browser-level hop guard must not be switched on behind its back: it cannot be overridden by a
+// route, so it would block every page. It is opt-in, and the broker opts in.
+test('an embedder\'s own route still decides when it passes a default-deny filter without opting into the hop guard', async (t) => {
+  if (!avail.ok) { t.skip(avail.reason); return; }
+  const a = await startServer();
+  const b = await startServer();
+  const session = await createPlaywrightDriver().open({ mode: 'headless', window: OFFSCREEN, requestFilter: () => 'block' });
+  try {
+    assert.equal(session.requestGuard, null, 'no browser-level guard unless asked for');
+    // The embedder's policy: allow `a`, and serve anything addressed to a made-up name from `a` as well.
+    await session._context.route('**/*', (route) => {
+      const url = route.request().url();
+      if (url.startsWith(`${a.origin}/`)) return route.continue();
+      if (url.startsWith('http://my-machine.test/')) return route.continue({ url: url.replace('http://my-machine.test', a.origin) });
+      return route.abort('blockedbyclient');
+    });
+    const page = session.pages.values().next().value;
+    const direct = await page.navigate(`${a.origin}/page?html=${encodeURIComponent('<h1>direct</h1>')}`);
+    assert.equal(direct.outcome, 'ready', JSON.stringify(direct));
+    assert.equal(await page._raw.textContent('h1'), 'direct');
+    const rewritten = await page.navigate(`http://my-machine.test/page?html=${encodeURIComponent('<h1>rewritten</h1>')}`);
+    assert.equal(rewritten.outcome, 'ready', JSON.stringify(rewritten));
+    assert.equal(await page._raw.textContent('h1'), 'rewritten');
+    // The embedder's own refusals still hold.
+    await page.navigate(`${b.origin}/page`).catch(() => null);
+    assert.equal(b.requests.length, 0);
+  } finally { await session.close(); await a.close(); await b.close(); }
 });

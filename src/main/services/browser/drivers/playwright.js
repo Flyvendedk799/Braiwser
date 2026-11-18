@@ -1161,7 +1161,7 @@ class PlaywrightDriver {
       popups: true,
       downloads: !!downloadsGranted, // false => every download is cancelled and reported 'rejected'
       uploads: false,
-      requestInterception: true, // honours open({ requestFilter }): every http(s) request, each redirect hop included
+      requestInterception: true, // honours open({ requestFilter }); with enforceRedirectHops (the broker always sets it) each redirect hop too
       dialogs: true, // observed; default policy DISMISS, accept only via resolveDialog()
       permissions: true, // default deny; no grant API exposed
       screenshots: true,
@@ -1252,7 +1252,13 @@ class PlaywrightDriver {
           ? route.continue() : route.abort('blockedbyclient')));
         // Playwright does not route redirect hops, so the route above only ever sees the first URL of a fetch.
         // The hop guard is a second, browser-level interception that pauses each hop before it is sent.
-        guard = await installHopGuard(browser, decide);
+        //
+        // It is opt-in (`enforceRedirectHops: true`), and the broker always opts in. The route above can be
+        // overridden by a route the caller registers afterwards on `session._context` (Playwright runs the
+        // newest route first), and embedders rely on exactly that: SandboxOS passes a block-everything filter
+        // as a default and decides each request in its own route. A browser-level guard cannot be overridden
+        // that way, so switching it on for every caller of `requestFilter` would block all of their traffic.
+        if (o.enforceRedirectHops === true) guard = await installHopGuard(browser, decide);
       }
       if (grant) tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'braiwser-dl-'));
       const session = new PlaywrightSession({ browser, context, mode, opts, onPageEvent: o.onPageEvent, tmpDir, downloadGrant: grant });

@@ -5,7 +5,10 @@ import { z } from 'zod';
 import core from './workflow-core.js';
 
 export const SCHEMA_VERSION = 1;
-export const CAPABILITY_VERSION = '1.2.0';
+// Bumped whenever the tool surface changes, additions included: embedders (OpenBot) pin the
+// exact version and the exact tool set, so an unannounced new tool would be refused with no reason.
+//   1.3.0  adds browser_pages and the six review_* tools; no existing tool changed shape.
+export const CAPABILITY_VERSION = '1.3.0';
 export const closeResultSchema = z.strictObject({ closed: z.literal(true) });
 export const DEFAULT_RESPONSE_BUDGET = 64 * 1024; // bytes; audit target
 

@@ -710,7 +710,7 @@ test('requestFilter: every request and every redirect hop is decided by the filt
   if (!avail.ok) { t.skip(avail.reason); return; }
   let g;
   const seen = [];
-  g = await openFixtureSession({ open: { requestFilter: (url, ctx) => { seen.push([url, ctx.navigation, ctx.redirect]); return url.startsWith(g.origin.origin) ? 'allow' : 'block'; } } });
+  g = await openFixtureSession({ open: { enforceRedirectHops: true, requestFilter: (url, ctx) => { seen.push([url, ctx.navigation, ctx.redirect]); return url.startsWith(g.origin.origin) ? 'allow' : 'block'; } } });
   try {
     const page = g.page;
     const before = g.other.requests.length;
@@ -738,7 +738,7 @@ test('requestFilter: every request and every redirect hop is decided by the filt
     assert.ok(seen.some(([u, , isHop]) => u === `${g.other.origin}/task.html` && isHop === true), 'the hop itself was put to the filter');
   } finally { await g.close(); }
 
-  const failClosed = await openFixtureSession({ open: { requestFilter: () => { throw new Error('boom'); } } });
+  const failClosed = await openFixtureSession({ open: { enforceRedirectHops: true, requestFilter: () => { throw new Error('boom'); } } });
   try {
     assert.equal((await failClosed.page.navigate(failClosed.url('task.html'))).outcome, 'failed');
     assert.equal(failClosed.origin.requests.length, 0);

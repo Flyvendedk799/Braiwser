@@ -16,7 +16,13 @@ const candidates = [process.env.BRAIWSER_TEST_BROWSER, process.env.PLAYWRIGHT_CH
   '/usr/bin/chromium', '/usr/bin/google-chrome', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].filter(Boolean);
 const executablePath = candidates.find((p) => fs.existsSync(p));
 
-test('review notes are read, proven not fixed, proven fixed and re-opened on regression over real MCP', { skip: !executablePath && 'no Chromium-family browser available', timeout: 120000 }, async (t) => {
+// The same loop under both standalone deployments: `local` (braiwser mcp, a developer's machine) and `proxy`
+// (a trusted supervisor such as OpenBot relays the human owner; the agent side is unchanged).
+const DEPLOYMENTS = [
+  { name: 'local', options: {} },
+  { name: 'proxy', options: { deployment: 'proxy', proxyToken: 'review-loop-proxy-secret-'.padEnd(48, 'k'), keepAlive: true, ownerId: 'human' } },
+];
+for (const deployment of DEPLOYMENTS) test(`review notes are read, proven not fixed, proven fixed and re-opened on regression over real MCP (${deployment.name} deployment)`, { skip: !executablePath && 'no Chromium-family browser available', timeout: 120000 }, async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'braiwser-review-loop-'));
   let fixed = false;
   const site = http.createServer((req, res) => {
@@ -49,7 +55,7 @@ test('review notes are read, proven not fixed, proven fixed and re-opened on reg
     recordings: [],
   }));
 
-  const service = await startServer({ dataDir: path.join(dir, 'store'), reviewDir, driverOptions: { executablePath },
+  const service = await startServer({ dataDir: path.join(dir, 'store'), reviewDir, driverOptions: { executablePath }, ...deployment.options,
     principal: { id: 'fixture-agent', kind: 'mcp', scopes: ['class:observe', 'class:navigate', 'class:interact', `origin:${origin}`, 'review:read', 'review:write'] } });
   const client = new Client({ name: 'agent', version: '1.0.0' });
   t.after(async () => { await client.close().catch(() => {}); await service.close(); await new Promise((r) => site.close(r)); fs.rmSync(dir, { recursive: true, force: true }); });
