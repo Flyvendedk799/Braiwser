@@ -224,9 +224,12 @@ function createPolicy({ clock = { now: () => Date.now() }, fs = nodeFs, lookup, 
   const budgetUsage = (grant) => ({ ...(budgetStates.get(grant.grantId) || {}) });
 
   // ---- destinations (navigation-only) ------------------------------------------------
-  function checkDestination(grant, rawUrl) {
+  function checkDestination(grant, rawUrl, { webAsset = false } = {}) {
     const no = (reason) => ({ allowed: false, reason, url: redactUrl(String(rawUrl).slice(0, 2048)) || '[invalid]' });
-    if (typeof rawUrl !== 'string' || rawUrl.length > 2048) return no('invalid_url');
+    // Bundled scripts and signed CDN assets can have longer query strings than a typed address.
+    if (typeof rawUrl !== 'string') return no('invalid_url');
+    const limit = webAsset && /^https?:\/\//i.test(rawUrl) ? 16384 : 2048;
+    if (rawUrl.length > limit) return no('invalid_url');
     let u;
     try { u = new URL(rawUrl); } catch { return no('invalid_url'); }
     if (u.username || u.password) return no('credentials_in_url');
@@ -262,7 +265,7 @@ function createPolicy({ clock = { now: () => Date.now() }, fs = nodeFs, lookup, 
   }
 
   // Hook for drivers that CAN intercept every request (capabilities.requestInterception).
-  const requestFilter = (grant) => (url) => (checkDestination(grant, url).allowed ? 'allow' : 'block');
+  const requestFilter = (grant) => (url, info) => (checkDestination(grant, url, { webAsset: info?.navigation === false }).allowed ? 'allow' : 'block');
 
   // ---- actions ---------------------------------------------------------------------------
   const traitSet = (t) => new Set((t && Array.isArray(t.traits) ? t.traits : []).map((x) => String(x).toLowerCase()));

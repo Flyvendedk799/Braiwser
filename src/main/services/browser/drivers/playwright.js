@@ -308,7 +308,7 @@ class PlaywrightPage extends EventEmitter {
       signal.addEventListener('abort', onAbort, { once: true });
     });
     const started = Date.now();
-    const attemptGoto = (budget) => this._raw.goto(target, { waitUntil: 'load', timeout: budget });
+    const attemptGoto = (budget) => this._raw.goto(target, { waitUntil: this._opts.navigationWaitUntil, timeout: budget });
     const gotoP = attemptGoto(timeout)
       .catch(async (err) => {
         // A failed navigation commits Chromium's error page a moment LATER; a goto issued in that window is
@@ -879,9 +879,9 @@ class PlaywrightPage extends EventEmitter {
       if (![deltaX, deltaY].every((n) => Number.isFinite(n) && Math.abs(n) <= 4096)) bad();
       await this._raw.mouse.wheel(deltaX, deltaY);
     } else if (kind === 'back') {
-      await this._raw.goBack({ waitUntil: 'load', timeout: this._opts.navigationTimeoutMs }).catch(() => null);
+      await this._raw.goBack({ waitUntil: this._opts.navigationWaitUntil, timeout: this._opts.navigationTimeoutMs }).catch(() => null);
     } else if (kind === 'reload') {
-      await this._raw.reload({ waitUntil: 'load', timeout: this._opts.navigationTimeoutMs }).catch(() => null);
+      await this._raw.reload({ waitUntil: this._opts.navigationWaitUntil, timeout: this._opts.navigationTimeoutMs }).catch(() => null);
     } else bad();
     await capturePrivate();
     return { dispatched: true, ...(input.privateInput ? { privateValues, privateCaptureComplete } : {}) };
@@ -1143,6 +1143,7 @@ class PlaywrightDriver {
       actionabilityTimeoutMs: o.actionabilityTimeoutMs || 1500,
       dispatchTimeoutMs: o.dispatchTimeoutMs || 2000,
       navigationTimeoutMs: o.navigationTimeoutMs || 15000,
+      navigationWaitUntil: o.navigationWaitUntil === 'domcontentloaded' ? 'domcontentloaded' : 'load',
       dialogDeadlineMs: o.dialogDeadlineMs || 2000,
       refTtlMs: o.refTtlMs || REF_TTL_MS,
     };
