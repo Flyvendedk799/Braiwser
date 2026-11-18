@@ -28,7 +28,8 @@ document.getElementById('save').addEventListener('click', function () { document
 function setup(opts) {
   const guest = createFakeGuest({ html: PAGE, ...(opts || {}) });
   // the page script above only runs in jsdom when scripts run; wire the handler directly instead
-  guest.doc.getElementById('save').addEventListener('click', () => { guest.doc.getElementById('status').textContent = 'Saved'; });
+  const saveButton = guest.doc.getElementById('save'); // absent when a test brings its own markup
+  if (saveButton) saveButton.addEventListener('click', () => { guest.doc.getElementById('status').textContent = 'Saved'; });
   const broker = createDebuggerBroker();
   const driver = createElectronDriver({ debuggerBroker: broker });
   const events = [];
@@ -40,16 +41,21 @@ const byName = (o, name, role) => o.nodes.find((n) => n.name === name && (!role 
 const clickCmd = (o, node, extra) => ({ driverDocumentEpoch: o.documentEpoch, observationId: o.observationId, action: { kind: 'click', refId: node.refId, ...(extra || {}) } });
 const control = (calls) => ({ signal: null, check() { calls.check += 1; }, beforeDispatch() { calls.before += 1; } });
 
-test('capabilities are conservative until native tests exist', () => {
+test('capabilities are conservative: only what electron.native.test.js proved on real Electron is switched on', () => {
   const caps = createElectronDriver().capabilities();
   assert.equal(caps.driver, 'electron-embedded');
-  for (const k of ['frames', 'shadowDom', 'canvas', 'popups', 'downloads', 'uploads', 'dialogs', 'permissions', 'screenshots']) {
+  for (const k of ['frames', 'canvas', 'popups', 'downloads', 'uploads', 'dialogs', 'permissions', 'viewport']) {
     assert.equal(caps[k], false, k);
   }
+  // natively confirmed (see electron.native.test.js); everything else above stays off
+  assert.equal(caps.shadowDom, true);
+  assert.equal(caps.notes.shadowDom, 'open-only');
+  assert.equal(caps.screenshots, true);
+  assert.deepEqual(caps.actions, ['click', 'fill', 'press', 'select', 'check', 'navigate']);
   assert.deepEqual(caps.modes, ['visible']);
   assert.equal(caps.liveModeSwitch, false);
   assert.match(caps.notes.status, /native confirmation/);
-  assert.ok(!caps.actions.includes('select'));
+  assert.match(caps.notes.select, /script-made/);
 });
 
 test('guest registry: opaque ids, idempotent, validated, auto-forgotten, watchHost wiring', async () => {
@@ -282,8 +288,228 @@ test('owner badge is drawn via the probe overlay and hidden for screenshots', as
   assert.notEqual(guest.doc.querySelector('[data-caos="agent-badge"]').style.visibility, 'hidden');
   const o = await page.observe();
   assert.ok(!o.nodes.some((n) => /control/i.test(n.name)), 'the overlay is never observed');
-  await assert.rejects(page.screenshot({ clip: { x: 0, y: 0, width: 1, height: 1 } }), (e) => e.code === 'UNSUPPORTED');
   await assert.rejects(page.setOwnerBadge('root'), (e) => e.code === 'UNSUPPORTED');
+});
+
+test('screenshot: viewport or a clip inside it; an empty image and a zero-sized viewport are refused', async () => {
+  const { guest, pageId, open } = setup();
+  const session = await open();
+  const page = session.pages.get(pageId);
+  const whole = await page.screenshot();
+  assert.deepEqual(whole.meta.viewport, { width: 1280, height: 8000 });
+  assert.deepEqual([whole.meta.clip, whole.meta.transformed, whole.meta.documentEpoch], [null, false, page.documentEpoch]);
+  assert.ok(Buffer.isBuffer(whole.bytes) && whole.bytes.length > 0);
+  assert.deepEqual(guest.wc.captures.at(-1), { badgeHidden: true }, 'no rectangle is passed for the whole viewport');
+
+  const clipped = await page.screenshot({ clip: { x: 10.4, y: 20.6, width: 100, height: 50 } });
+  assert.deepEqual(clipped.meta.clip, { x: 10, y: 21, width: 100, height: 50 });
+  assert.deepEqual(guest.wc.captures.at(-1).rect, { x: 10, y: 21, width: 100, height: 50 });
+
+  const before = guest.wc.captures.length;
+  for (const clip of [{ x: -1, y: 0, width: 5, height: 5 }, { x: 0, y: 0, width: 1281, height: 5 }, { x: 0, y: 7990, width: 5, height: 11 },
+    { x: 0, y: 0, width: 0, height: 5 }, { x: 0, y: 0, width: NaN, height: 5 }, { x: 0, y: 0, width: 5 }]) {
+    await assert.rejects(page.screenshot({ clip }), (e) => e.code === 'UNSUPPORTED' && e.detail === 'CLIP_INVALID');
+  }
+  assert.equal(guest.wc.captures.length, before, 'an invalid clip never reaches capturePage');
+
+  guest.wc.captureEmpty = true; // what a hidden or zero-sized view returns
+  await assert.rejects(page.screenshot(), (e) => e.code === 'UNAVAILABLE' && e.detail === 'CAPTURE_EMPTY');
+  await assert.rejects(page.capture(), (e) => e.code === 'UNAVAILABLE' && e.detail === 'CAPTURE_EMPTY');
+  guest.wc.captureEmpty = false;
+  Object.defineProperty(guest.win, 'innerWidth', { value: 0, configurable: true });
+  await assert.rejects(page.screenshot(), (e) => e.code === 'UNAVAILABLE' && e.detail === 'NOT_CAPTURABLE');
+  await session.close();
+});
+
+test('capture: the whole viewport, or exactly the box of one observed element; never a stale or oversized one', async () => {
+  const { guest, pageId, open } = setup();
+  const session = await open();
+  const page = session.pages.get(pageId);
+  const o = await page.observe();
+  const whole = await page.capture();
+  assert.equal(whole.meta.clip, null);
+
+  const save = byName(o, 'Save', 'button');
+  const box = guest.doc.getElementById('save').getBoundingClientRect();
+  const shot = await page.capture({ refId: save.refId });
+  assert.deepEqual(shot.meta.clip, { x: box.left, y: box.top, width: box.width, height: box.height });
+  assert.deepEqual(guest.wc.captures.at(-1).rect, shot.meta.clip);
+  assert.equal(shot.meta.transformed, false);
+  assert.ok(guest.dbg.calls.every((c) => !['Runtime.evaluate', 'Runtime.compileScript'].includes(c.method)), 'no general eval path');
+
+  const before = guest.wc.captures.length;
+  await assert.rejects(page.capture({ refId: 'r_nope' }), (e) => e.code === 'STALE_REF' && e.detail === 'REF_UNKNOWN');
+  await assert.rejects(page.capture({ refId: byName(o, 'Delete').refId }), (e) => e.code === 'AMBIGUOUS_TARGET');
+  // an element that does not fit in the viewport is refused rather than cropped
+  Object.defineProperty(guest.win, 'innerHeight', { value: box.top + 5, configurable: true });
+  await assert.rejects(page.capture({ refId: save.refId }), (e) => e.code === 'UNAVAILABLE' && e.detail === 'NOT_CAPTURABLE');
+  Object.defineProperty(guest.win, 'innerHeight', { value: 8000, configurable: true });
+  // a node that was hidden since it was observed is a changed target
+  guest.doc.getElementById('save').setAttribute('hidden', '');
+  await assert.rejects(page.capture({ refId: save.refId }), (e) => e.code === 'STALE_REF' && e.detail === 'TARGET_CHANGED');
+  guest.doc.getElementById('save').removeAttribute('hidden');
+  // the document moved on
+  guest.wc.emit('did-navigate', {}, 'http://guest.test/next');
+  await assert.rejects(page.capture({ refId: save.refId }), (e) => e.code === 'STALE_REF');
+  assert.equal(guest.wc.captures.length, before, 'no refused capture ever reached capturePage');
+  await session.close();
+});
+
+const SELECT_PAGE = `<!doctype html><html><head><title>Select</title></head><body><main>
+  <label>Plan <select id="plan">
+    <option value="free">Free</option><option value="pro">Pro tier</option>
+    <option value="legacy" disabled>Legacy</option>
+    <optgroup label="Retired" disabled><option value="retired">Retired plan</option></optgroup>
+    <option value="dup">Duplicate A</option><option value="dup">Duplicate B</option>
+    <option value="x1">Same label</option><option value="x2">Same label</option>
+  </select></label>
+  <label>Locked <select id="locked" disabled><option value="a">A</option><option value="b">B</option></select></label>
+  <button id="apply" type="button">Apply</button>
+</main></body></html>`;
+
+function selectSetup() {
+  const s = setup({ html: SELECT_PAGE });
+  const seen = [];
+  const plan = s.guest.doc.getElementById('plan');
+  for (const type of ['input', 'change']) plan.addEventListener(type, (e) => seen.push(`${type}:${plan.value}:${e.bubbles}`));
+  return { ...s, seen, plan };
+}
+const selectCmd = (o, node, value) => ({ driverDocumentEpoch: o.documentEpoch, observationId: o.observationId, action: { kind: 'select', refId: node.refId, value } });
+
+test('select: exactly one option by value, input+change when the selection changed, selection read back', async () => {
+  const { guest, pageId, open, seen, plan } = selectSetup();
+  const session = await open();
+  const page = session.pages.get(pageId);
+  const o = await page.observe();
+  const node = byName(o, 'Plan', 'combobox');
+  const calls = { check: 0, before: 0 };
+  const res = await page.act(selectCmd(o, node, 'pro'), control(calls));
+  assert.equal(res.status, 'verified');
+  assert.deepEqual(res.evidence, [{ kind: 'selected', observed: true, matches: true, count: 1, documentEpoch: o.documentEpoch }]);
+  assert.equal(plan.value, 'pro');
+  assert.deepEqual(seen, ['input:pro:true', 'change:pro:true']);
+  assert.equal(calls.before, 1, 'beforeDispatch ran once, right before the selection');
+  assert.ok(guest.dbg.calls.every((c) => !c.method.startsWith('Input.')), 'no pointer or key input is sent for a select');
+  assert.ok(guest.dbg.calls.every((c) => !['Runtime.evaluate', 'Runtime.compileScript'].includes(c.method)), 'no general eval path');
+
+  // selecting what is already selected changes nothing and fires nothing
+  const again = await page.act(selectCmd(o, node, 'pro'), control(calls));
+  assert.equal(again.status, 'verified');
+  assert.equal(seen.length, 2);
+
+  // no option has the VALUE "Free", exactly one has that LABEL: it is selected, but not verified as value "Free"
+  const byLabel = await page.act(selectCmd(o, node, 'Free'), control(calls));
+  assert.equal(plan.value, 'free');
+  assert.equal(byLabel.status, 'dispatched');
+  assert.equal(byLabel.evidence[0].matches, false);
+
+  // an expectation is evaluated after the selection
+  const expected = await page.act({ ...selectCmd(o, node, 'pro'), action: { kind: 'select', refId: node.refId, value: 'pro', expect: { kind: 'exists', selector: '#plan' } } }, control(calls));
+  assert.equal(expected.status, 'verified');
+  await session.close();
+});
+
+test('select refusals dispatch nothing: unknown, disabled, ambiguous, wrong element, bad value, covered, stale', async () => {
+  const { guest, pageId, open, seen, plan } = selectSetup();
+  const session = await open();
+  const page = session.pages.get(pageId);
+  const o = await page.observe();
+  const node = byName(o, 'Plan', 'combobox');
+  const calls = { check: 0, before: 0 };
+  const refuse = async (target, value, code, detail) => {
+    const err = await page.act(selectCmd(o, target, value), control(calls)).then(() => null, (e) => e);
+    assert.ok(err, `${value} should be refused`);
+    assert.deepEqual([err.code, err.detail, err.dispatched], [code, detail, false], err.message);
+  };
+  await refuse(node, 'nope', 'UNAVAILABLE', 'OPTION_NOT_FOUND');
+  await refuse(node, 'legacy', 'UNAVAILABLE', 'OPTION_DISABLED');
+  await refuse(node, 'retired', 'UNAVAILABLE', 'OPTION_DISABLED');
+  await refuse(node, 'dup', 'AMBIGUOUS_TARGET', 'OPTION_AMBIGUOUS');
+  await refuse(node, 'Same label', 'AMBIGUOUS_TARGET', 'OPTION_AMBIGUOUS');
+  await refuse(byName(o, 'Locked', 'combobox'), 'b', 'UNAVAILABLE', 'NOT_ACTIONABLE');
+  await refuse(byName(o, 'Apply', 'button'), 'pro', 'UNSUPPORTED', 'SELECT_UNSUPPORTED');
+  await refuse(node, 'x'.repeat(501), 'UNSUPPORTED', 'VALUE_INVALID');
+  await assert.rejects(page.act({ ...selectCmd(o, node, 'pro'), action: { kind: 'select', refId: node.refId } }, control(calls)), (e) => e.detail === 'VALUE_INVALID');
+  guest.state.coverBy = guest.doc.getElementById('apply');
+  await refuse(node, 'pro', 'UNAVAILABLE', 'NOT_ACTIONABLE');
+  guest.state.coverBy = null;
+  plan.multiple = true;
+  await refuse(node, 'pro', 'STALE_REF', 'TARGET_CHANGED'); // it is a different control now (listbox)
+  plan.multiple = false;
+  guest.wc.emit('did-navigate', {}, 'http://guest.test/next');
+  await refuse(node, 'pro', 'STALE_REF', 'STALE_DOCUMENT');
+  assert.equal(calls.before, 0, 'beforeDispatch was never reached');
+  assert.deepEqual(seen, []);
+  assert.equal(plan.value, 'free', 'the selection never changed');
+  await session.close();
+});
+
+test('select: options that change between the decision and the selection are not guessed at', async () => {
+  const { pageId, open, seen, plan } = selectSetup();
+  const session = await open();
+  const page = session.pages.get(pageId);
+  const o = await page.observe();
+  const node = byName(o, 'Plan', 'combobox');
+  // the page swaps the option list at the last moment (here: when the broker's final check runs)
+  const hostile = { signal: null, check() {}, beforeDispatch() { plan.options[1].value = 'enterprise'; } };
+  const err = await page.act(selectCmd(o, node, 'pro'), hostile).then(() => null, (e) => e);
+  assert.deepEqual([err.code, err.detail], ['STALE_REF', 'TARGET_CHANGED']);
+  assert.equal(err.dispatched, true, 'the dispatch gate was passed, so the driver does not claim "nothing happened"');
+  assert.equal(plan.selectedIndex, 0);
+  assert.deepEqual(seen, []);
+  await session.close();
+});
+
+const SHADOW_PAGE = `<!doctype html><html><head><title>Shadow</title></head><body><main>
+  <div id="open-host"></div><div id="closed-host"></div><div id="nested-host"></div>
+  <div role="status" id="log">idle</div>
+</main></body></html>`;
+
+test('open shadow roots are traversed (also nested), closed roots are not, and a shadow node is clicked at its own point', async () => {
+  const s = setup({ html: SHADOW_PAGE });
+  const { guest, pageId, open } = s;
+  const doc = guest.doc;
+  const log = doc.getElementById('log');
+  const openRoot = doc.getElementById('open-host').attachShadow({ mode: 'open' });
+  openRoot.innerHTML = '<button id="shadow-btn" type="button">Shadow action</button>';
+  openRoot.getElementById('shadow-btn').addEventListener('click', () => { log.textContent = 'shadow clicked'; });
+  doc.getElementById('closed-host').attachShadow({ mode: 'closed' }).innerHTML = '<button type="button">Closed action</button>';
+  const outer = doc.getElementById('nested-host').attachShadow({ mode: 'open' });
+  outer.innerHTML = '<div id="inner-host"></div>';
+  const inner = outer.getElementById('inner-host').attachShadow({ mode: 'open' });
+  inner.innerHTML = '<button id="deep" type="button">Deep action</button>';
+  inner.getElementById('deep').addEventListener('click', () => { log.textContent = 'deep clicked'; });
+
+  const session = await open();
+  const page = session.pages.get(pageId);
+  const o = await page.observe();
+  const shadowBtn = byName(o, 'Shadow action', 'button');
+  const deep = byName(o, 'Deep action', 'button');
+  assert.ok(shadowBtn && shadowBtn.refId && deep && deep.refId);
+  assert.ok(!byName(o, 'Closed action'), 'a closed root is never traversed');
+  assert.equal(o.coverage.shadowRootsOpen, 3);
+
+  const calls = { check: 0, before: 0 };
+  const r1 = await page.act(clickCmd(o, shadowBtn), control(calls));
+  assert.equal(log.textContent, 'shadow clicked');
+  assert.equal(r1.status, 'verified');
+  const pressed = guest.dbg.calls.filter((c) => c.method === 'Input.dispatchMouseEvent' && c.params.type === 'mousePressed').at(-1).params;
+  const box = openRoot.getElementById('shadow-btn').getBoundingClientRect();
+  assert.deepEqual([pressed.x, pressed.y], [box.left + box.width / 2, box.top + box.height / 2], 'the click lands on the shadow node, not its host');
+  const r2 = await page.act(clickCmd(o, deep), control(calls));
+  assert.equal(log.textContent, 'deep clicked');
+  assert.equal(r2.status, 'verified');
+
+  // a shadow node that is replaced is stale, exactly like a light-DOM node
+  openRoot.innerHTML = '<button type="button">Shadow action</button>';
+  const err = await page.act(clickCmd(o, shadowBtn), control(calls)).then(() => null, (e) => e);
+  assert.equal(err.code, 'STALE_REF');
+  // the element behind a shadow ref can be captured on its own
+  const o2 = await page.observe();
+  const shot = await page.capture({ refId: byName(o2, 'Deep action').refId });
+  const deepBox = inner.getElementById('deep').getBoundingClientRect();
+  assert.deepEqual(shot.meta.clip, { x: deepBox.left, y: deepBox.top, width: deepBox.width, height: deepBox.height });
+  await session.close();
 });
 
 test('highlight marks only the referenced node', async () => {

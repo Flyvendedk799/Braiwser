@@ -5,6 +5,7 @@
   "description": "Braiwser — an annotation-first inspector browser for agentic UI review and testing. Open any web project, click any element, leave notes, audit accessibility, record journeys, and hand the whole review to a coding agent.",
   "main": "src/main/main.js",
   "bin": {
+    "braiwser": "src/main/services/automation/up.mjs",
     "braiwser-agent": "src/main/services/automation/cli.mjs",
     "braiwser-mcp": "src/main/services/automation/sidecar.mjs",
     "braiwser-server": "src/main/services/automation/server.mjs"

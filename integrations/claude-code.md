@@ -2,6 +2,14 @@
 
 Braiwser's coding-agent surface is the MCP sidecar. The bridge token stays in the connection file named by `BRAIWSER_BRIDGE_INFO`. It does not go in Claude's config.
 
+Without the desktop app, one command starts a headless supervised browser limited to the sites you name:
+
+```
+claude mcp add braiwser -- npx -y github:Flyvendedk799/Braiwser braiwser mcp --origin http://localhost:3000 --review ./review
+```
+
+`--review` is a folder of project bundles exported from Braiwser; with it Claude can read your notes (`review_notes`), prove them with a `verify-notes` run and attach the result (`review_note_report`). This form has been exercised with the MCP SDK client, not with Claude Code itself.
+
 From a checkout, with Braiwser already running and `BRAIWSER_AGENT_RUNTIME=1`:
 
 ```

@@ -155,3 +155,39 @@ test('a throwing single-note action becomes a visible error', async () => {
   await tick(5);
   assert.ok(Array.from(document.querySelectorAll('.toast-msg')).some((t) => /Delete note failed: nope/.test(t.textContent)));
 });
+
+// Leaving edit mode removes the focused textarea, and Chromium then fires `blur`
+// on it. jsdom does not, so the blur is dispatched by hand here.
+function editFirst(panel, text) {
+  click(cards(panel)[0].querySelector('[aria-label="Edit note"]'));
+  const ta = panel.root.querySelector('textarea.note-edit');
+  ta.value = text;
+  return ta;
+}
+const keydown = (el, k, opts = {}) => el.dispatchEvent(new window.KeyboardEvent('keydown', { key: k, bubbles: true, ...opts }));
+
+test('regression: Escape abandons a note edit even though removing the field blurs it', () => {
+  const saved = [];
+  const { panel } = mount({ editNote: (a, text) => { saved.push([a.id, text]); } });
+  const ta = editFirst(panel, 'abandoned');
+  keydown(ta, 'Escape');
+  ta.dispatchEvent(new window.Event('blur'));
+  assert.deepEqual(saved, []);
+  assert.equal(panel.root.querySelector('textarea.note-edit'), null);
+  assert.equal(order(panel)[0], 'n1', 'the original text is shown again');
+});
+
+test('a note edit is saved exactly once: Ctrl+Enter, or blur', () => {
+  const saved = [];
+  const { panel } = mount({ editNote: (a, text) => { saved.push([a.id, text]); } });
+  let ta = editFirst(panel, '  via shortcut  ');
+  keydown(ta, 'Enter', { ctrlKey: true });
+  ta.dispatchEvent(new window.Event('blur'));
+  assert.deepEqual(saved, [['n1', 'via shortcut']]);
+
+  panel.setAnnotations(NOTES());
+  ta = editFirst(panel, 'via blur');
+  ta.dispatchEvent(new window.Event('blur'));
+  ta.dispatchEvent(new window.Event('blur'));
+  assert.deepEqual(saved, [['n1', 'via shortcut'], ['n1', 'via blur']]);
+});

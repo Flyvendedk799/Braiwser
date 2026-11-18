@@ -252,6 +252,16 @@ function evaluateAssert(step) {
       facts.matchCount = matches.length;
       facts.firstText = matches.length ? rawText(matches[0]) : null;
       facts.firstVisible = matches.length ? isVisible(matches[0]) : null;
+      // Style facts come from the same probe the agent drivers use, so the in-app
+      // replay and a verified run agree on what "the style is applied" means.
+      if (a.kind === 'style' && matches.length) {
+        try {
+          const raw = require('./probe').run('assertFacts', { el: matches[0], style: a.style });
+          if (raw && raw.style) facts.style = raw.style;
+        } catch (_e) {
+          /* no style facts => the assertion fails, it never passes */
+        }
+      }
     } else {
       facts.matchCount = 0;
     }

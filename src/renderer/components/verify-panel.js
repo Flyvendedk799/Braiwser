@@ -219,6 +219,56 @@ export function createVerifyPanel(actions) {
     return block;
   }
 
+  // Per-note verdicts. Only 'fixed' is green; a note nobody could check says so.
+  const NOTE_VERDICT = {
+    fixed: { tone: 'good', icon: 'check', label: 'Fixed' },
+    'not-fixed': { tone: 'bad', icon: 'close', label: 'Not fixed' },
+    regressed: { tone: 'bad', icon: 'close', label: 'Regressed' },
+    unknown: { tone: 'warn', icon: 'help', label: 'Could not check' },
+    unverifiable: { tone: 'neutral', icon: 'help', label: 'Needs a person' },
+  };
+  function noteChecksBlock(nc) {
+    if (!nc || typeof nc !== 'object') return null;
+    if (nc.status !== 'completed') {
+      if (nc.status === 'missing') return null;
+      return h('div', { class: 'verify-notes', 'data-testid': 'verify-notes' }, [
+        h('div', { class: 'vj-title', text: 'Notes' }),
+        h('div', { class: 'vj-note', text: `The notes on this page could not be checked (${nc.reason || nc.status}).` }),
+      ]);
+    }
+    const items = Array.isArray(nc.items) ? nc.items : [];
+    if (!items.length && !nc.otherPages) return null;
+    const block = h('div', { class: 'verify-notes', 'data-testid': 'verify-notes' });
+    const checked = items.filter((it) => it.verdict !== 'unverifiable').length;
+    block.appendChild(h('div', { class: 'vj-title', text: `Notes checked against the page: ${nc.fixed || 0} of ${checked} fixed` }));
+    if (nc.previewActive) {
+      block.appendChild(h('div', { class: 'vj-note', text: 'A live preview of an edit is still applied to this page, so the notes were not graded. Reload the page and verify again.' }));
+    }
+    const list = h('ul', { class: 'verify-note-list' });
+    for (const it of items) {
+      const st = NOTE_VERDICT[it.verdict] || NOTE_VERDICT.unknown;
+      const failing = (it.checks || []).filter((c) => c.status !== 'passed');
+      const detail = it.verdict === 'fixed'
+        ? (it.checks || []).map((c) => c.expected || c.kind).join('; ')
+        : failing.length
+          ? failing.map((c) => (c.expected ? `${c.expected} (page has: ${c.actual || 'nothing'})` : `${c.kind}: ${c.actual || ''}`)).join('; ')
+          : it.reason || '';
+      list.appendChild(h('li', { class: 'verify-note-row', 'data-verdict': it.verdict, 'data-note-id': it.id }, [
+        stateChip(st),
+        h('button', {
+          class: 'btn btn-ghost btn-sm verify-note-open', type: 'button', text: 'Show note',
+          on: { click: () => actions.locateNote && actions.locateNote(it.id) },
+        }),
+        h('span', { class: 'vpb-text', text: detail || it.reason || '' }),
+      ]));
+    }
+    block.appendChild(list);
+    if (nc.otherPages) {
+      block.appendChild(h('div', { class: 'vj-note', text: `${nc.otherPages} note(s) belong to other pages and were not checked in this run.` }));
+    }
+    return block;
+  }
+
   function render() {
     clear(body);
     if (!run) {
@@ -275,6 +325,10 @@ export function createVerifyPanel(actions) {
 
     // ---- journey ----
     if (v.journey) body.appendChild(journeyBlock(v.journey));
+
+    // ---- notes with an exact change ----
+    const nb = noteChecksBlock(run.noteChecks);
+    if (nb) body.appendChild(nb);
 
     // ---- screenshots ----
     const shotRow = h('div', { class: 'verify-shots' });

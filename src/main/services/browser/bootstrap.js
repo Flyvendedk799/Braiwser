@@ -13,7 +13,30 @@
 
 const path = require('node:path');
 
-function startAgentRuntime({ repos, userDataDir, getWindow, enabled, isE2E = false, log = () => {} } = {}) {
+// "class:observe,origin:http://localhost:3000,review:read" -> validated scope list.
+// Classes are limited to the ones a default client may reasonably hold; submit,
+// download, upload, credentials and preview-edit are never granted from an
+// environment variable.
+const DEFAULT_CLIENT_CLASSES = ['observe', 'navigate', 'interact'];
+function parseDefaultScopes(raw) {
+  const scopes = [];
+  const rejected = [];
+  for (const part of String(raw || '').split(',').map((x) => x.trim()).filter(Boolean).slice(0, 50)) {
+    let ok = false;
+    if (part === 'review:read' || part === 'review:write') ok = true;
+    else if (part.startsWith('class:')) ok = DEFAULT_CLIENT_CLASSES.includes(part.slice(6));
+    else if (part.startsWith('origin:')) {
+      try {
+        const u = new URL(part.slice(7));
+        ok = (u.protocol === 'http:' || u.protocol === 'https:') && !u.username && !u.password && u.origin === part.slice(7).replace(/\/$/, '');
+      } catch (_e) { ok = false; }
+    }
+    if (ok && !scopes.includes(part)) scopes.push(part.replace(/\/$/, '')); else if (!ok) rejected.push(part);
+  }
+  return { scopes, rejected };
+}
+
+function startAgentRuntime({ repos, userDataDir, getWindow, enabled, isE2E = false, log = () => {}, env = process.env } = {}) {
   const { createBroker } = require('./broker');
   if (!enabled) {
     const broker = createBroker({ featureFlag: false });
@@ -32,16 +55,25 @@ function startAgentRuntime({ repos, userDataDir, getWindow, enabled, isE2E = fal
       createGuest: () => guestViews.create(),
     },
   });
+  // The review an agent may read and report on: this app's own project store.
+  let review = null;
+  try {
+    if (repos && repos.annotations && repos.recordings) review = require('../review/source').createStoreSource({ repos });
+  } catch (err) {
+    log('[agent-runtime] review source unavailable: ' + ((err && err.message) || err));
+  }
   const skills = createBrokerSkills({
     // Owner-scoped, synchronous lookup: only recordings the store knows, already
     // redacted by the repository's second boundary.
     loadRecording: (recordingId) => (repos && repos.recordings ? repos.recordings.get(recordingId) || null : null),
+    loadNote: (noteId) => (review ? review.loadNote(noteId) : null),
   });
   const brokerOptions = {
     featureFlag: true,
     dataDir: userDataDir,
     drivers: { playwright: drivers.playwright, 'electron-embedded': drivers['electron-embedded'] },
     skills,
+    review,
     appVersion: process.versions.electron || 'dev',
     taskRunner: null,
   };
@@ -84,12 +116,16 @@ function startAgentRuntime({ repos, userDataDir, getWindow, enabled, isE2E = fal
     }
     try {
       const { startBridge } = require('../automation/bridge-server');
-      // The default client file grants NO scopes: an external agent can connect
-      // but is granted nothing until the owner widens it in the connection drawer.
+      // The default client file grants NO scopes unless the person starting the app
+      // names them (BRAIWSER_AGENT_SCOPES): an external agent can connect but is
+      // granted nothing by default. Only well-formed scopes are accepted; a
+      // malformed entry is dropped and logged, never widened.
+      const { scopes, rejected } = parseDefaultScopes(env.BRAIWSER_AGENT_SCOPES);
+      if (rejected.length) log('[agent-runtime] ignored ' + rejected.length + ' malformed entr' + (rejected.length === 1 ? 'y' : 'ies') + ' in BRAIWSER_AGENT_SCOPES');
       bridge = await startBridge({
         broker,
         infoDir: path.join(userDataDir, 'browser'),
-        defaultClient: { principal: { id: 'mcp-default', kind: 'mcp', scopes: [] } },
+        defaultClient: { principal: { id: 'mcp-default', kind: 'mcp', scopes } },
       });
     } catch (err) {
       log('[agent-runtime] bridge unavailable: ' + ((err && err.message) || err));
@@ -113,4 +149,4 @@ function startAgentRuntime({ repos, userDataDir, getWindow, enabled, isE2E = fal
   };
 }
 
-module.exports = { startAgentRuntime };
+module.exports = { startAgentRuntime, parseDefaultScopes };

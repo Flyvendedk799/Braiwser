@@ -161,6 +161,10 @@ every emitted input and external effect). `test/agent-runtime/harness.js` boots 
 - Destination checks are **navigation-only** (before dispatch and again on arrival via the `navigated` event; a
   forbidden arrival quarantines the page and sends it to `about:blank`). Request-level enforcement exists only if a
   driver reports `capabilities.requestInterception:true` and installs `open({ requestFilter })` -> `'allow'|'block'`.
+  The filter is called as `requestFilter(url, { navigation, redirect })`. On the Playwright driver it is asked about
+  every http(s) request **and every redirect hop** (`redirect:true`) before the hop is sent, for pages, popups, frames
+  (in- and out-of-process), subresources and dedicated/shared/service workers; a denied or throwing verdict fails the
+  request (`ERR_BLOCKED_BY_CLIENT`). WebSocket/WebRTC traffic and `data:`/`blob:` documents are not covered.
 - Classification: `navigate`; `interact` (click/fill/press/select/check); **write-like => class `submit` + one-use approval**:
   node `traits` contain `submit|destructive|write`, or the node name matches a write verb (pay/send/delete/save/...),
   or `press Enter`. `file-input` => `UNSUPPORTED`. `fill` into password/OTP/payment (trait or name heuristic) => `DENIED`.
@@ -293,7 +297,7 @@ control; input values are never read); `list{ ordered, itemCount, itemsExact, it
 and the 64 KiB / 200 node caps still apply to the whole observation. The payload is part of the state signature used by delta observations.
 `observation.pagination = { next?, prev?, ambiguous? }`: `{ref,name,enabled}` of the single link/button whose accessible name is a known
 Next/Previous label; two candidates yield no ref and `ambiguous`. Role locators in assertions may omit the name ("any name"); an empty name means
-"no accessible name". The Electron driver shares the probe and observation builder (tables and lists included); it has no `setViewport`/`capture`.
+"no accessible name". The Electron driver shares the probe and observation builder (tables and lists included); it has `capture` (viewport, or one observed element that fits in it) and no `setViewport`.
 
 ## Not supported
 Popups and second tabs cannot be addressed through the broker API (no page listing), so popup corpus tasks stay `unsupported`.

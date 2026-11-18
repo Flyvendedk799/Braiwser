@@ -779,7 +779,7 @@ class PlaywrightPage extends EventEmitter {
         this._assertUsable();
         const facts = { url: this.url() };
         if (a.kind !== 'url') {
-          const raw = await this._raw.mainFrame().evaluate(probe.run, { cmd: 'assertFacts', args: locator ? { target: locator } : { selector: a.selector } });
+          const raw = await this._raw.mainFrame().evaluate(probe.run, { cmd: 'assertFacts', args: { ...(locator ? { target: locator } : { selector: a.selector }), ...(a.kind === 'style' ? { style: a.style } : {}) } });
           if (raw.error) {
             result = { status: 'failed', actual: '', evidence: evidenceOf(a, 'failed', '', { error: raw.error }) };
             break;
@@ -1091,6 +1091,35 @@ class PlaywrightSession {
   }
 }
 
+// Redirect-hop guard. Chromium's Fetch domain on the BROWSER target pauses every http(s) request of every
+// target in this browser (pages, popups, in- and out-of-process frames, dedicated/shared/service workers) at the
+// request stage, once per hop: a redirect is a new pause carrying the next URL, before anything is sent to it.
+// One browser is launched per session, so "this browser" is exactly this session.
+//   * Request stage only: no response is held or read and no body is fetched twice.
+//   * Fail closed: a deny, a throwing filter or a malformed event fails the request (BlockedByClient).
+//   * Enabled before the first page exists; if it cannot be enabled, open() fails instead of running unguarded.
+// Not covered (same as the route): WebSocket / WebRTC traffic, data:/blob: documents.
+async function installHopGuard(browser, decide) {
+  const cdp = await browser.newBrowserCDPSession();
+  const stats = { paused: 0, hops: 0, blocked: 0, blockedHops: 0 };
+  cdp.on('Fetch.requestPaused', (event) => {
+    const e = event || {};
+    const url = e.request && typeof e.request.url === 'string' ? e.request.url : '';
+    const redirect = typeof e.redirectedRequestId === 'string' && e.redirectedRequestId !== '';
+    stats.paused += 1;
+    if (redirect) stats.hops += 1;
+    const allowed = url !== '' && decide(url, { navigation: e.resourceType === 'Document', redirect });
+    if (!allowed) { stats.blocked += 1; if (redirect) stats.blockedHops += 1; }
+    const sent = allowed
+      ? cdp.send('Fetch.continueRequest', { requestId: e.requestId })
+      : cdp.send('Fetch.failRequest', { requestId: e.requestId, errorReason: 'BlockedByClient' });
+    // The request may already be gone (page closed, navigation cancelled): nothing to decide then.
+    Promise.resolve(sent).catch(() => {});
+  });
+  await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] });
+  return { stats };
+}
+
 /** The user agent a headed Chrome of this version on this platform sends. */
 function standardUserAgent(version) {
   const major = String(version || '').split('.')[0] || '0';
@@ -1132,7 +1161,7 @@ class PlaywrightDriver {
       popups: true,
       downloads: !!downloadsGranted, // false => every download is cancelled and reported 'rejected'
       uploads: false,
-      requestInterception: true, // honours open({ requestFilter }): every http(s) request incl. redirect hops
+      requestInterception: true, // honours open({ requestFilter }); with enforceRedirectHops (the broker always sets it) each redirect hop too
       dialogs: true, // observed; default policy DISMISS, accept only via resolveDialog()
       permissions: true, // default deny; no grant API exposed
       screenshots: true,
@@ -1150,7 +1179,7 @@ class PlaywrightDriver {
         canvas: 'reported-as-limitation',
         downloads: downloadsGranted ? 'granted-for-this-session' : 'rejected-unless-granted-at-open',
         humanHandoff: 'visible: same headed window, ownership enforced by the broker lease; headless: unsupported (no remote view)',
-        requestInterception: 'initial request of every http(s) fetch (navigation, frame, subresource). Redirect HOPS are not re-checked (Playwright does not route them); the broker still checks the page URL on arrival',
+        requestInterception: 'every http(s) request and every redirect hop (navigation, frame, popup, subresource, worker) is checked before it is sent; a denied hop fails with ERR_BLOCKED_BY_CLIENT. Not covered: WebSocket/WebRTC, data:/blob: documents',
       },
     };
   }
@@ -1211,18 +1240,29 @@ class PlaywrightDriver {
       });
       context.setDefaultTimeout(10000);
       context.setDefaultNavigationTimeout(opts.navigationTimeoutMs);
+      let guard = null;
       if (typeof o.requestFilter === 'function') {
         // Request-level policy: EVERY http(s) request the browser makes (navigations, redirect hops,
-        // subresources, frames) is asked first. Default is block; a throwing filter blocks.
+        // subresources, frames, workers) is asked first. Default is block; a throwing filter blocks.
         // Not covered: WebSocket / WebRTC traffic and data:/blob: documents (no network request).
-        await context.route('**/*', (route) => {
-          let verdict = 'block';
-          try { verdict = o.requestFilter(route.request().url(), { navigation: route.request().isNavigationRequest() }); } catch (_e) { verdict = 'block'; }
-          return verdict === 'allow' ? route.continue() : route.abort('blockedbyclient');
-        });
+        const decide = (url, info) => {
+          try { return o.requestFilter(url, info) === 'allow'; } catch (_e) { return false; }
+        };
+        await context.route('**/*', (route) => (decide(route.request().url(), { navigation: route.request().isNavigationRequest(), redirect: false })
+          ? route.continue() : route.abort('blockedbyclient')));
+        // Playwright does not route redirect hops, so the route above only ever sees the first URL of a fetch.
+        // The hop guard is a second, browser-level interception that pauses each hop before it is sent.
+        //
+        // It is opt-in (`enforceRedirectHops: true`), and the broker always opts in. The route above can be
+        // overridden by a route the caller registers afterwards on `session._context` (Playwright runs the
+        // newest route first), and embedders rely on exactly that: SandboxOS passes a block-everything filter
+        // as a default and decides each request in its own route. A browser-level guard cannot be overridden
+        // that way, so switching it on for every caller of `requestFilter` would block all of their traffic.
+        if (o.enforceRedirectHops === true) guard = await installHopGuard(browser, decide);
       }
       if (grant) tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'braiwser-dl-'));
       const session = new PlaywrightSession({ browser, context, mode, opts, onPageEvent: o.onPageEvent, tmpDir, downloadGrant: grant });
+      session.requestGuard = guard;
       const raw = await context.newPage();
       session._register(raw);
       session._initializing = false;

@@ -42,6 +42,10 @@
 //     reason: string|null,                                // e.g. 'after:timedOut', 'baseline:missing_report',
 //   },                                                    //      'incomparable_context', 'legacy'
 //   journey: JourneySummary|null,                         // the AFTER journey outcome
+//   noteChecks: {                                         // per-note verdicts for notes of the verified page
+//     status: 'completed'|'error'|'timedOut'|'missing', reason, url, previewActive, otherPages,
+//     total, fixed, notFixed, regressed, unknown, unverifiable,
+//     items: [{ id, verdict, reason, checks:[{ kind, expected, actual, status }], skipped:[{ what, reason }] }] },
 //   before: { audit: AuditSummary, journey: JourneySummary|null, screenshot },
 //   after:  { audit: AuditSummary, journey: JourneySummary|null, screenshot },
 //   delta:  { audit: number|null, deltaAvailable, reason, journeyFailed: number|null, notesOpen },  // legacy mirror
@@ -60,6 +64,7 @@
 // ---------------------------------------------------------------------------------
 
 const { auditDelta, runVerdict } = require('./verdict');
+const { tally, VERDICTS: NOTE_VERDICTS, MAX_CHECKS: MAX_NOTE_CHECKS } = require('../../../shared/note-checks');
 
 const MAX_RUNS = 5;
 const MAX_SHOT = 350000;
@@ -202,8 +207,35 @@ function clipShot(dataUrl) {
   return dataUrl;
 }
 
-function headline(audit, journey) {
+// ---- notes -------------------------------------------------------------------------
+// Per-note verdicts from shared/note-checks.js, as graded by the page. Stored bounded;
+// anything that is not a completed grading contributes no counts at all.
+const NOTE_CHECK_STATUSES = new Set(['completed', 'error', 'timedOut', 'missing']);
+function noteChecksSummary(raw) {
+  const empty = (status, reason) => ({ status, reason, url: '', previewActive: false, otherPages: 0, items: [], ...tally([]) });
+  if (!isObj(raw)) return empty('missing', 'no_report');
+  const status = typeof raw.status === 'string' && NOTE_CHECK_STATUSES.has(raw.status) ? raw.status : 'missing';
+  if (status !== 'completed') return { ...empty(status, clip(raw.error || status, 120)), otherPages: asCount(raw.otherPages) };
+  const items = [];
+  for (const it of Array.isArray(raw.items) ? raw.items.slice(0, 200) : []) {
+    if (!isObj(it) || typeof it.id !== 'string' || !NOTE_VERDICTS.includes(it.verdict)) continue;
+    items.push({
+      id: clip(it.id, 200), verdict: it.verdict, reason: clip(it.reason, 200),
+      checks: (Array.isArray(it.checks) ? it.checks.slice(0, MAX_NOTE_CHECKS) : []).filter(isObj).map((c) => ({
+        kind: clip(c.kind, 20), expected: clip(c.expected, 300), actual: clip(c.actual, 200),
+        status: ['passed', 'failed', 'unknown'].includes(c.status) ? c.status : 'unknown',
+      })),
+      skipped: (Array.isArray(it.skipped) ? it.skipped.slice(0, MAX_NOTE_CHECKS) : []).filter(isObj).map((k) => ({ what: clip(k.what, 60), reason: clip(k.reason, 120) })),
+    });
+  }
+  return { status, reason: '', url: clip(raw.url, 2000), previewActive: raw.previewActive === true, otherPages: asCount(raw.otherPages), items, ...tally(items) };
+}
+
+function headline(audit, journey, notes) {
   if (journey && journey.status === 'failed') return { status: 'failed', reason: `${journey.failed} journey step(s) failed` };
+  // A note whose exact change is demonstrably not on the page is a failed check, whatever the audit says.
+  if (notes && notes.regressed > 0) return { status: 'failed', reason: `${notes.regressed} resolved note(s) no longer hold` };
+  if (notes && notes.notFixed > 0) return { status: 'failed', reason: `${notes.notFixed} note(s) are not fixed yet` };
   if (audit.deltaAvailable && audit.delta > 0) return { status: 'failed', reason: `${audit.delta} more audit finding(s) than before` };
   if (!audit.deltaAvailable) return { status: 'inconclusive', reason: `audit comparison unavailable (${audit.reason || 'unknown'})` };
   if (journey && journey.status !== 'passed') return { status: 'inconclusive', reason: `journey ${journey.status}` };
@@ -226,7 +258,8 @@ function buildRun(payload, opts = {}) {
   const beforeJourney = journeySummary(before.journey);
   const afterJourney = journeySummary(after.journey);
   const audit = { before: beforeAudit, after: afterAudit, deltaAvailable: d.deltaAvailable, delta: d.delta, reason: d.reason };
-  const head = headline(audit, afterJourney);
+  const noteChecks = noteChecksSummary(after.noteChecks);
+  const head = headline(audit, afterJourney, noteChecks);
 
   return {
     v: RUN_VERSION,
@@ -237,6 +270,7 @@ function buildRun(payload, opts = {}) {
     reason: head.reason,
     audit,
     journey: afterJourney,
+    noteChecks,
     before: { audit: beforeAudit, journey: beforeJourney, screenshot: clipShot(before.screenshot) },
     after: { audit: afterAudit, journey: afterJourney, screenshot: clipShot(after.screenshot) },
     delta: {

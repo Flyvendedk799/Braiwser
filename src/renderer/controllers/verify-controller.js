@@ -47,13 +47,19 @@ async function runOnce(d) {
       try { journeyReport = await d.replay(ctx, rec); } catch (_e) { journeyReport = null; }
       afterJourney = journeyReport ? journeyToVerifyPayload(rec, journeyReport) : null;
     }
+    // Notes that carry an exact change (edit / rearrange / remove) are graded against
+    // the page as it is now. A guest that does not answer leaves them ungraded.
+    let noteChecks = null;
+    if (typeof d.checkNotes === 'function') {
+      try { noteChecks = await d.checkNotes(ctx, annotations); } catch (_e) { noteChecks = null; }
+    }
     const afterShot = await d.captureShot(ctx);
 
     const payload = {
       notes,
       context: { runId: ctx.runId, tabId: ctx.tabId, url: ctx.url, sessionId: session.id, recordingId: rec ? rec.id : null },
       before: { audit: baseline ? auditToVerifyPayload(baseline) : null, journey: beforeJourney, screenshot: beforeShot },
-      after: { audit: auditToVerifyPayload(after, { url: d.currentUrlOf(ctx) }), journey: afterJourney, screenshot: afterShot },
+      after: { audit: auditToVerifyPayload(after, { url: d.currentUrlOf(ctx) }), journey: afterJourney, screenshot: afterShot, noteChecks },
     };
     let saved;
     try {

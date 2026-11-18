@@ -2,6 +2,93 @@
 
 ## Unreleased
 
+### Closing the loop: notes an agent can prove fixed
+
+- **Recorder.** Click, input, key and picked-assertion steps carry a semantic locator (a test id, or a role and
+  accessible name) whenever it names exactly one element. It is computed by the same in-page probe the agent runtime
+  observes with, so journeys recorded without test ids now migrate into `verify-journey`. Label clicks are marked and
+  dropped by the migration; ambiguous or unnamed elements still get no locator and are refused per step. Bundle import
+  keeps valid locators and the Playwright export prefers them over positional CSS paths.
+- **Notes as checks.** Notes that carry an exact change (Edit, Rearrange, "remove") derive checks
+  (`src/shared/note-checks.js`). In-app Verify grades each note of the page as fixed, not fixed, regressed, could not
+  check or needs a person, and a run fails when an exact change is demonstrably missing. Nothing is graded while a live
+  edit preview is still applied to the page. Note targets now record a semantic locator too.
+- **`style` assertion** in the shared assertion language, plans and in-app replay: one computed property compared with
+  what the browser computes for the declared value on the same element. Declarations that could fetch are refused. Not
+  emitted by the Playwright export.
+- **Review over MCP and the CLI.** `review_notes`, `review_note`, `review_journeys`, `review_note_claim`,
+  `review_note_propose`, `review_note_report`, and the `verify-notes` skill. Only a verdict the broker reads from a
+  finished run can resolve a note; a failed proof re-opens one. New scopes `review:read` and `review:write`, separate
+  from browsing.
+- **Same tools in every deployment.** The desktop app serves its own store; the standalone owner (local, proxy/OpenBot,
+  container) serves a read-only directory of exported bundles (`reviewDir`) and keeps agent reports in its data
+  directory. `verify-journey` therefore works on the standalone owner for the first time.
+- **`browser_pages`** lists a session's pages, so popups and new tabs can be reached.
+- **`braiwser mcp`**: one command starts a headless owner and serves MCP on stdio, granting only the origins named on
+  the command line. The desktop app accepts `BRAIWSER_AGENT_SCOPES` for its default client file.
+- An assertion whose element is missing now reports `TARGET_MISSING` instead of a plain failure code.
+- The built-in skill lock was regenerated (`workflow-core.js` changed; `verify-notes@1.0.0` added). Skill versions were
+  not bumped because none has been released.
+
+- Capability version is now **1.3.0** (seven added tools, nothing changed shape). Embedders that pin the exact tool set
+  (OpenBot) must accept it explicitly; see `docs/standalone-handoff.md`.
+- The redirect-hop guard is opt-in for direct users of the driver (`enforceRedirectHops`), and the broker always opts
+  in. Enabled unconditionally it blocked every request of an embedder that decides requests in its own route, which is
+  how SandboxOS's Browser uses the driver.
+
+Not done: `compare-fix` is still a library orchestration, not a `browser_run` skill. Delta observations are still not
+exposed. Downloads and uploads are still unsupported. The desktop review source has unit coverage only; no external MCP
+client has driven it against the running app.
+
+### Agent runtime: driver capability gaps
+
+- Playwright driver: redirect hops are now checked against the destination policy before they are sent. Until now
+  only the first URL of a request was checked and a redirect to an origin outside the grant was noticed on arrival,
+  after that origin's server had already been contacted. A browser-level request interception (CDP `Fetch` on the
+  browser target, request stage only) now asks the same `requestFilter` about every hop of navigations, popups,
+  frames (also out-of-process), subresources and dedicated/shared/service workers; a denied hop fails with
+  `ERR_BLOCKED_BY_CLIENT`. The filter receives `{ navigation, redirect }`. Redirects inside the grant are unchanged
+  (cookies set on the redirect response, `307` POST bodies, one request per hop). Verified with headless Chromium
+  against local servers. Still not covered: WebSocket/WebRTC, `data:`/`blob:` documents.
+- Electron-embedded driver: `select`, screenshots and open shadow roots are now reported as supported, each after a
+  run against real Electron (`test/agent-runtime/drivers/electron.native.test.js` starts Electron 44 with a
+  `WebContentsView` and a `<webview>` on local fixtures; Linux under Xvfb, device scale 1, 1.5 and 2).
+  - `select` works on a native single `<select>`: exactly one option by value (else by label), otherwise refused
+    before dispatch. `input`/`change` are fired by the driver, as Playwright does, and are not trusted events.
+  - Screenshots: viewport, a clip inside it, and `capture({ refId })` for one observed element that fits in the
+    viewport. `capabilities.screenshots` is what the broker checks before a plan with `capture` steps, so such plans
+    are no longer refused up front on this driver; that path through the broker was not run against real Electron.
+    A zero-sized or hidden view is refused instead of
+    returning an empty image.
+  - Fixed while verifying: the owner badge was still in Electron screenshots, because `capturePage` copies the last
+    presented frame. The driver now waits for a frame without the badge before taking pixels.
+  - Open shadow roots were already walked by the shared probe; the flag was off only for lack of a native run.
+  - Not changed and still unconfirmed natively: frames, popups, dialogs, downloads, uploads, viewport emulation,
+    human takeover, macOS and Windows.
+
+### Hand-off hygiene, Locate across pages, e2e coverage
+
+- Guest console output and load errors are now redacted before they leave the app. The
+  capture reaches the prompt and Markdown exports, the agent hand-off file and prompt
+  templates through one formatter, which drops query-string values, bearer tokens, JWTs,
+  `password=`/`token=`-style pairs and key-like strings, keeps script URLs and line numbers
+  readable, and keeps only the 50 most recent entries whatever the renderer sends.
+- "Locate on page" for a note on another page: if that page is open in another tab, that
+  tab comes to the front; otherwise the current tab opens the page. A tab that is replaying
+  is left alone. When it cannot locate, it says why: the page would not load (with the
+  error), or the page opened and the element is no longer there.
+- Fixed: pressing Escape while editing a note's text saved the edit instead of abandoning
+  it. A Ctrl+Enter save was also written twice.
+- e2e suite: 354 → 401 checks. New checks drive the Notes panel (priority, edit, resolve,
+  reopen, delete), the recording editor dialog (reorder, delete, cancel, save), replay
+  guards and failures (nothing selected, empty recording, page that will not load, second
+  replay while one runs, cancel), cross-page and cross-tab Locate, and console redaction.
+  How to run the suite on a headless Linux machine is in `docs/ARCHITECTURE.md`.
+- Internal: the storage-health dialog, the shortcut sheet / About, and the import /
+  Playwright export reports moved out of `app.js` into `components/`; Locate moved into
+  `controllers/locate.js`. No behaviour change from the moves.
+- `docs/IMPROVEMENT_BACKLOG.md` statuses corrected, with what is still open.
+
 ### Audit remediation: AI, licensing, release, product truthfulness
 
 AI

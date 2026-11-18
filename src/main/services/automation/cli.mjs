@@ -28,6 +28,13 @@ const USAGE = `braiwser-agent <command> [flags]   (JSON on stdout)
   handoff-status --handoff ID [--after N] [--max-events N]
   resume    --handoff ID --request-key KEY --epoch N [--run ID]
   close     --session ID
+  pages     --session ID                       (the session's pages, including popups it opened)
+  notes     [--status open|resolved] [--review-session ID] [--limit N]   (review notes; needs the review:read scope)
+  note      --note ID
+  journeys  (recorded journeys and whether each can run as verify-journey)
+  note-claim   --note ID                       (needs review:write)
+  note-propose --note ID --message TEXT        (ready for a person; never resolves)
+  note-report  --note ID --run ID              (attach a finished verify-notes run; the run decides the verdict)
   skills    (list the pinned skill catalog; no broker needed)
   doctor    (protocol, deployment and viewer readiness; no broker needed)
 
@@ -45,6 +52,7 @@ const FLAGS = {
   'skill-version': { type: 'string' }, digest: { type: 'string' }, inputs: { type: 'string' },
   'max-duration-ms': { type: 'string' }, after: { type: 'string' }, 'max-events': { type: 'string' },
   reason: { type: 'string' }, handoff: { type: 'string' }, 'reason-code': { type: 'string' },
+  status: { type: 'string' }, limit: { type: 'string' }, note: { type: 'string' }, message: { type: 'string' },
   help: { type: 'boolean' },
 };
 
@@ -81,6 +89,13 @@ const COMMANDS = {
     requestKey: f['request-key'], reasonCode: f['reason-code'] })],
   pause: (f) => ['browser_run_pause', drop({ runId: f.run, requestKey: f['request-key'], expectedControlEpoch: num(f, 'epoch'), reason: f.reason })],
   'handoff-status': (f) => ['browser_handoff_status', drop({ handoffId: f.handoff, afterSequence: num(f, 'after'), maxEvents: num(f, 'max-events') })],
+  pages: (f) => ['browser_pages', drop({ sessionId: f.session })],
+  notes: (f) => ['review_notes', drop({ status: f.status, sessionId: f['review-session'], limit: num(f, 'limit') })],
+  note: (f) => ['review_note', drop({ noteId: f.note })],
+  journeys: () => ['review_journeys', {}],
+  'note-claim': (f) => ['review_note_claim', drop({ noteId: f.note })],
+  'note-propose': (f) => ['review_note_propose', drop({ noteId: f.note, message: f.message })],
+  'note-report': (f) => ['review_note_report', drop({ noteId: f.note, runId: f.run })],
   resume: (f) => ['browser_run_resume', drop({ runId: f.run, handoffId: f.handoff, requestKey: f['request-key'], expectedControlEpoch: num(f, 'epoch') })],
 };
 

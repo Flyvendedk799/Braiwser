@@ -34,6 +34,17 @@
 //                contains  case-insensitive substring (default op)
 //                equals    exact, case-sensitive
 //                matches   JS RegExp (no flags)
+//   style      compares ONE computed CSS property of the FIRST match with what the
+//              browser computes for a declared value on that same element.
+//              `expected` is a single declaration, "property: value". The engine
+//              reads the current computed value, then asks the browser what the
+//              declaration would compute to there (colour formats, units and
+//              keywords are therefore compared after the browser resolved both).
+//                equals    the two computed values are identical (only op)
+//              Declarations that could fetch (url(), image-set()) or that are
+//              not a plain property/value are refused; a value the browser does
+//              not accept FAILS. An engine that cannot compute styles reports no
+//              style facts, which FAILS - it never passes.
 //   anything else (unknown kind/op, missing selector/expected where required)
 //              FAILS CLOSED: status 'failed' with a reason - never a pass.
 //   Engine/transport problems (page gone, timeout) are 'unknown', decided by the
@@ -51,7 +62,7 @@
 //     secret       value is NEVER stored; replays use a runtime placeholder
 // ---------------------------------------------------------------------------
 
-const KINDS = Object.freeze(['exists', 'visible', 'text', 'count', 'url']);
+const KINDS = Object.freeze(['exists', 'visible', 'text', 'count', 'url', 'style']);
 
 // op allowed per kind. `null` => the kind takes no op.
 const OPS = Object.freeze({
@@ -60,11 +71,12 @@ const OPS = Object.freeze({
   text: Object.freeze(['contains', 'equals', 'matches']),
   count: Object.freeze(['equals', 'contains']),
   url: Object.freeze(['contains', 'equals', 'matches']),
+  style: Object.freeze(['equals']),
 });
 
-const DEFAULT_OP = Object.freeze({ text: 'contains', count: 'equals', url: 'contains' });
-const NEEDS_SELECTOR = Object.freeze({ exists: true, visible: true, text: true, count: true, url: false });
-const NEEDS_EXPECTED = Object.freeze({ exists: false, visible: false, text: true, count: true, url: true });
+const DEFAULT_OP = Object.freeze({ text: 'contains', count: 'equals', url: 'contains', style: 'equals' });
+const NEEDS_SELECTOR = Object.freeze({ exists: true, visible: true, text: true, count: true, url: false, style: true });
+const NEEDS_EXPECTED = Object.freeze({ exists: false, visible: false, text: true, count: true, url: true, style: true });
 
 const STEP_TYPES = Object.freeze(['navigate', 'click', 'input', 'key', 'scroll', 'assert']);
 const CONTROLS = Object.freeze(['text', 'select', 'multiselect', 'checkbox', 'radio', 'secret']);
@@ -76,6 +88,24 @@ const MAX_COUNT = 1e9;
 // Whitespace runs -> single space, trimmed. Applied to BOTH sides of a text compare.
 function normalizeText(value) {
   return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+}
+
+// "property: value" -> { property, value }, or null. One declaration only. The
+// property is a plain CSS property name (custom properties included); the value
+// may not contain anything that ends the declaration, opens a block, or makes
+// the browser fetch a resource while the engine asks what it computes to.
+const STYLE_PROPERTY = /^(?:--[A-Za-z0-9_-]{1,60}|-?[a-z][a-z-]{0,59})$/;
+const STYLE_VALUE_FORBIDDEN = /[;{}<>\\]|url\s*\(|image-set\s*\(|image\s*\(|element\s*\(|src\s*\(|expression\s*\(|@import|!\s*important/i;
+const MAX_STYLE_VALUE = 200;
+function parseStyleDeclaration(text) {
+  if (typeof text !== 'string') return null;
+  const i = text.indexOf(':');
+  if (i < 1) return null;
+  const property = text.slice(0, i).trim();
+  const value = text.slice(i + 1).trim().replace(/\s+/g, ' ');
+  if (!STYLE_PROPERTY.test(property)) return null;
+  if (!value || value.length > MAX_STYLE_VALUE || STYLE_VALUE_FORBIDDEN.test(value)) return null;
+  return { property, value };
 }
 
 function isKind(kind) { return typeof kind === 'string' && KINDS.includes(kind); }
@@ -123,6 +153,11 @@ function normalizeAssertion(step) {
       }
     }
   }
+  if (kind === 'style') {
+    const style = parseStyleDeclaration(expected);
+    if (!style) return fail('style assertion needs one plain "property: value" declaration');
+    return { ok: true, assertion: { kind, op, selector, expected: `${style.property}: ${style.value}`, style } };
+  }
   return { ok: true, assertion: { kind, op, selector, expected } };
 }
 
@@ -142,6 +177,8 @@ function compareText(op, actual, expected, { normalize = true } = {}) {
 //   firstText    raw text (innerText/textContent) of the first match, or null if none
 //   firstVisible boolean visibility of the first match, or null if none
 //   url          the page URL
+//   style        for a style assertion: { supported, actual, expected } - the first
+//                match's computed value and what the declaration computes to there
 // Returns { ok, status:'passed'|'failed', actual, error }.
 function evaluate(step, facts = {}) {
   const n = normalizeAssertion(step);
@@ -173,6 +210,15 @@ function evaluate(step, facts = {}) {
       const ok = compareText(op, url, expected, { normalize: false });
       return done(ok, url.slice(0, 200), `url "${url.slice(0, 80)}" ${op} "${expected.slice(0, 80)}" failed`);
     }
+    case 'style': {
+      if (matchCount < 1) return done(false, '(no element)', `not found: ${selector}`);
+      const f = facts.style;
+      const prop = n.assertion.style.property;
+      if (!f || typeof f !== 'object' || typeof f.actual !== 'string') return done(false, '(not computed)', 'this engine did not compute the style');
+      if (f.supported !== true || typeof f.expected !== 'string') return done(false, f.actual.slice(0, 80), `the browser does not accept "${expected.slice(0, 80)}"`);
+      const ok = f.actual === f.expected;
+      return done(ok, `${prop}: ${f.actual}`.slice(0, 120), `${prop} is "${f.actual.slice(0, 60)}", expected "${f.expected.slice(0, 60)}"`);
+    }
     default:
       return done(false, '', 'unsupported assertion kind');
   }
@@ -193,5 +239,5 @@ function controlOfStep(step) {
 
 module.exports = {
   KINDS, OPS, DEFAULT_OP, STEP_TYPES, CONTROLS,
-  normalizeText, normalizeAssertion, compareText, evaluate, controlOfStep, isKind,
+  normalizeText, normalizeAssertion, compareText, evaluate, controlOfStep, isKind, parseStyleDeclaration,
 };

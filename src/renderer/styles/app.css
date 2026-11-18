@@ -1619,6 +1619,12 @@ kbd {
 .verify-journey .vj-name { font-weight: 600; font-size: 13px; }
 .verify-journey .vj-counts { font-size: 12px; color: var(--text); }
 .verify-journey .vj-detail, .verify-journey .vj-note { font-size: 11.5px; color: var(--dim); margin-top: 3px; }
+.verify-notes { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; }
+.verify-notes .vj-title { font-weight: 600; font-size: 13px; margin-bottom: 6px; }
+.verify-notes .vj-note { font-size: 11.5px; color: var(--dim); margin-top: 6px; }
+.verify-note-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.verify-note-row { display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+.verify-note-row .vpb-text { color: var(--text); overflow-wrap: anywhere; flex: 1 1 160px; }
 
 /* ---- Audit: where the report came from, and when it is stale ------------------ */
 .audit-source { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; font-size: 11px; color: var(--faint); margin-top: 4px; }

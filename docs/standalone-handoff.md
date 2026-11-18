@@ -33,6 +33,11 @@ Create a protected configuration file outside a model workspace:
 }
 ```
 
+Optional `"reviewDir"` (absolute path) names a directory of project bundles exported from the desktop app. With it,
+and with `review:read` / `review:write` among the principal's scopes, the review tools and the `verify-journey` and
+`verify-notes` skills work against those bundles; without it they answer `UNAVAILABLE`. The directory is only read.
+`braiwser mcp --origin ... --review DIR` builds this configuration for you.
+
 Set `BRAIWSER_SERVER_CONFIG` to that file and run `npm run server`. The first
 JSON line is the transport readiness receipt and names two protected files:
 `agent-bridge.json` for the stdio sidecar and `viewer-owner.json` for the human
@@ -89,3 +94,37 @@ rejected. An external HTTPS origin alone cannot enable hosted operation. Hosted
 authentication, proxy trust, tenant isolation, CSRF/cookie policy, public
 reachability and staging gates remain separate release requirements. No tunnel,
 production deployment or security-setting change is performed by this work.
+
+## Capability 1.3.0: what embedders need to know
+
+Capability version is **1.3.0** (automation schema major 1 and handoff contract 2.1.0 are unchanged). It is additive:
+seven tools were added and no existing tool changed its input or output shape.
+
+| Added tool | Mutates | Needs |
+|---|---|---|
+| `browser_pages` | no | an owned session |
+| `review_notes`, `review_note`, `review_journeys` | no | scope `review:read` and a review source |
+| `review_note_claim`, `review_note_propose`, `review_note_report` | yes (review state only, never the browser) | scope `review:write` and a review source |
+
+Without a `reviewDir` the six review tools are still listed and answer `UNAVAILABLE`; without the scope they answer
+`DENIED`. Neither opens or touches a browser.
+
+**OpenBot** verifies the capability document exactly (`packages/server/src/braiwser-contract.ts`: the version string and
+the precise tool set). To move its pin to this revision it must accept `1.3.0`, add the seven names to `BRAIWSER_TOOLS`
+and the four read-only ones (`browser_pages`, `review_notes`, `review_note`, `review_journeys`) to `BRAIWSER_READS`.
+Until it does, its connection test refuses this runtime, which is the intended behaviour of an exact pin. To give an
+agent the review, the supervisor adds `reviewDir` and the review scopes to the runtime configuration it already sends.
+This has not been run against OpenBot.
+
+**SandboxOS** does not use the broker or MCP. It loads the Playwright driver directly, passes a block-everything
+`requestFilter` as a default and decides each request in its own route on `session._context`. Two things in this
+revision matter to it:
+
+- The browser-level redirect-hop guard is **opt-in** (`open({ enforceRedirectHops: true })`); the broker always opts in.
+  A caller that only passes `requestFilter` keeps the previous behaviour, where a route registered afterwards decides.
+  Switching the guard on unconditionally would block every request SandboxOS allows.
+- Nothing else in the driver's `open`, `navigate`, `humanInput`, `pages`, `newPage` or `_raw` surface changed.
+
+Verified: SandboxOS's own `test/braiwser.test.js`, including its real-Chromium test (a Cell port, its WebSocket,
+typing, popups and refusals), passes with this revision standing in for its pinned runtime, and fails if the guard is
+forced on. A regression test for that pattern lives in `playwright.redirects.real.test.js`.

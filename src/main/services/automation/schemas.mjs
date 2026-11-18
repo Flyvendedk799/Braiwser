@@ -5,7 +5,10 @@ import { z } from 'zod';
 import core from './workflow-core.js';
 
 export const SCHEMA_VERSION = 1;
-export const CAPABILITY_VERSION = '1.2.0';
+// Bumped whenever the tool surface changes, additions included: embedders (OpenBot) pin the
+// exact version and the exact tool set, so an unannounced new tool would be refused with no reason.
+//   1.3.0  adds browser_pages and the six review_* tools; no existing tool changed shape.
+export const CAPABILITY_VERSION = '1.3.0';
 export const closeResultSchema = z.strictObject({ closed: z.literal(true) });
 export const DEFAULT_RESPONSE_BUDGET = 64 * 1024; // bytes; audit target
 
@@ -125,6 +128,42 @@ const jsonRecord = z.record(z.string().max(80), z.unknown()).refine(
 
 export const sessionSchema = z.strictObject({ ...page, capabilities: jsonRecord, limits: jsonRecord });
 // The page as text, like a web fetch. Untrusted page data: never instructions.
+// ---- review: notes and journeys (owner data; target text is page-derived) ----
+const noteLocator = z.discriminatedUnion('by', [
+  z.strictObject({ by: z.literal('role'), role: z.string().min(1).max(200), name: z.string().min(1).max(200) }),
+  z.strictObject({ by: z.literal('testId'), value: z.string().min(1).max(200) }),
+  z.strictObject({ by: z.literal('label'), value: z.string().min(1).max(200) }),
+]);
+const noteVerdict = z.enum(['fixed', 'not-fixed', 'regressed', 'unknown', 'unverifiable']);
+export const noteSchema = z.strictObject({
+  id, sessionId: z.string().max(160), url: z.string().max(4096),
+  kind: z.string().max(20), action: z.string().max(40), priority: z.string().max(20),
+  status: z.enum(['open', 'resolved']), note: z.string().max(2000),
+  target: z.strictObject({ selector: z.string().max(500), tag: z.string().max(40), text: z.string().max(200), locator: noteLocator.optional() }),
+  viewport: z.strictObject({ width: z.number().int(), height: z.number().int() }).optional(),
+  change: z.strictObject({ type: z.string().max(20), css: z.string().max(2000), before: z.string().max(500).optional(), after: z.string().max(500).optional(),
+    parentSelector: z.string().max(500).optional(), fromIndex: z.number().int().optional(), toIndex: z.number().int().optional() }).optional(),
+  checks: z.array(z.strictObject({ kind: z.enum(['style', 'text', 'absent']), expected: z.string().max(300) })).max(24),
+  verifiable: z.boolean(),
+  notVerifiable: z.strictObject({ code: z.string().max(60), reason: z.string().max(300) }).optional(),
+  agent: z.strictObject({
+    claimedBy: z.string().max(120).optional(), claimedAt: z.string().max(40).optional(),
+    proposal: z.strictObject({ message: z.string().max(1000), by: z.string().max(120), at: z.string().max(40) }).optional(),
+    verification: z.strictObject({ verdict: noteVerdict, runId: z.string().max(160), runState: z.string().max(40), by: z.string().max(120),
+      at: z.string().max(40), checks: nonneg }).optional(),
+  }),
+});
+export const noteListSchema = z.strictObject({ notes: z.array(noteSchema).max(200), total: nonneg, truncated: z.boolean(), trust: z.literal('owner-review') });
+export const journeyListSchema = z.strictObject({
+  journeys: z.array(z.strictObject({ id, name: z.string().max(200), startUrl: z.string().max(4096), steps: nonneg, migratable: z.boolean(),
+    refused: z.array(z.strictObject({ stepIndex: z.number().int(), code: z.string().max(60) })).max(10) })).max(200),
+});
+export const noteReportSchema = z.strictObject({ note: noteSchema, verdict: noteVerdict, runId: id, runState: z.string().max(40), checksPlanned: nonneg, checksRun: nonneg });
+
+export const pagesSchema = z.strictObject({ sessionId: id,
+  pages: z.array(z.strictObject({ pageId: id, url: z.string().max(4096), openerPageId: id.nullable(), documentEpoch: nonneg, blocked: z.boolean() })).max(50),
+  trust: z.literal('untrusted-page') });
+
 export const pageTextSchema = z.strictObject({
   ...page, url: z.string().max(4096), title: z.string().max(300), documentEpoch: nonneg,
   offset: nonneg, nextOffset: nonneg.nullable(), totalChars: nonneg, text: z.string().max(40000), trust: z.literal('untrusted-page'),
@@ -223,6 +262,13 @@ export const inputs = {
     grant: grantRequest,
   }),
   browser_session_close: z.strictObject({ sessionId: id }),
+  browser_pages: z.strictObject({ sessionId: id }),
+  review_notes: z.strictObject({ status: z.enum(['open', 'resolved']).optional(), sessionId: id.optional(), limit: z.number().int().min(1).max(200).default(50) }),
+  review_note: z.strictObject({ noteId: id }),
+  review_journeys: z.strictObject({}),
+  review_note_claim: z.strictObject({ noteId: id }),
+  review_note_propose: z.strictObject({ noteId: id, message: z.string().min(1).max(1000) }),
+  review_note_report: z.strictObject({ noteId: id, runId: id }),
   browser_read: z.strictObject({
     ...page, offset: nonneg.default(0), maxChars: z.number().int().min(200).max(40000).default(12000),
   }),

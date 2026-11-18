@@ -24,6 +24,7 @@ const BUILTINS = [
   require('./workflows/compare-fix'),
   require('./workflows/extract-table'),
   require('./workflows/handoff-repro'),
+  require('./workflows/verify-notes'),
 ];
 const LOCK_FILE = path.join(__dirname, 'skill-lock.json');
 const SUPPORTED_SCHEMA_MAJOR = wf.SCHEMA_VERSION;
@@ -192,7 +193,7 @@ function createRegistry(options = {}) {
   };
 }
 
-const DENY_CODES = new Set(['SKILL_DIGEST_MISMATCH', 'SKILL_BUILD_MISMATCH', 'DENIED', 'RECORDING_NOT_FOUND', 'RECORDING_NOT_MIGRATABLE']);
+const DENY_CODES = new Set(['SKILL_DIGEST_MISMATCH', 'SKILL_BUILD_MISMATCH', 'DENIED', 'RECORDING_NOT_FOUND', 'RECORDING_NOT_MIGRATABLE', 'NOTES_NOT_VERIFIABLE']);
 
 // Classified, redacted error the broker passes through to the client unchanged.
 function publicFault(error) {
@@ -201,6 +202,10 @@ function publicFault(error) {
   if (code === 'RECORDING_NOT_MIGRATABLE' && error.details && Array.isArray(error.details.refused)) {
     // Reason codes and step positions only: never recorded values.
     message += ` (${error.details.refused.slice(0, 8).map((r) => `${r.code}@${r.stepIndex}`).join(', ')})`;
+  }
+  if (code === 'NOTES_NOT_VERIFIABLE' && error.details && Array.isArray(error.details.refused)) {
+    // Reason codes and note ids only: never note text.
+    message += ` (${error.details.refused.slice(0, 8).map((r) => `${r.code}@${String(r.noteId).slice(0, 40)}`).join(', ')})`;
   }
   const fault = new Error(message);
   fault.publicError = { code: DENY_CODES.has(code) ? 'DENIED' : 'UNSUPPORTED', message: message.slice(0, 500),
@@ -220,7 +225,7 @@ function publicFault(error) {
 //                 broker can tell them from undeclared keys it must refuse.
 //   skillDigest / planDigest / dropped / warnings  pins and diagnostics.
 // loadRecording(recordingId, principal) must be a synchronous, owner-scoped lookup.
-function createBrokerSkills({ registry, loadRecording, maxDurationMs } = {}) {
+function createBrokerSkills({ registry, loadRecording, loadNote, maxDurationMs } = {}) {
   const reg = registry || defaultRegistry();
   return {
     resolve({ skillId, skillVersion, inputs, principal } = {}) {
@@ -233,6 +238,7 @@ function createBrokerSkills({ registry, loadRecording, maxDurationMs } = {}) {
       try {
         const compiled = resolved.def.compile(resolved.inputs, {
           loadRecording: (recordingId) => (typeof loadRecording === 'function' ? loadRecording(recordingId, principal) : null),
+          ...(typeof loadNote === 'function' ? { loadNote: (noteId) => loadNote(noteId, principal) } : {}),
           maxDurationMs,
         });
         return { plan: compiled.plan, inputs: compiled.inputs, argumentKeys: Object.keys(resolved.inputs || {}), skillDigest: resolved.digest, planDigest: compiled.planDigest,

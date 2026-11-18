@@ -43,6 +43,34 @@ function loc(selector) {
   return `page.locator(${quote(selector)})`;
 }
 
+// A recorded semantic locator (test id, or role + accessible name) is the better
+// handle for a generated test: it survives markup changes and is strict, so two
+// matches fail the test instead of silently using the first. Only the exact
+// closed shape is honoured; anything else falls back to the CSS selector.
+// Braiwser's role names are ARIA role names, which is what getByRole takes;
+// `canvas` is the one probe role that is not an ARIA role.
+function semanticLoc(step) {
+  const l = step && step.locator;
+  if (!l || typeof l !== 'object' || Array.isArray(l)) return null;
+  const ok = (v) => typeof v === 'string' && v.length >= 1 && v.length <= 200;
+  if (l.by === 'testId' && ok(l.value) && Object.keys(l).length === 2) {
+    // Braiwser reads a test id from any of four attributes; getByTestId reads one.
+    const v = l.value.replace(/[\\"]/g, '\\$&').replace(/[\n\r\f]/g, ' ');
+    return loc(['data-testid', 'data-test', 'data-cy', 'data-qa'].map((a) => `[${a}="${v}"]`).join(', '));
+  }
+  if (l.by === 'label' && ok(l.value) && Object.keys(l).length === 2) return `page.getByLabel(${quote(l.value)}, { exact: true })`;
+  if (l.by === 'role' && ok(l.role) && /^[a-z]{1,40}$/.test(l.role) && l.role !== 'canvas' && ok(l.name) && Object.keys(l).length === 3) {
+    return `page.getByRole(${quote(l.role)}, { name: ${quote(l.name)}, exact: true })`;
+  }
+  return null;
+}
+
+// The handle an ACTION step uses: the semantic locator when recorded, else the
+// first match of the CSS selector (the recorder's selector is positional).
+function actionTarget(step) {
+  return semanticLoc(step) || `${loc(checkSelector(step.selector))}.first()`;
+}
+
 function testName(recording) {
   const n = recording && typeof recording.name === 'string' ? recording.name.trim() : '';
   return n.slice(0, 200) || 'recorded journey';
@@ -140,9 +168,8 @@ function assertLines(step) {
 }
 
 function inputLines(step, ctx) {
-  const selector = checkSelector(step.selector);
   const control = controlOfStep(step);
-  const target = `${loc(selector)}.first()`;
+  const target = actionTarget(step);
   switch (control) {
     case 'secret': {
       const env = secretEnvName(step, ctx.secretNames);
@@ -189,13 +216,13 @@ function stepLines(step, ctx) {
     case NAV:
       return [`  await page.goto(${quote(checkUrl(step.url))});`];
     case 'click':
-      return [`  await ${loc(checkSelector(step.selector))}.first().click();`];
+      return [`  await ${actionTarget(step)}.click();`];
     case 'input':
       return inputLines(step, ctx);
     case 'key': {
       const key = step.key == null || step.key === '' ? 'Enter' : step.key;
       if (typeof key !== 'string' || !KEY_RE.test(key)) bad('unsupported key');
-      return [`  await ${loc(checkSelector(step.selector))}.first().press(${quote(key)});`];
+      return [`  await ${actionTarget(step)}.press(${quote(key)});`];
     }
     case 'scroll':
       return [`  await page.evaluate(() => window.scrollTo(${finiteNumber(step.x, 'scroll x')}, ${finiteNumber(step.y, 'scroll y')}));`];

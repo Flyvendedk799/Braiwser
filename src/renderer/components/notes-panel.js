@@ -331,7 +331,14 @@ export function createNotesPanel(config, actions) {
     let textNode;
     if (editingId === a.id) {
       const ta = h('textarea', { class: 'note-edit', value: a.note });
+      // Settles once. Leaving edit mode re-renders the list, which removes this
+      // textarea while it has focus; that fires `blur`, and without the guard the
+      // blur handler saved the text Escape had just abandoned (and saved a
+      // Ctrl+Enter edit twice).
+      let settled = false;
       const finish = (save) => {
+        if (settled) return;
+        settled = true;
         editingId = null;
         if (save) guarded(() => actions.editNote(a, ta.value.trim()), 'Save note')();
         else render();

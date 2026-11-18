@@ -51,7 +51,7 @@ function createBroker(options = {}) {
   const emit = (name, payload) => { try { events.emit(name, payload); } catch { /* listener errors never break the broker */ } };
 
   // ---- disabled broker: every call is UNAVAILABLE, nothing touches disk -------------
-  const methodNames = ['openSession', 'closeSession', 'observe', 'act', 'startRun', 'getRun', 'cancelRun', 'retryRun', 'handoff', 'resume', 'approve', 'listApprovals', 'listRuns', 'getManifest', 'readResource', 'requestHandoff', 'pauseRun', 'handoffStatus', 'resumeRun', 'startTask', 'readPage', 'visit'];
+  const methodNames = ['openSession', 'closeSession', 'observe', 'act', 'startRun', 'getRun', 'cancelRun', 'retryRun', 'handoff', 'resume', 'approve', 'listApprovals', 'listRuns', 'getManifest', 'readResource', 'requestHandoff', 'pauseRun', 'handoffStatus', 'resumeRun', 'startTask', 'readPage', 'visit', 'reviewNotes', 'reviewNote', 'reviewJourneys', 'reviewClaim', 'reviewPropose', 'reviewReport', 'listPages'];
   function bindFacade(broker, principal) {
     const out = {};
     for (const m of methodNames) out[m] = (input, extra) => broker[m](input, { ...(extra || {}), principal });
@@ -515,6 +515,116 @@ function createBroker(options = {}) {
     });
   }
 
+  // The pages of an owned session: the first page plus every popup or new tab the page
+  // opened, each already registered under the same grant. Read-only; a page id from here
+  // is used with the ordinary tools, which re-check ownership and destination every time.
+  async function listPages(input, ctx) {
+    return guard(async () => {
+      const principal = principalOf(ctx);
+      const v = C.validateSessionPage({ sessionId: input && input.sessionId, pageId: 'pg_any' });
+      const session = ownedSession(v.sessionId, principal);
+      const pages = [...session.pages.values()].slice(0, 50).map((rec) => {
+        let url = '';
+        try { url = String((rec.driverPage.url && rec.driverPage.url()) || rec.currentUrl || ''); } catch { url = String(rec.currentUrl || ''); }
+        return { pageId: rec.pageId, url: redactUrl(url) || '', openerPageId: rec.opener || null, documentEpoch: rec.documentEpoch,
+          blocked: !!rec.violation };
+      });
+      return { sessionId: session.sessionId, pages };
+    });
+  }
+
+  // ======================================================================
+  // review: notes and journeys an agent may read, and what it may report
+  // ======================================================================
+  // The source (options.review) owns the data and the rules for what changes; the
+  // broker owns WHO may ask and computes every verdict itself from a run it graded.
+  // Scopes: `review:read` to list and read, `review:write` to claim, propose and
+  // report. They are separate from browser tool classes: reading a review grants
+  // no browsing, and browsing grants no access to the review.
+  const review = options.review || null;
+  function reviewFor(ctx, write) {
+    const principal = principalOf(ctx);
+    if (!review) throw dtoError('UNAVAILABLE', 'no review is available in this runtime', { detail: 'NO_REVIEW_SOURCE' });
+    if (principal.kind !== 'ui') {
+      const scopes = principal.scopes;
+      const ok = write ? scopes.includes('review:write') : scopes.includes('review:read') || scopes.includes('review:write');
+      if (!ok) throw dtoError('DENIED', 'this client was not given access to the review', { detail: 'NO_REVIEW_SCOPE' });
+    }
+    return principal;
+  }
+  const reviewId = (value) => {
+    if (typeof value !== 'string' || !/^[A-Za-z0-9_.:-]{1,160}$/.test(value)) throw dtoError('UNSUPPORTED', 'invalid note id', { detail: 'BAD_NOTE_ID' });
+    return value;
+  };
+  const noteOrDenied = (note) => {
+    // Same answer for unknown and unreadable: an id is not authority.
+    if (!note) throw dtoError('DENIED', 'unknown note', { detail: 'UNKNOWN_NOTE' });
+    return note;
+  };
+  const reviewCall = (fn) => {
+    try { return fn(); } catch (e) {
+      if (e && e.publicError) throw e;
+      if (e && e.code === 'NOTE_NOT_FOUND') throw dtoError('DENIED', 'unknown note', { detail: 'UNKNOWN_NOTE' });
+      if (e && e.code === 'REVIEW_READ_ONLY') throw dtoError('UNSUPPORTED', 'this review is read-only here', { detail: 'REVIEW_READ_ONLY' });
+      throw e;
+    }
+  };
+  async function reviewNotes(input, ctx) {
+    return guard(async () => {
+      reviewFor(ctx, false);
+      const i = input || {};
+      return reviewCall(() => review.listNotes({ status: i.status, sessionId: i.sessionId, limit: i.limit }));
+    });
+  }
+  async function reviewNote(input, ctx) {
+    return guard(async () => {
+      reviewFor(ctx, false);
+      return noteOrDenied(reviewCall(() => review.getNote(reviewId(input && input.noteId))));
+    });
+  }
+  async function reviewJourneys(_input, ctx) {
+    return guard(async () => {
+      reviewFor(ctx, false);
+      return { journeys: reviewCall(() => review.listJourneys()) };
+    });
+  }
+  async function reviewClaim(input, ctx) {
+    return guard(async () => {
+      const principal = reviewFor(ctx, true);
+      return noteOrDenied(reviewCall(() => review.claim(reviewId(input && input.noteId), principal.id)));
+    });
+  }
+  async function reviewPropose(input, ctx) {
+    return guard(async () => {
+      const principal = reviewFor(ctx, true);
+      const message = input && typeof input.message === 'string' ? input.message.slice(0, 1000) : '';
+      if (!message.trim()) throw dtoError('UNSUPPORTED', 'a proposal needs a message', { detail: 'NO_MESSAGE' });
+      return noteOrDenied(reviewCall(() => review.propose(reviewId(input.noteId), { message, who: principal.id })));
+    });
+  }
+  // Attach a run's proof to a note. The verdict is read from the stored run of the
+  // verify-notes skill; the client supplies only the two ids.
+  async function reviewReport(input, ctx) {
+    return guard(async () => {
+      const principal = reviewFor(ctx, true);
+      const noteId = reviewId(input && input.noteId);
+      const run = ownedRun(reviewId(input && input.runId), principal);
+      const note = noteOrDenied(reviewCall(() => review.loadNote(noteId)));
+      if (run.skillId !== 'verify-notes') throw dtoError('UNSUPPORTED', 'only a verify-notes run can prove a note', { detail: 'NOT_A_NOTE_RUN' });
+      if (['queued', 'running', 'needsApproval', 'needsHuman'].includes(run.state)) throw dtoError('UNSUPPORTED', 'the run has not finished', { detail: 'RUN_NOT_FINISHED' });
+      const verifyNotes = require('../automation/workflows/verify-notes');
+      const noteChecks = require('../../../shared/note-checks');
+      const planned = verifyNotes.plannedFor(noteId, run.plan);
+      if (!planned.length) throw dtoError('DENIED', 'that run did not check this note', { detail: 'NOTE_NOT_IN_RUN' });
+      const graded = verifyNotes.noteVerdict(noteId, [...run.results.values()], run.state);
+      // In the plan but never reached (an earlier note failed first): nothing is known about it.
+      const verdict = graded ? noteChecks.verdictFor(note, graded.graded) : 'unknown';
+      const updated = reviewCall(() => review.recordVerification(noteId, { verdict, runId: run.runId, runState: run.state, by: principal.id, checks: planned.length }));
+      emit('review', { type: 'verification', noteId, runId: run.runId, verdict, principalId: principal.id });
+      return { note: updated, verdict, runId: run.runId, runState: run.state, checksPlanned: planned.length, checksRun: graded ? graded.checks.length : 0 };
+    });
+  }
+
   // ======================================================================
   // sessions
   // ======================================================================
@@ -541,7 +651,7 @@ function createBroker(options = {}) {
         evidence.registerRun(adhocRunId, { ownerId: principal.id, sessionId, reviewSessionId: v.reviewSessionId || null, kind: 'adhoc' });
         ledger.sessionOpened({ sessionId, principalId: principal.id, driver: v.driver, mode: v.mode, reviewSessionId: v.reviewSessionId });
         const driverSession = await driver.open({ mode: v.mode, viewport: v.viewport, locale: v.locale, timezoneId: v.timezoneId, profile: v.profile,
-          onPageEvent: sessionPageEventHandler(() => session), requestFilter: caps.requestInterception ? policy.requestFilter(grant) : undefined });
+          onPageEvent: sessionPageEventHandler(() => session), requestFilter: caps.requestInterception ? policy.requestFilter(grant) : undefined, enforceRedirectHops: true });
         const publicCaps = { ...caps, liveModeSwitch: false, requestInterception: caps.requestInterception === true, policyEnforcement: caps.requestInterception ? 'request-level' : 'navigation-only', schemaVersion: C.SCHEMA_VERSION };
         session = new BrowserSession({ sessionId, ownerId: principal.id, driverName: v.driver, mode: v.mode, grant, reviewSessionId: v.reviewSessionId || null, capabilities: publicCaps, driverSession, adhocRunId });
         sessions.set(sessionId, session);
@@ -1103,6 +1213,7 @@ function createBroker(options = {}) {
     enabled: true, events, limits,
     openSession, closeSession, observe, act, startRun, getRun, cancelRun, retryRun, handoff, resume, approve, listApprovals, listRuns, getManifest, readResource,
     requestHandoff, pauseRun, handoffStatus, resumeRun, startTask, attachViewer, readPage, visit,
+    reviewNotes, reviewNote, reviewJourneys, reviewClaim, reviewPropose, reviewReport, listPages,
     forPrincipal: (principal) => bindFacade(broker, C.validatePrincipal(principal)),
     close, stats: () => ({ enabled: true, sessions: sessions.size, runs: runStore.list().length, ledger: ledger.stats(), evidence: evidence.usage() }),
     // internals exposed for tests / the app shell only

@@ -18,6 +18,9 @@ import { personaCopy, chromeForPersona, isWelcomeUrl, isPlaygroundUrl } from './
 import { createCoachmarks } from './components/coachmarks.js';
 import { createVerifyPanel } from './components/verify-panel.js';
 import { openHandoffModal } from './components/handoff-modal.js';
+import { createStorageHealthCheck } from './components/storage-health-modal.js';
+import { showShortcuts as openShortcutSheet, showAbout as openAbout } from './components/help-modals.js';
+import { showImportReport, showPlaywrightExportNotes } from './components/export-reports.js';
 import { resolveAddress, localTarget, matchesLocalTarget } from './lib/address.js';
 import { mergeFilteredOrder } from './lib/note-order.js';
 import { createOperationContexts, createGeneration } from './controllers/operation-context.js';
@@ -26,7 +29,6 @@ import { runReplay } from './controllers/replay-engine.js';
 import { describeReplay, buildReplayReport, auditOutcome } from './controllers/run-report.js';
 import * as recCtl from './controllers/recording-controller.js';
 import { createAuditRunner, sameAuditedPage } from './controllers/audit-controller.js';
-import { describeStorageHealth, describeRecovery } from './controllers/storage-health.js';
 import { describeStructureResult, describeDroppedHistory } from './controllers/guest-feedback.js';
 import { handoffWhere } from './controllers/handoff-ui.js';
 import { reportContextFromSource, currentContextFromTab } from './controllers/audit-ui.js';
@@ -34,6 +36,7 @@ import { createVerifyRunner } from './controllers/verify-controller.js';
 import { createSessionController } from './controllers/session-controller.js';
 import { captureScreenshot } from './controllers/screenshot-capture.js';
 import { requestFromGuest } from './controllers/guest-request.js';
+import { createLocator } from './controllers/locate.js';
 import { createTabDerived, resetForNewDocument, dropStaleAudit } from './controllers/tab-state.js';
 import { runBulk, describeBulk, toPanelResult } from './controllers/bulk.js';
 import { createAwakeHolder } from './controllers/keep-awake.js';
@@ -153,7 +156,7 @@ async function boot() {
   await refreshRecordings();
   await refreshHistory();
   await refreshBookmarks();
-  checkStorageHealth(); // fire and forget: never blocks the app from opening
+  storageHealth.check(); // fire and forget: never blocks the app from opening
   // Restore previously-open tabs (skipped under e2e for a deterministic boot).
   const saved = !caos.e2e && Array.isArray(state.settings.openTabs) ? state.settings.openTabs : null;
   if (saved && saved.length) {
@@ -196,6 +199,7 @@ async function boot() {
       copyExport, verifySession, openSamplePage, exportClientPack, syncPersonaChrome,
       openOnboarding, coachmarks: () => coachmarks,
       setLeftView, setSidebarCollapsed,
+      locateAnnotation, editRecording,
     };
     import('./lib/e2e.js')
       .then((m) => m.run(internals))
@@ -204,65 +208,9 @@ async function boot() {
 }
 
 // ============================================================ STORAGE HEALTH
-// A data file that is damaged or unreadable is held read-only (never overwritten)
-// by the main process, so edits to it would not be saved. Say so up front and
-// let the user choose how to continue. Dismissable, not hidden: it re-checks on
-// the next launch.
-let healthModal = null;
-async function checkStorageHealth() {
-  let health;
-  try { health = await caos.store.status(); } catch (e) { console.warn('[store] status failed: ' + ((e && e.message) || e)); return; }
-  const view = describeStorageHealth(health);
-  if (!view.damaged) {
-    if (view.maintenanceErrors.length) console.warn('[store] maintenance: ' + view.maintenanceErrors.join('; '));
-    return;
-  }
-  openStorageHealthModal(view);
-}
-
-function openStorageHealthModal(view) {
-  if (healthModal) { try { healthModal.close(); } catch (_e) { /* ignore */ } healthModal = null; }
-  const body = h('div', { class: 'storage-health' }, [
-    h('p', { text: 'Some of your saved data could not be loaded safely. Braiwser has not changed those files, and edits to them are not being saved until you choose how to continue.' }),
-    ...view.items.map((it) => {
-      const row = h('div', { class: 'storage-health-item', style: { margin: '10px 0', padding: '10px', border: '1px solid var(--border, #444)', borderRadius: '8px' } }, [
-        h('div', { style: { fontWeight: '600' }, text: it.file + ' ' + it.title }),
-        it.error ? h('div', { class: 'field-hint', text: it.error }) : null,
-        h('div', { class: 'field-hint', text: it.advice }),
-      ]);
-      const btns = h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' } });
-      const run = async (mode, confirmText) => {
-        if (confirmText && !(await confirmDialog({ title: 'Start with an empty file?', message: confirmText, confirmLabel: 'Start fresh', danger: true }))) return;
-        let outcome;
-        try { outcome = describeRecovery(it, mode, await caos.store.recover(it.name, mode)); }
-        catch (e) { outcome = { ok: false, text: 'Recovery failed: ' + ((e && e.message) || e) }; }
-        toast(outcome.text, outcome.ok ? 'success' : 'error', 6000);
-        await reloadAfterRecovery();
-        const left = describeStorageHealth(await caos.store.status().catch(() => null));
-        if (left.damaged) openStorageHealthModal(left); else if (healthModal) { healthModal.close(); healthModal = null; }
-      };
-      if (it.canRestoreBackup) btns.appendChild(h('button', { class: 'btn btn-sm btn-primary', text: 'Restore from backup', on: { click: () => run('backup') } }));
-      if (it.canStartFresh) {
-        btns.appendChild(h('button', {
-          class: 'btn btn-sm btn-danger',
-          text: 'Start fresh',
-          title: 'The damaged file is renamed and kept, not deleted',
-          on: { click: () => run('empty', `This replaces ${it.file} with an empty file. The damaged copy is renamed and kept next to it, so it can still be recovered by hand.`) },
-        }));
-      }
-      if (btns.childNodes.length) row.appendChild(btns);
-      return row;
-    }),
-    view.maintenanceErrors.length ? h('div', { class: 'field-hint', text: 'Also: ' + view.maintenanceErrors.join('; ') }) : null,
-  ]);
-  healthModal = modal({
-    title: 'Saved data needs attention',
-    width: 520,
-    body,
-    actions: [{ label: 'Dismiss for now', kind: 'ghost' }],
-    onClose: () => { healthModal = null; },
-  });
-}
+// The check and its dialog live in components/storage-health-modal.js; after a
+// recovery the shell re-reads what it shows.
+const storageHealth = createStorageHealthCheck({ api: caos, reload: () => reloadAfterRecovery() });
 
 async function reloadAfterRecovery() {
   try {
@@ -446,7 +394,10 @@ function buildShell() {
     ]),
   ]);
 
-  verifyPanel = createVerifyPanel({ run: () => verifySession() });
+  verifyPanel = createVerifyPanel({
+    run: () => verifySession(),
+    locateNote: (id) => { const a = state.annotations.find((x) => x.id === id); if (a) { switchTab('notes'); locateAnnotation(a); } },
+  });
   [notesPanel, stylePanel, auditPanel, aiPanel, verifyPanel].forEach((p, i) => {
     const id = ['notes', 'style', 'audit', 'ai', 'verify'][i];
     if (!p || !p.root) return;
@@ -1513,40 +1464,29 @@ function navigateTabAndWait(ctx, url, timeoutMs) {
   return createReplayDriver({ ctx, getUrl: () => (tab && tab.url) || '' }).navigate(url, { timeoutMs: timeoutMs || 8000 });
 }
 
-// Locate an annotation's element — navigating to its page first if the active
-// tab is showing a different URL — then highlight it and report if not found.
-async function locateAnnotation(a) {
-  if (!a || !a.target) return;
-  const ctx = ops.capture('locate');
-  if (!ctx.wv) return;
-  if (a.url && a.url !== ctx.url) {
-    const nav = await navigateTabAndWait(ctx, a.url);
-    if (nav.outcome !== 'ready') { toast('Could not open that note’s page', 'warn'); return; }
-    await sleep(150);
-  }
-  if (ops.staleReason(ctx)) return; // the tab went away while navigating
-  const ok = await highlightAndAck(ctx.wv, a.target);
-  if (!ok) toast('Could not locate that element on the page', 'warn');
-}
-
-// Highlight an arbitrary target descriptor (used by audit findings, which are
-// not annotations but carry the same anchor shape). Audit findings are only
-// located on the page they were found on.
-async function locateTarget(target, { audit = false } = {}) {
-  if (!target) { toast('This finding has no element to locate', 'warn'); return; }
-  const ctx = ops.capture('locate');
-  if (!ctx.wv) return;
-  if (audit) {
+// "Locate on page" (controllers/locate.js): highlight a note's element where it
+// lives — here, in another open tab, or after opening its page — and say why
+// when that is not possible.
+const locator = createLocator({
+  ops,
+  getTabs: () => state.tabs.map((t) => ({ id: t.id, url: t.url })),
+  setActiveTab: (id) => setActiveTab(id),
+  navigate: (ctx, url) => navigateTabAndWait(ctx, url),
+  highlight: (webview, target) => highlightAndAck(webview, target),
+  // Navigating a tab out from under its own replay would wreck the run.
+  busyReason: (tabId) => (state.replaying && replayRun && replayRun.ctx.tabId === tabId
+    ? 'That note is on another page — finish or cancel the replay to open it'
+    : null),
+  auditIsCurrent: (ctx) => {
     const tab = tabById(ctx.tabId);
     const a = tab && tab.derived.audit;
-    if (!a || !sameAuditedPage(a.source, { tabId: ctx.tabId, url: ctx.url })) {
-      toast('These findings belong to a different page — run the audit again', 'warn');
-      return;
-    }
-  }
-  const ok = await highlightAndAck(ctx.wv, target);
-  if (!ok) toast('Could not locate that element on the page', 'warn');
-}
+    return !!a && sameAuditedPage(a.source, { tabId: ctx.tabId, url: ctx.url });
+  },
+  toast,
+  sleep: (ms) => sleep(ms),
+});
+const locateAnnotation = (a) => locator.locateAnnotation(a);
+const locateTarget = (target, opts) => locator.locateTarget(target, opts);
 
 async function highlightAndAck(webview, target) {
   const reply = await requestFromGuest(webview, {
@@ -2078,7 +2018,7 @@ function onAssertPick(picked) {
     toast('Start recording first, then add assertions', 'warn');
     return;
   }
-  openAssertEditor({ selector: picked && picked.selector, sampleText: picked && picked.text }, (step) => {
+  openAssertEditor({ selector: picked && picked.selector, sampleText: picked && picked.text, locator: picked && picked.locator }, (step) => {
     state.recordingBuffer.steps.push(step);
     toast(`Assertion added — ${step.kind}`, 'success');
   });
@@ -2120,14 +2060,19 @@ function openAssertEditor(prefill, onSave) {
           const k = kinds.find((x) => x.id === kindId) || {};
           if (k.selector && !selInput.value.trim()) { toast('A selector is required', 'warn'); return true; }
           if (k.expected && !expInput.value.trim()) { toast('An expected value is required', 'warn'); return true; }
-          onSave({
+          const selector = k.selector ? selInput.value.trim() : undefined;
+          const step = {
             type: 'assert',
             kind: kindId,
-            selector: k.selector ? selInput.value.trim() : undefined,
+            selector,
             op: k.ops && k.ops.length ? opSel.value : undefined,
             expected: k.expected ? expInput.value.trim() : undefined,
             ts: Date.now(),
-          });
+          };
+          // The picked element's durable name travels with the step only while the
+          // selector still points at that element; an edited selector drops it.
+          if (prefill && prefill.locator && selector && selector === prefill.selector) step.locator = prefill.locator;
+          onSave(step);
         },
       },
     ],
@@ -2368,38 +2313,6 @@ async function importBundleText(text) {
   }
 }
 
-function noteList(items) {
-  return h('ul', {}, items.map((t) => h('li', { text: t })));
-}
-
-// What a bundle import dropped or altered (import is validated, never silent).
-function showImportReport(res) {
-  const dropped = (res.dropped || []).map((d) => `${d.type} #${(d.index || 0) + 1}: ${d.reason}`);
-  if ((res.droppedCount || 0) > dropped.length) dropped.push(`…and ${res.droppedCount - dropped.length} more`);
-  const parts = [];
-  if (dropped.length) parts.push(h('h4', { text: 'Not imported' }), noteList(dropped));
-  if (res.warnings && res.warnings.length) parts.push(h('h4', { text: 'Changed on import' }), noteList(res.warnings));
-  modal({ title: 'Import was partial', width: 520, body: h('div', {}, parts), actions: [{ label: 'Close', kind: 'primary' }] });
-}
-
-// Playwright export: say which steps could not be exported and that secrets
-// are supplied at runtime, never written into the file.
-function showPlaywrightExportNotes(out) {
-  const skipped = (out && out.skipped) || [];
-  const secrets = (out && out.secrets) || [];
-  if (!skipped.length && !secrets.length) return;
-  const parts = [];
-  if (skipped.length) {
-    parts.push(h('h4', { text: `${skipped.length} step${skipped.length === 1 ? '' : 's'} not exported — the test fails at each` }),
-      noteList(skipped.slice(0, 12).map((s2) => (s2.index < 0 ? 'Start URL' : `Step ${s2.index + 1}${s2.type ? ' (' + s2.type + ')' : ''}`) + ': ' + s2.reason)));
-  }
-  if (secrets.length) {
-    parts.push(h('h4', { text: 'Secrets are not in the file' }),
-      h('p', { class: 'field-hint', text: 'Set these environment variables before running the test:' }), noteList(secrets));
-  }
-  modal({ title: 'Playwright export notes', width: 520, body: h('div', {}, parts), actions: [{ label: 'Close', kind: 'primary' }] });
-}
-
 // ============================================================ RECORDING EXPORT
 async function exportRecordingAs(format, rec) {
   try {
@@ -2415,46 +2328,9 @@ async function exportRecordingAs(format, rec) {
 }
 
 // ============================================================ HELP
-function keyLabel(combo) {
-  const mac = (state.config && state.config.platform) === 'darwin';
-  return String(combo)
-    .replace(/Mod/g, mac ? '\u2318' : 'Ctrl')
-    .replace(/Alt/g, mac ? '\u2325' : 'Alt')
-    .replace(/Shift/g, mac ? '\u21e7' : 'Shift')
-    .split('+')
-    .map((s2) => s2.trim())
-    .filter(Boolean);
-}
-
-function showShortcuts() {
-  const body = h('div', {});
-  for (const group of (state.config && state.config.shortcuts) || []) {
-    const rows = group.items.map(([label, combo]) =>
-      h('div', { class: 'shortcut-row' }, [
-        h('span', { text: label }),
-        h('span', { class: 'shortcut-keys' }, keyLabel(combo).map((k) => h('kbd', { text: k }))),
-      ])
-    );
-    body.appendChild(h('div', { class: 'shortcut-group' }, [h('h4', { text: group.group }), ...rows]));
-  }
-  modal({ title: 'Keyboard shortcuts', width: 520, body, actions: [{ label: 'Close', kind: 'primary' }] });
-}
-
-function showAbout() {
-  const version = (state.config && state.config.appVersion) || '';
-  const body = h('div', {}, [
-    h('div', { class: 'about-hero' }, [
-      h('div', { class: 'about-mark', html: icon('inspect', 24) }),
-      h('div', {}, [
-        h('div', { class: 'about-name', text: 'Braiwser' }),
-        h('div', { class: 'about-version', text: 'v' + version }),
-      ]),
-    ]),
-    h('p', { class: 'about-copy', text: 'An annotation-first inspector browser for reviewing web UIs and handing precise change requests to a coding agent. Open any project or URL, click elements to capture them, audit accessibility, record journeys as tests, and export the whole review as Markdown, an agent prompt, or a Playwright spec.' }),
-    h('p', { class: 'about-copy', text: 'Everything — projects, notes, journeys, API keys — stays on this machine. Nothing is uploaded unless you run an AI task with your own key.' }),
-  ]);
-  modal({ title: 'About', width: 480, body, actions: [{ label: 'Close', kind: 'primary' }] });
-}
+// The dialogs themselves live in components/help-modals.js.
+function showShortcuts() { openShortcutSheet(state.config); }
+function showAbout() { openAbout(state.config); }
 
 // ============================================================ SCREENSHOT
 function onScreenshot(e) {
@@ -2890,11 +2766,38 @@ const verifyRunner = createVerifyRunner({
   captureShot: (ctx) => captureViewportShot(ctx),
   runAudit: async (ctx) => (await runAuditFor(ctx)).outcome,
   replay: (ctx, rec) => replayRecording(rec, { ctx }),
+  checkNotes: (ctx, annotations) => checkNotesOnPage(ctx, annotations),
   save: (sessionId, payload) => caos.review.verifySave(sessionId, payload),
   showRun: (run) => { if (verifyPanel) verifyPanel.setRun(run); },
   currentUrlOf: (ctx) => { const t = tabById(ctx.tabId); return (t && t.url) || ctx.url; },
   toast: (m, k) => toast(m, k),
 });
+
+// Ask the guest to grade the notes that belong to the page it is showing. Notes
+// of other pages are reported as not checked, never as fixed.
+async function checkNotesOnPage(ctx, annotations) {
+  const here = String(ctx.url || '').split('#')[0];
+  const onPage = [];
+  const elsewhere = [];
+  for (const a of annotations) {
+    if (String(a.url || '').split('#')[0] === here) onPage.push({ id: a.id, kind: a.kind, action: a.action, status: a.status, target: a.target, edit: a.edit });
+    else elsewhere.push(a.id);
+  }
+  const requestId = 'nc-' + ctx.runId;
+  const reply = onPage.length
+    ? await requestFromGuest(ctx.wv, {
+      channel: 'caos:check-notes',
+      payload: { requestId, notes: onPage },
+      replyChannel: 'caos:note-checks',
+      accept: (r) => !!r && r.requestId === requestId,
+      timeoutMs: 8000,
+      fallback: null,
+    })
+    : { items: [], previewActive: false };
+  if (!reply) return { status: 'timedOut', url: here, items: [], otherPages: elsewhere.length };
+  if (reply.error) return { status: 'error', error: reply.error, url: here, items: [], otherPages: elsewhere.length };
+  return { status: 'completed', url: here, previewActive: !!reply.previewActive, items: reply.items || [], otherPages: elsewhere.length };
+}
 
 async function verifySession() {
   if (!state.currentSession) { toast('Open or start a session first', 'warn'); return null; }

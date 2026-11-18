@@ -110,6 +110,19 @@ Switch the guest viewport between **Mobile / Mobile L / Tablet / Laptop / Deskto
 every note records the viewport it was taken at — so a responsive bug reaches the
 agent with the width needed to reproduce it.
 
+### Let an agent prove the fix
+
+Notes made in Edit or Rearrange mode state the change exactly, so they can be checked. **Verify** grades every such
+note on the page (fixed, not fixed, regressed, could not check, needs a person). With the opt-in agent runtime a coding
+agent can read the notes, fix the source, prove each one in a supervised browser run and attach that proof; a note
+resolves only on a passing run. One command gives an agent a browser limited to the sites you name:
+
+```bash
+npx -y github:Flyvendedk799/Braiwser braiwser mcp --origin http://localhost:3000 --review ./review
+```
+
+See [docs/AGENT_BROWSER.md](docs/AGENT_BROWSER.md) for what is verified and what is not.
+
 ### Record, replay, test
 
 Record a real user journey (clicks, inputs, keys, scrolls, navigations), then replay

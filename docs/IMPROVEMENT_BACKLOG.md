@@ -79,7 +79,8 @@ Files: `src/webview/anchor.js`
 
 _e2e:_ Fully isolated to anchor.js (no other batch touches it). The e2e fixture has no test hooks, so the id fast-path still yields #cta/#hero and all 51 checks remain green. Optional new check: add a [data-testid] element to __e2e/fixture.html and assert cssPath returns the [data-testid=...] selector — only if you want positive coverage of the new path (this would also touch fixture.html + e2e.js, overlapping B10).
 
-### [~] B8 (partial: console-capture + cross-page locate-ack deferred) - Goal: agent-handoff features (copy/persist/console/suggest-fix/locate/ordering)  `P1` (risk: medium)
+### [x] B8 - Goal: agent-handoff features (copy/persist/console/suggest-fix/locate/ordering)  `P1` (risk: medium)
+_Status:_ complete. The two items once marked deferred (console capture, cross-page locate with ack) had landed; the follow-up pass below closed what they left open (redaction and main-side bounding of the capture, cross-tab locate, explicit failure messages).
 Files: `src/renderer/app.js`, `src/renderer/components/notes-panel.js`, `src/renderer/components/ai-panel.js`, `src/renderer/components/inspector-panel.js`, `src/webview/inspector.js`, `src/main/services/export/prompt.js`, `src/main/services/export/markdown.js`, `src/main/store/repositories.js`
 
 - copy-all-as-prompt: add a footer 'Copy prompt' button + copyExport(format) helper that copies result.content (the string) to clipboard with toasts. Renderer-only.
@@ -105,7 +106,8 @@ Files: `src/renderer/styles/app.css`, `src/renderer/components/sidebar.js`, `src
 
 _e2e:_ The dedup refactors are the riskiest for the harness: golden export/prompt text and screenshot compositing are likely asserted. Preserve exact output strings/limits and keep compositeAnnotations' positional contract (only add an optional {colors} field) so e2e.js:228 (no-colors caller) stays green. div-keyboard-ops and aria additions must NOT change any class/data-attr the harness selects on — keep selectors stable. Re-run e2e (51). New optional checks: a11y attribute presence (role/tabindex/aria-label) on a sample row; modal focus-trap (Tab wraps). NOTE markdown.js/prompt.js also touched by B8 (ordering + console section) — if co-landing, do the dedup extraction first, then layer B8's sort/console onto the deduped functions to avoid double-rewrites. inspector.js shared with B2/B4.
 
-### [ ] B10 - E2E coverage expansion (net-new harness checks)  `P2` (risk: low)
+### [x] B10 - E2E coverage expansion (net-new harness checks)  `P2` (risk: low)
+_Status:_ complete. Every finding has checks; the follow-up pass below replaced the data-layer-only coverage with checks that drive the real panel and dialogs. Two things remain uncovered end to end and are listed there.
 Files: `src/renderer/lib/e2e.js`, `src/renderer/__e2e/fixture.html`
 
 - no-annotation-mutation-coverage: after section-3 pinCount check, add update(status/priority/note)+re-fetch assertions, then remove + bySession assertion, then set I.state.annotations and refreshPins -> assert 0 pins. Place AFTER section 3 so pinCount===1 still passes against the live annotation.
@@ -736,6 +738,60 @@ In src/renderer/lib/e2e.js, after the section-9b assert block (before the agent-
 - [x] B10 e2e coverage expansion (annotation mutation lifecycle, console capture + export
   surfacing, replay error-path, recording-editor round-trip, reload-restore)
 
-**All 10 batches complete.** e2e grew 51 → **59 checks**, green throughout; clean production
-boot. Out of scope by design: guest *network* capture (console-only), and the rejected
+**All 10 batches complete.** e2e grew 51 → **59 checks** during this pass, green throughout;
+clean production boot. (The suite has kept growing since: see the follow-up below.) Out of scope by design: guest *network* capture (console-only), and the rejected
 scope-creep themes listed above.
+
+## Follow-up pass: B8 remainder and B10, verified against the code
+
+The batch headers above had drifted from the code (B8 read "partial", B10 read open, while
+the progress list said both were done). Each item was re-checked against the source and the
+e2e suite, which runs locally on Linux under Xvfb as a non-root user (see
+`docs/ARCHITECTURE.md`, Testing). Suite size: 354 checks before this pass, **401** after.
+
+Already done when re-checked (no change needed):
+
+- capture-guest-console: bounded per-tab buffer (50 entries, warnings/errors and failed
+  loads), passed to the prompt and markdown exporters, the hand-off file and prompt templates.
+- locate-fails-cross-page: Locate navigates to the note's page, the guest acks
+  (`caos:highlight-ack`), a miss toasts, and off-page notes carry an "other page" chip.
+- no-draw-region-coverage: fully covered (draw mode, trusted drag, region popup, persisted
+  box, locate of a region).
+- no-annotation-mutation-coverage, no-reload-restore-coverage, no-recording-editor-coverage,
+  no-error-path-coverage: each had one check, at the repository layer.
+
+Done in this pass:
+
+- [x] Console capture is redacted and re-bounded in the main process
+  (`redactConsoleLog` in `src/shared/redact.js`, applied in `format/console.js`, the one
+  place the capture becomes text). Before this, a page's `console.error(token)` or a failing
+  request URL with a signed query string went verbatim into the hand-off file.
+- [x] Locate is cross-tab: a note whose page is open in another tab brings that tab forward
+  instead of navigating the current one. A tab that is mid-replay is not navigated. Failures
+  are specific (page would not load, with the reason; page opened but the element is gone).
+  The logic moved to `controllers/locate.js`.
+- [x] B10 through the real UI: note priority / edit / resolve / reopen / delete with
+  confirmation and the pin leaving the page; exact restore after reload; the recording
+  editor dialog (reorder, delete, Cancel, Save, replay of the edited journey); replay with
+  nothing selected, an empty recording, a page that will not load, a second Replay while one
+  runs, and cancel mid-run.
+- [x] Bug found by those checks and fixed: Escape did not abandon an in-place note edit
+  (the removed textarea's `blur` saved it anyway).
+- [x] `app.js` shed three dialogs into `components/` (storage health, help, import/export
+  reports) as pure moves: 2,927 → 2,795 lines.
+
+Still open:
+
+- [ ] Adding an assertion through the editor dialog has no e2e check. The assertion editor
+  was being changed elsewhere during this pass and was left alone; the appended-assert
+  round-trip is covered at the repository layer only.
+- [ ] A replay step or navigation that times out is covered by unit tests
+  (`test/renderer/controllers/replay.test.mjs`), not end to end: the fixture has no page
+  that hangs, and the navigation timeout is a fixed 8 s.
+- [ ] Replaying a recording that was deleted while still selected falls back to the stale
+  in-memory copy (`replayRecording` uses `recordings.get(id) || rec`) and then fails to save
+  the result. Not changed here; it wants a decision (refuse, or deselect on delete).
+- [ ] The console buffer lives in renderer memory per tab and is not persisted with the
+  session (the optional `repositories.js` touch in B8 was never made).
+- [ ] `app.js` (2,795 lines) and `inspector.js` (3,473 lines) are still monoliths.
+  `inspector.js` was not touched in this pass.

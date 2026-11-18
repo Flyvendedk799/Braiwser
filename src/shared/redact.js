@@ -141,7 +141,85 @@ function recordingHasSecrets(rec) {
   return !!rec && redactRecording(rec) !== rec;
 }
 
+// ---- guest console capture ---------------------------------------------------
+// Console messages and load errors captured from the page travel into the agent
+// hand-off, the prompt/markdown exports and prompt templates. A page logs
+// whatever it likes (`console.error('auth failed', token)`, a failing request
+// URL with a signed query string), so every entry passes through here before it
+// is written anywhere. The shape is rebuilt from scratch — only `level`, `kind`
+// and a redacted, length-capped `message` survive — and the list is bounded to
+// the most recent entries, because the caller is the renderer and its payload
+// is not trusted to be small or well-formed.
+//
+// The text redactor lives in browser-redact.js and is required lazily: it is only
+// needed where console output is written (the main process), and recorded-step
+// redaction above stays dependency-free.
+const CONSOLE_MAX_ENTRIES = 50;
+const CONSOLE_MAX_MESSAGE = 500;
+const CONSOLE_KIND = /^[a-z][a-z-]{0,23}$/;
+
+// Same shape browser-redact.js recognises as a URL.
+const URL_IN_TEXT = /\b[a-z][a-z0-9+.-]{1,12}:\/\/[^\s"'<>]+/gi;
+// Stand-in for a URL while the rest of the message is redacted. The brackets are
+// removed from the input first, so a page cannot forge one.
+const HOLD_OPEN = '⟦';
+const HOLD_CLOSE = '⟧';
+const HOLD = /⟦U(\d+)⟧/g;
+
+// The text redactor treats any 32+ character run of [A-Za-z0-9+/_-] holding a
+// letter and a digit as a key. `/` is in that class, so an ordinary script URL
+// (`/src/components/checkout/PaymentStep2.tsx:14:9`) is swallowed whole — and
+// where an error came from is exactly what the agent needs from a console line.
+// URLs are therefore redacted on their own: query values dropped as usual, and
+// each path segment judged separately (a token in a path is still caught).
+function redactConsoleText(raw, max) {
+  const { redactText, redactUrl, REDACTED } = require('./browser-redact');
+  const held = [];
+  // eslint-disable-next-line no-control-regex
+  const input = raw.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f⟦⟧]/g, '');
+  const masked = input.replace(URL_IN_TEXT, (m) => {
+    const url = redactUrl(m);
+    if (url == null) return REDACTED;
+    held.push(url.split('/').map((seg) => redactText(seg)).join('/'));
+    return `${HOLD_OPEN}U${held.length - 1}${HOLD_CLOSE}`;
+  });
+  const out = redactText(masked, masked.length + 64) // no truncation here: it could cut a stand-in in half
+    .replace(HOLD, (_m, i) => held[Number(i)] || '')
+    .replace(/[⟦⟧]/g, '')
+    .replace(/\s*[\r\n]+\s*/g, ' ')
+    .trim();
+  return out.length > max ? out.slice(0, Math.max(0, max - 1)) + '…' : out;
+}
+
+function redactConsoleEntry(entry, { maxMessage = CONSOLE_MAX_MESSAGE } = {}) {
+  if (!entry || typeof entry !== 'object') return null;
+  const raw = typeof entry.message === 'string' ? entry.message : entry.message == null ? '' : String(entry.message);
+  // Cap the input before the regex passes so a multi-megabyte log line is cheap.
+  const message = redactConsoleText(raw.slice(0, maxMessage * 4), maxMessage);
+  if (!message) return null;
+  const out = { message };
+  const level = Number(entry.level);
+  if (Number.isInteger(level) && level >= 0 && level <= 3) out.level = level;
+  if (typeof entry.kind === 'string' && CONSOLE_KIND.test(entry.kind)) out.kind = entry.kind;
+  return out;
+}
+
+// Returns a NEW array of at most `maxEntries` redacted entries (the most recent).
+function redactConsoleLog(entries, { maxEntries = CONSOLE_MAX_ENTRIES, maxMessage = CONSOLE_MAX_MESSAGE } = {}) {
+  if (!Array.isArray(entries)) return [];
+  const out = [];
+  for (const e of entries.slice(-maxEntries)) {
+    const r = redactConsoleEntry(e, { maxMessage });
+    if (r) out.push(r);
+  }
+  return out;
+}
+
 module.exports = {
+  CONSOLE_MAX_ENTRIES,
+  CONSOLE_MAX_MESSAGE,
+  redactConsoleEntry,
+  redactConsoleLog,
   SECRET_PLACEHOLDER,
   isSecretStep,
   redactStep,
