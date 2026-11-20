@@ -109,6 +109,29 @@ real('navigation outcomes: ready / failed / timeout / cancelled, with epoch bump
   assert.equal(again.outcome, 'ready');
 });
 
+test('chat browsing can read and use a page while an image is still loading', async (t) => {
+  if (!avail.ok) { t.skip(avail.reason); return; }
+  const { createPolicy } = require('../../../src/main/services/browser/policy');
+  const { createPlaywrightDriver } = require('../../../src/main/services/browser/drivers/playwright');
+  const policy = createPolicy();
+  const grant = policy.createGrant({ allowedOrigins: [env.origin.origin] }, { kind: 'ui', id: 'owner' });
+  const session = await createPlaywrightDriver({ navigationWaitUntil: 'domcontentloaded', navigationTimeoutMs: 3000 })
+    .open({ enforceRedirectHops: true, requestFilter: policy.requestFilter(grant) });
+  try {
+    const page = session.pages.values().next().value;
+    const ready = await page.navigate(env.url('loading-assets.html'));
+    assert.equal(ready.outcome, 'ready');
+    const button = page._raw.getByRole('button', { name: 'quarterly numbers' });
+    await button.waitFor({ timeout: 3000 });
+    assert.equal(await page._raw.evaluate(() => document.readyState), 'interactive');
+    const snapshot = await page.observe();
+    assert.ok(nodeByName(snapshot, 'quarterly numbers', 'button'));
+    const bounds = await button.boundingBox();
+    await page.humanInput({ kind: 'click', x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 });
+    assert.equal(await page._raw.getByRole('button').innerText(), 'Clicked');
+  } finally { await session.close(); }
+});
+
 real('navigation refuses non-http(s) schemes and embedded credentials', async ({ page }) => {
   for (const bad of ['file:///C:/Windows/win.ini', 'javascript:alert(1)', 'data:text/html,hi', 'chrome://version', 'http://user:pw@127.0.0.1/', '']) {
     await assert.rejects(page.navigate(bad), (e) => e.code === 'DENIED', bad);

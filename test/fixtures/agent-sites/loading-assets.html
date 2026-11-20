@@ -1,0 +1,13 @@
+<!doctype html>
+<title>Loading assets</title>
+<button>Waiting for bundle</button>
+<img src="/hang" alt="">
+<script>
+  const button = document.querySelector('button');
+  fetch('/files/report.txt?signature=' + 'a'.repeat(3000))
+    .then(response => response.text())
+    .then(text => {
+      button.textContent = text.trim();
+      button.onclick = () => { button.textContent = 'Clicked'; };
+    });
+</script>

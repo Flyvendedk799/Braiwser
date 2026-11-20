@@ -213,3 +213,20 @@ test('requestFilter exposes the same decision for request-level drivers', () => 
   assert.equal(f('https://tracker.test/x'), 'block');
   assert.equal(f('http://169.254.169.254/'), 'block');
 });
+
+test('long web asset URLs use the same destination grants at every hop', () => {
+  const policy = mk();
+  const filter = policy.requestFilter(uiGrant(policy, { allowedOrigins: ['https://*'] }));
+  const query = '?bundle=' + 'a'.repeat(3000);
+  for (const redirect of [false, true]) {
+    const asset = { navigation: false, redirect };
+    assert.equal(filter('https://cdn.example.org/bundle.js' + query, asset), 'allow');
+    for (const url of ['http://cdn.example.org/a', 'https://127.0.0.1/a', 'https://user@example.org/a', 'file:///a']) {
+      assert.equal(filter(url + query, asset), 'block');
+    }
+    assert.equal(filter('https://example.org/' + 'a'.repeat(16384), asset), 'block');
+    assert.equal(filter('https://example.org/' + query, { navigation: true, redirect }), 'block');
+  }
+  const scoped = policy.requestFilter(uiGrant(policy));
+  assert.equal(scoped('https://other.example.org/' + query, { navigation: false }), 'block');
+});
